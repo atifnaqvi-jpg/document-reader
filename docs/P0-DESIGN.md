@@ -207,6 +207,14 @@ cascade on bookmarks works. This test also *proves* the bundled feature ships
 FTS5; if it fails at build time, the bundled-feature assumption is wrong and
 must be fixed in P0, not discovered in P1.
 
+**Known limitation found during implementation** — content-hash dedupe is
+content-based, so two *different* files with byte-identical content (e.g. two
+empty `.txt` files) collapse into a single library row pointing at whichever was
+opened last. This matches the §5 rule as written, but it is user-visible. If the
+P1 review finds it surprising, the fix is to dedupe on `(content_hash, path)` for
+distinct paths and keep hash-only matching for detecting moves. Left as-is for
+P0; flagged rather than silently changed.
+
 ---
 
 ## 6. Command Surface (`commands/`) — DECISIONS §4 mapping
