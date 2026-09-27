@@ -1,9 +1,29 @@
 # Document Reader
 
-A simple, local desktop application for reading documents (PDF first, text/Markdown next).
+A local-first personal library reader for desktop. Open, read, and search
+your own documents — nothing leaves your machine.
 
-- 📐 [Architecture design (draft v0.1)](docs/ARCHITECTURE.md) — component diagram, module breakdown, tech stack options, roadmap, open questions.
+- 📐 [Architecture design (draft)](docs/ARCHITECTURE.md) — components, modules, roadmap.
+- ✅ [Frozen decisions (v1.0)](docs/DECISIONS.md) — resolves the architecture open questions. **Read this first.**
+
+## Privacy
+
+Documents are read from your local disk and never transmitted anywhere.
+There is no server, no account, and no telemetry in v1.
+
+## v1 Scope
+
+- **Target:** Windows desktop. macOS/Linux later.
+- **Reads:** PDF, TXT, Markdown.
+- **Includes:** dark mode, full-text search over your library, bookmarks.
+- **Not included:** OCR / scanned PDFs, EPUB, DOCX, annotations, sync.
+
+## Stack
+
+Tauri 2 + Rust backend (native PDFium rendering, SQLite + FTS5) with a
+React + TypeScript frontend.
 
 ## Status
 
-In the architecture design phase. Open decisions are tracked in [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md#7-open-questions-need-your-input) (Q1–Q5).
+Decisions frozen (see `docs/DECISIONS.md`). Next step: scaffold the P0
+app skeleton per `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
