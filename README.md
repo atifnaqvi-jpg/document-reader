@@ -1,9 +1,9 @@
-# POS System
+# Document Reader
 
-Point-of-Sale software — currently in the **architecture design** phase.
+A simple, local desktop application for reading documents (PDF first, text/Markdown next).
 
-- 📐 [Architecture design (draft v0.1)](docs/ARCHITECTURE.md) — system overview, module breakdown, data model, tech stack proposal, open questions.
+- 📐 [Architecture design (draft v0.1)](docs/ARCHITECTURE.md) — component diagram, module breakdown, tech stack options, roadmap, open questions.
 
 ## Status
 
-The architecture draft is under review. Open decisions are tracked in [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md#7-key-decisions--open-questions-adr-style) (Q1–Q4).
+In the architecture design phase. Open decisions are tracked in [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md#7-open-questions-need-your-input) (Q1–Q5).

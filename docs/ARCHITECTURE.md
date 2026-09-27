@@ -1,220 +1,153 @@
-# POS System — Architecture Design (v0.1 Draft)
+# Document Reader — Architecture Design (v0.1 Draft)
 
-> **Status:** Draft for review — not yet finalized.
-> **Purpose:** First-pass architecture to align on scope, structure, and technology before implementation begins.
+> **Status:** Draft for review.
+> **Goal:** A simple, local desktop application to open and read documents. Kept intentionally minimal — no server, no cloud, no accounts.
 
 ---
 
-## 1. Scope & Working Assumptions
-
-No functional requirements were provided yet, so the design below assumes a **general-purpose retail Point-of-Sale system**. Each assumption is flagged and should be confirmed or corrected in the review round.
+## 1. Working Assumptions (to confirm)
 
 | # | Assumption | Confidence |
 |---|-----------|------------|
-| A1 | Multi-tenant SaaS: one deployment serves many merchants (single-tenant deployment is a smaller change later) | To confirm |
-| A2 | Retail focus (barcode scanning, stock) with a path to food-service/restaurant mode later | To confirm |
-| A3 | Cloud-hosted backend; terminals must keep working during internet outages (**offline-first**) | To confirm |
-| A4 | Multi-location support per merchant (stores, warehouses) | To confirm |
-| A5 | Payments via third-party processors (Stripe, Adyen, Square, local PSPs) — we do **not** build card processing ourselves | High |
-| A6 | Targets: up to ~500 merchants, ~5,000 terminals, ~50 orders/merchant/day initially | To confirm |
+| A1 | **Desktop app** for viewing documents stored on the local disk | To confirm |
+| A2 | Formats at launch: **PDF**, plus plain text / Markdown (EPUB optional later) | To confirm |
+| A3 | Single-window viewer: open a file, read it, close it | To confirm |
+| A4 | **English-first UI**; no OCR in v1 (only if scanned-PDF support is required) | To confirm |
+| A5 | Runs on Windows, macOS, and Linux from one codebase | To confirm |
+| A6 | No editing, no annotation, no cloud sync in v1 | To confirm |
 
 ---
 
-## 2. High-Level Architecture
+## 2. Architecture Overview
 
-Modular monolith on the backend (not microservices) with a thin, hardware-facing terminal client. Rationale in §7.
+A single desktop application with a **rendering core** isolated behind an interface. This is the one structural decision that matters: it keeps format parsing (the messy part) swappable and testable, while everything else stays plain app code.
 
 ```mermaid
 flowchart TB
-    subgraph Client
-        POS[POS Terminal App<br/>offline-first, local DB]
-        B2B[Back-office Web App<br/>admin, catalog, reports]
-        MOB[Merchant Mobile App<br/>optional, phase 2]
+    subgraph App["Document Reader (single desktop process)"]
+        UI["UI Layer<br/>(window, toolbar, sidebar, zoom, pages)"]
+        CTRL["Document Controller<br/>(open/close, page navigation,<br/>bookmarks, view state)"]
+        CORE["Reader Core (interface)<br/>open() -> Document<br/>renderPage(n, scale) -> image<br/>extractText(range) -> str"]
+        CACHE["Render Cache<br/>(in-memory LRU of rendered pages)"]
+        CFG["Settings<br/>(local JSON: zoom, theme, last-opened)"]
     end
 
-    subgraph Edge
-        GW[API Gateway / LB<br/>auth, rate-limiting, TLS]
+    subgraph Providers["Format Providers (implement Reader Core interface)"]
+        PDF["PDF provider<br/>(pdf rendering library)"]
+        TXT["Text/Markdown provider"]
+        EPUB["EPUB provider (later)"]
     end
 
-    subgraph Core["Core Backend (modular monolith)"]
-        SALE[Sales module]
-        CATALOG[Catalog & Pricing module]
-        INV[Inventory module]
-        CUST[Customer & Loyalty module]
-        PAY[Payment orchestration module]
-        TAX[Tax engine module]
-        AUTH[Identity & Access module]
-        RPT[Reporting module]
-        SYNC[Sync service<br/>catalog down / orders up]
-    end
+    FS[(Local files on disk)]
 
-    subgraph Data
-        PG[(PostgreSQL<br/>system of record)]
-        CACHE[(Redis<br/>cache, sessions)]
-        BLOB[(Object storage<br/>receipts, exports)]
-    end
-
-    subgraph Ext[External Integrations]
-        PSP[Payment processors<br/>Stripe/Adyen/...]
-        HW[Payment terminals<br/>card readers via SDK]
-        PRN[Receipt & kitchen printers]
-        ACC[Accounting/ERP<br/>QuickBooks, Xero]
-    end
-
-    POS -->|HTTPS, mTLS-capable| GW
-    B2B --> GW
-    GW --> Core
-    Core --> PG
-    Core --> CACHE
-    Core --> BLOB
-    PAY --> PSP
-    SYNC --> POS
-    POS <--> HW
-    POS --> PRN
-    Core --> ACC
+    UI --> CTRL --> CORE
+    CTRL --> CACHE
+    CTRL --> CFG
+    CORE --> PDF
+    CORE --> TXT
+    CORE -.-> EPUB
+    PDF --> FS
+    TXT --> FS
 ```
 
-### Key architectural properties
-
-1. **Offline-first terminals.** The terminal holds a local database (SQLite) with catalog, prices, and tax rules. Sales are created locally and queued; sync pushes orders up and pulls catalog/tax updates down. Terminals remain fully functional for cash and queued card payments during outages.
-2. **Backend is the system of record.** The terminal DB is a *cache*, never authoritative. Conflict resolution: orders are immutable once synced (append-only), inventory adjustments use monotonic event journal to survive replay.
-3. **Payment orchestration, not payment processing.** We integrate PSPs and hardware terminals via their SDKs; card data never touches our systems (SAQ-A/EP scope minimization).
-4. **Event-driven internals.** Domain events (`OrderCompleted`, `StockAdjusted`, `PaymentCaptured`) flow through an in-process dispatcher now, with an option to externalize to a message broker later without changing module contracts.
+**Flow:** user opens a file → controller picks a provider by extension/MIME → provider parses lazily (page-by-page, not whole-file) → controller asks provider to render a page at current zoom → result cached in an LRU cache → UI displays it. Memory stays flat no matter how large the document is, because only a page window is rendered at a time.
 
 ---
 
-## 3. Module Breakdown (Core Backend)
+## 3. Module Breakdown
 
-| Module | Responsibility | Key entities |
-|--------|---------------|--------------|
-| **Identity & Access** | Merchants, users, roles, API keys, sessions, audit log | Merchant, User, Role, ApiKey |
-| **Catalog & Pricing** | Products, variants, barcodes, price books, promotions/discounts | Product, Variant, PriceBook, Promotion |
-| **Inventory** | Stock per location, receiving, transfers, shrinkage, low-stock alerts | StockLevel, StockMovement, PurchaseOrder |
-| **Sales** | Orders/carts, returns/refunds, receipts, shifts/cash-drawer (Z-reports) | Order, OrderLine, Return, Shift |
-| **Payment orchestration** | PSP routing, terminal handoff, retries, reconciliation, settlements | Payment, Refund, Settlement |
-| **Tax engine** | Configurable tax rules per jurisdiction, inclusive/exclusive prices | TaxRule, TaxRate |
-| **Customer & Loyalty** | Customer profiles, loyalty points, stored value (gift cards) | Customer, LoyaltyAccount, GiftCard |
-| **Reporting** | Sales analytics, X/Z reports, export pipeline | Read models (materialized views) |
-| **Sync service** | Terminal provisioning, catalog snapshot distribution, order ingestion queue | SyncJob, DeviceSession |
+| Module | Responsibility |
+|--------|---------------|
+| **UI layer** | Window, page view, toolbar (open, zoom, page nav), optional sidebar (page thumbnails), theme |
+| **Document controller** | App-level state machine: current document, current page, zoom, scroll position; routes user actions |
+| **Reader core (interface)** | The contract above — the only seam between the app and format libraries |
+| **PDF provider** | Lazy page iteration, rasterization to images, embedded text extraction, metadata (title, page count) |
+| **Text/Markdown provider** | Simplest provider: read file, paginate on demand, render as text view |
+| **Render cache** | LRU keyed by `(doc_id, page, scale)`; sized by memory budget (e.g., 200 MB) |
+| **Settings** | Small local JSON file; no registry, no cloud |
 
-**Ground rules:**
-- Modules communicate only through their published service interfaces + domain events — no cross-module DB joins. This keeps the monolith honest and preserves the option to split modules out later.
-- One PostgreSQL schema per module (logical separation), single physical database.
+No database. No background services. If a file is opened twice, it's simply opened twice.
 
 ---
 
-## 4. Terminal Client Design
+## 4. Key Interfaces (sketch)
 
-```mermaid
-flowchart LR
-    subgraph Terminal["POS Terminal (desktop/tablet)"]
-        UI[POS UI layer]
-        APP[App logic / cart engine]
-        DB[(SQLite local store<br/>catalog, prices, tax,<br/>pending orders)]
-        QR[Sync queue<br/>retry with backoff]
-        HAL[Hardware abstraction layer<br/>printer, scanner, card reader, cash drawer]
-    end
-    DB --> QR -->|HTTPS pull/push| SYNC[Backend Sync service]
-    HAL --> APP --> UI
+```python
+class Document(Protocol):
+    title: str
+    page_count: int
+    def close(self) -> None: ...
+
+class ReaderProvider(Protocol):
+    def open(self, path: Path) -> Document: ...
+    def render_page(self, doc: Document, page: int, scale: float) -> Image: ...
+    def extract_text(self, doc: Document, page: int) -> str: ...
 ```
 
-- **Hardware abstraction layer (HAL):** all device access goes behind one interface so we can support different printer/card-reader vendors without touching app logic.
-- **Sync protocol:** catalog changes are versioned; terminal pulls deltas by version cursor. Orders are pushed idempotently (client-generated ULID keys); server deduplicates.
-- **Clock discipline:** all timestamps recorded with terminal offset vs. server time on sync; never trust terminal clocks for reporting.
+The controller knows nothing about PDFs. A new format = one new provider file. All providers are unit-testable with real sample files, no UI needed.
 
 ---
 
-## 5. Data Model — Core (draft ERD)
+## 5. Technology Options
 
-```mermaid
-erDiagram
-    MERCHANT ||--o{ LOCATION : has
-    MERCHANT ||--o{ USER : has
-    LOCATION ||--o{ STOCK_LEVEL : holds
-    PRODUCT ||--o{ VARIANT : has
-    VARIANT ||--o{ BARCODE : has
-    VARIANT ||--o{ STOCK_LEVEL : stocks
-    PRICE_BOOK ||--o{ PRICE : contains
-    VARIANT ||--o{ PRICE : priced
-    ORDER ||--|| SHIFT : "recorded in"
-    ORDER ||--o{ ORDER_LINE : contains
-    ORDER_LINE }o--|| VARIANT : references
-    ORDER ||--o{ PAYMENT : settled_by
-    PAYMENT }o--|| PAYMENT_METHOD : uses
-    ORDER }o--o| CUSTOMER : "optionally for"
-    CUSTOMER ||--o| LOYALTY_ACCOUNT : has
-```
+Two viable stacks; the choice is mainly about team preferences and platform targets.
 
-Money handling: **integer minor units** (cents) everywhere; currency is a column, never assumed. All financial tables append-only where feasible (orders immutable post-sync; corrections via linked reversal records).
+| Concern | Option A: **Tauri + Rust** | Option B: **Electron + TypeScript** |
+|---------|---------------------------|-------------------------------------|
+| PDF rendering | `pdfium` bindings — high quality, fast | `pdf.js` — mature, pure JS |
+| Memory footprint | Low (~50 MB idle) | Higher (~200 MB idle) |
+| Packaging size | ~10 MB | ~100+ MB |
+| Dev velocity | Slower if team is not Rust-fluent | Fastest if team knows web tech |
+| Text/Markdown | Trivial in both | Trivial in both |
+
+**Recommendation:** Option A (Tauri + pdfium) for footprint and native feel, unless the team is web-only — then Option B. This is **Q1** below.
 
 ---
 
-## 6. Technology Stack (proposal)
+## 6. Key Decisions
 
-| Layer | Choice | Rationale |
-|-------|--------|-----------|
-| Backend | **Python (FastAPI)**, modular monolith | Fast iteration, strong typing via Pydantic, huge ecosystem, easy hiring |
-| Database | **PostgreSQL 16** | ACID, rich types (JSONB, numerics), logical replication for read replicas |
-| Cache/session | **Redis** | Sessions, idempotency keys, rate limits |
-| Terminal app | **Electron + TypeScript/React** or **Flutter** | Cross-platform desktop/tablet; decision point at kickoff (see §7) |
-| Back-office web | **TypeScript/React (SPA)** | Shared types with terminal if TS chosen |
-| Local terminal store | **SQLite (WAL mode)** | Embedded, reliable, single-file backup |
-| Payments | PSP SDKs (Stripe Terminal / Adyen / local PSPs) | No card data in our stack (PCI scope reduction) |
-| Infra | Docker, single cloud (AWS/GCP), Terraform from day one | Reproducible environments |
-| CI/CD | GitHub Actions; migrations via Alembic | Standard, boring, auditable |
-
-**Deployment shape:** one backend deployment per region; merchants pinned to a region. Terminals communicate only with their region's API.
+| ID | Decision | Rationale |
+|----|----------|-----------|
+| D1 | Single desktop app, no server component | The task is "read documents"; adding services would re-create the complexity we just avoided |
+| D2 | Provider interface as the only architectural seam | Keeps format-specific code isolated and swappable without over-engineering |
+| D3 | Lazy, page-windowed rendering + LRU cache | Constant memory for any file size; this is the pattern every serious viewer uses |
+| D4 | No OCR in v1 | OCR is a large dependency (models, accuracy work); only pursue if scanned-PDF reading is a hard requirement |
+| D5 | Plain files, no database, no sync | Nothing in the requirements justifies persistence beyond a small settings file |
 
 ---
 
-## 7. Key Decisions & Open Questions (ADR-style)
+## 7. Open Questions (need your input)
 
-| ID | Decision | Alternatives considered | Rationale |
-|----|----------|------------------------|-----------|
-| D1 | Modular monolith over microservices | Microservices, serverless | Team scale; microservices add ops burden with no benefit at current size; module boundaries keep future split cheap |
-| D2 | Offline-first terminals | Thin clients, online-only | POS must survive network outages; revenue cannot stop when the internet does |
-| D3 | Third-party PSPs, no in-house card processing | Build own processing | PCI burden and licensing costs are prohibitive; integration is a solved problem |
-| D4 | PostgreSQL single DB, per-module schemas | DB-per-service, NoSQL | Transactions across modules (orders+stock+payments) must be consistent; relational fits domain |
-| D5 | Integer minor units for money | Floats, Decimal | Decimal is viable but ints are unambiguous across serialization boundaries; document loudly |
-| **Q1** | Terminal stack: Electron+React vs Flutter | — | Affects team skills, UI perf on low-end hardware, offline tooling. **Needs your input** |
-| **Q2** | Multi-tenant SaaS vs single-tenant per merchant | — | Changes isolation model, migrations, pricing. **Needs your input** |
-| **Q3** | Target vertical(s): retail, food service, or both at launch? | — | Affects catalog model (variants/modifiers), order flow, kitchen printers. **Needs your input** |
-| **Q4** | Which PSP markets/countries at launch? | — | Determines tax engine complexity and PSP choice. **Needs your input** |
+| # | Question | Why it matters |
+|---|----------|----------------|
+| Q1 | Tech stack: Tauri+Rust or Electron+TypeScript? | Determines language, packaging, and PDF library |
+| Q2 | Which OS platforms at launch? Windows-only would simplify v1 | Test matrix size |
+| Q3 | Are **scanned PDFs** (image-only, no text layer) in scope for v1? | If yes, we need OCR or at least image-rendering-only mode + zoom |
+| Q4 | Target formats beyond PDF: TXT/MD only, or also EPUB/DOCX? | EPUB is cheap; DOCX is not trivial |
+| Q5 | Nice-to-haves for v1: dark mode, bookmarks, full-text search? | Search is the most valuable and the trickiest — worth deciding early |
 
 ---
 
-## 8. Cross-Cutting Concerns
-
-- **Security:** OAuth2/OIDC for back-office; device tokens + mTLS-capable channel for terminals; row-level tenant isolation enforced in repository layer (and Postgres RLS as backstop); audit log for all privileged actions; no card data stored (SAQ-A).
-- **Observability:** structured logs (JSON), OpenTelemetry traces, Prometheus metrics from day one; per-terminal sync lag as a first-class metric.
-- **Idempotency:** all mutating API endpoints accept idempotency keys; sync uploads are naturally idempotent via ULIDs.
-- **Backups/DR:** PostgreSQL PITR; RPO ≤ 5 min, RTO ≤ 1 h for core; terminals tolerate indefinite backend outage by design.
-- **Compliance hooks (planned, not built yet):** fiscal printers/tax authority integrations vary by country — isolated behind the Tax engine + Receipt module interfaces so country-specific logic never leaks into core.
-
----
-
-## 9. Delivery Roadmap (proposed phases)
+## 8. Roadmap (proposed)
 
 | Phase | Content | Exit criteria |
 |-------|---------|--------------|
-| **P0 — Foundation** (2–3 wks) | Repo scaffolding, CI, auth, merchant/location model, skeleton modules | Deployable "hello" stack with auth |
-| **P1 — Sell** (4–6 wks) | Catalog, pricing, order flow, cash payments, receipts, SQLite terminal sync | Single store can trade offline and reconcile |
-| **P2 — Payments** (3–4 wks) | One PSP integration, card-present flow, refunds, reconciliation | End-to-end card sale + refund |
-| **P3 — Operate** (3–4 wks) | Inventory, returns, shifts/Z-reports, back-office reporting | Merchant can run daily ops without DB access |
-| **P4 — Scale** | Loyalty, multi-location, promotions engine, mobile app | Per roadmap agreed after P1 learnings |
+| **P0 — Skeleton** (~1 wk) | App shell, open-file dialog, provider interface stub, CI + packaging script | App launches, opens a file, shows metadata |
+| **P1 — Read PDF** (~2 wks) | PDF provider, page rendering, zoom, page navigation, LRU cache | Smooth reading of a 500-page PDF at stable memory |
+| **P2 — Text & polish** (~1–2 wks) | TXT/MD provider, settings persistence, dark mode, packaging installers | Usable v1 installers for target OS(s) |
+| **P3 — Extensions** (optional) | Full-text search, bookmarks, EPUB, thumbnails sidebar | Per decisions after P2 |
 
 ---
 
-## 10. Risks
+## 9. Risks
 
 | Risk | Mitigation |
 |------|-----------|
-| Sync conflicts corrupt inventory | Event-journal design + idempotent ingestion; inventory count reconciliation workflow |
-| PSP/hardware SDK quirks dominate P2 | HAL isolation; pick PSP early; spike in P0/P1 |
-| Tax/fiscal complexity explodes with countries | Tax engine interface + per-jurisdiction plugins; Q4 must be answered before P2 |
-| Terminal hardware variety (printers, readers) | HAL contract frozen in P1; vendor certification checklist |
-| Scope creep toward ERP features | Explicit phase gates; reporting read models keep core lean |
+| Odd PDFs (corrupt, huge, unusual encodings) crash the app | Provider-level error containment; fuzz a corpus of bad files in P1; renderer is in-process but sandboxed by provider API |
+| Memory blow-up on large documents | Lazy rendering + LRU cache is the whole defense; add memory assertions in CI |
+| Scope creep toward editing/annotation | Roadmap gates; annotation explicitly out of scope for v1 (A6) |
+| Cross-platform quirks (fonts, HiDPI) | Test matrix fixed early by Q2; pdfium/WebView handle most of it |
 
 ---
 
-*Next step: resolve Q1–Q4 with stakeholders, then freeze this document as v1.0 and scaffold the P0 codebase.*
+*Next step: resolve Q1–Q5, then freeze as v1.0 and scaffold the P0 app shell.*
