@@ -7,13 +7,45 @@ use crate::model::{AppError, DocumentMeta, Format};
 
 use super::ReaderProvider;
 
-const PDFIUM_ENV_VAR: &str = "PDFIUM_LIBRARY_PATH";
-/// Bundled next to the executable on Windows (docs/P0-DESIGN.md §2).
+const PDFIUM_DEV_ENV_VAR: &str = "PDFIUM_LIBRARY_PATH";
+/// Shipped beside the executable in release installs (docs/P0-DESIGN.md §2).
 const PDFIUM_BUNDLED_FILE: &str = "pdfium.dll";
+
+/// Every place a bundled `pdfium.dll` may live, in priority order, given the
+/// executable's directory. Pure so the resolution order is unit-testable.
+fn candidate_paths_in(exe_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![exe_dir.join(PDFIUM_BUNDLED_FILE)];
+
+    // Walk up a few levels looking for a `resources/` directory. One walk covers
+    // both layouts we care about: a Tauri install (`<install>/resources/`) and a
+    // dev build (`src-tauri/target/<profile>/` reaching `src-tauri/resources/`).
+    // Tauri's exact resource placement has varied across versions, so we probe
+    // rather than assume — a wrong guess here silently costs PDF support.
+    let mut current = Some(exe_dir);
+    for _ in 0..3 {
+        let Some(dir) = current else { break };
+        candidates.push(dir.join("resources").join(PDFIUM_BUNDLED_FILE));
+        current = dir.parent();
+    }
+
+    candidates
+}
+
+fn exe_directory() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+}
+
+fn candidate_paths() -> Vec<PathBuf> {
+    exe_directory()
+        .map(|dir| candidate_paths_in(&dir))
+        .unwrap_or_default()
+}
 
 /// Native PDFium rendering (DECISIONS Q1) — the OS webview PDF viewer is never used.
 /// P0 reads metadata only; `render_page`/`extract_text` land in P1.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PdfProvider;
 
 impl PdfProvider {
@@ -25,35 +57,40 @@ impl PdfProvider {
         }
     }
 
-    /// Resolution order from docs/P0-DESIGN.md §2: explicit env var, then a
-    /// `pdfium.dll` beside the executable. Resolved once per process; the actual
-    /// library binding is per document.
+    /// Resolution order, first hit wins:
+    ///   1. `PDFIUM_LIBRARY_PATH` — explicit override, for dev and troubleshooting.
+    ///   2. `pdfium.dll` beside the executable — NSIS installs resources here.
+    ///   3. `<exe dir>/resources/pdfium.dll` — the other layout Tauri uses for
+    ///      bundled resources, depending on version and platform.
+    ///   4. `<exe dir>/../resources/pdfium.dll` — dev builds run from
+    ///      `target/<profile>/`, while the fetch script writes to `src-tauri/resources/`.
+    ///
+    /// Deliberately lazy: `current_exe()` only reflects the real install path once
+    /// Tauri has run `set_current_dir` during setup.
     fn library_path() -> Result<&'static PathBuf, AppError> {
         static RESOLVED: OnceLock<Result<PathBuf, AppError>> = OnceLock::new();
 
         RESOLVED
             .get_or_init(|| {
-                if let Ok(from_env) = std::env::var(PDFIUM_ENV_VAR) {
+                if let Ok(from_env) = std::env::var(PDFIUM_DEV_ENV_VAR) {
                     let path = PathBuf::from(from_env);
                     if path.is_file() {
                         return Ok(path);
                     }
                     return Err(AppError::PdfiumUnavailable(format!(
-                        "{PDFIUM_ENV_VAR} points at a missing file: {}",
+                        "{PDFIUM_DEV_ENV_VAR} points at a missing file: {}",
                         path.display()
                     )));
                 }
 
-                if let Some(bundled) = std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| exe.parent().map(|dir| dir.join(PDFIUM_BUNDLED_FILE)))
-                    .filter(|candidate| candidate.is_file())
-                {
-                    return Ok(bundled);
+                for candidate in candidate_paths() {
+                    if candidate.is_file() {
+                        return Ok(candidate);
+                    }
                 }
 
                 Err(AppError::PdfiumUnavailable(format!(
-                    "set {PDFIUM_ENV_VAR} or place {PDFIUM_BUNDLED_FILE} next to the executable"
+                    "set {PDFIUM_DEV_ENV_VAR} or place {PDFIUM_BUNDLED_FILE} next to the executable"
                 )))
             })
             .as_ref()
@@ -160,5 +197,66 @@ mod tests {
             PdfProvider.extract_text(&doc(), 0).unwrap_err().code(),
             "RENDER_UNAVAILABLE"
         );
+    }
+
+    fn names(paths: &[PathBuf]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect()
+    }
+
+    #[test]
+    fn dll_beside_the_executable_is_tried_first() {
+        let found = names(&candidate_paths_in(Path::new("C:/Apps/DocumentReader")));
+        assert_eq!(found[0], "C:/Apps/DocumentReader/pdfium.dll");
+    }
+
+    #[test]
+    fn install_layouts_are_covered() {
+        // NSIS install: resources alongside the exe.
+        let install = names(&candidate_paths_in(Path::new("C:/Apps/DocumentReader")));
+        assert!(
+            install.contains(&"C:/Apps/DocumentReader/resources/pdfium.dll".to_string()),
+            "install layout missing: {install:?}"
+        );
+
+        // Dev build: src-tauri/target/debug -> src-tauri/resources.
+        let dev = names(&candidate_paths_in(Path::new(
+            "C:/repo/src-tauri/target/debug",
+        )));
+        assert!(
+            dev.contains(&"C:/repo/src-tauri/resources/pdfium.dll".to_string()),
+            "dev layout missing: {dev:?}"
+        );
+    }
+
+    #[test]
+    fn candidate_discovery_never_panics_on_shallow_paths() {
+        // A root-level exe dir has no ancestors; the walk must terminate cleanly.
+        for dir in ["/", "C:/"] {
+            let paths = candidate_paths_in(Path::new(dir));
+            assert!(!paths.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_first_existing_candidate_wins() {
+        let dir = std::env::temp_dir().join(format!("docreader-pdfium-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Nothing present yet: no candidate resolves.
+        assert!(!candidate_paths_in(&dir).iter().any(|p| p.is_file()));
+
+        // Only the nested resource copy exists; it must still be found.
+        let nested = dir.join("resources");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(PDFIUM_BUNDLED_FILE), b"fake").unwrap();
+
+        let resolved = candidate_paths_in(&dir).into_iter().find(|p| p.is_file());
+        assert_eq!(resolved, Some(nested.join(PDFIUM_BUNDLED_FILE)));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

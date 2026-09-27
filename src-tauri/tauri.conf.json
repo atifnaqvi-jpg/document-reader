@@ -29,7 +29,12 @@
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
       }
     }
   }

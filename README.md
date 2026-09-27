@@ -62,17 +62,50 @@ Tauri panics at startup with `Failed to initialize GTK` when there is no display
 On a Linux box without a desktop session, prefix with `xvfb-run -a`, or work on
 Windows (the v1 target). This applies to the dev sandbox used to build P0.
 
-### PDFium (needed for PDF metadata, and for rendering in P1)
+### Windows installer
 
-The app binds PDFium at runtime. Fetch it once on Windows:
+```bash
+npm run tauri build
+```
+
+The NSIS installer lands in `src-tauri/target/release/bundle/nsis/`. It installs
+**per-user** (no admin rights), bundles PDFium so PDF support works with no setup,
+and downloads the WebView2 runtime only if the machine lacks it.
+
+**Build the installer on Windows.** It cannot be cross-compiled from Linux/macOS
+in practice: the WebView2 and MSVC pieces are Windows-only, and Tauri's Windows
+bundler is not usable on a Linux host. `npm run tauri build` therefore only
+produces a Windows installer when run on Windows.
+
+Two supported routes:
+
+1. **Locally on Windows** — install Rust + Node, then `pwsh ./scripts/fetch-pdfium.ps1`
+   followed by `npm run tauri build`.
+2. **GitHub Actions** (`.github/workflows/release-windows.yml`) — tag a commit and
+   the installer is built on a real Windows runner and attached to the release:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+   Or run the workflow manually from the Actions tab to get the installer as a
+   downloadable artifact without publishing a release.
+
+### PDFium
+
+PDFium is a ~4 MB native library bound at runtime, so it is **fetched rather than
+committed**. Fetch it once on Windows:
 
 ```powershell
 pwsh ./scripts/fetch-pdfium.ps1
-$env:PDFIUM_LIBRARY_PATH = "$PWD/src-tauri/resources/pdfium.dll"
+$env:PDFIUM_LIBRARY_PATH = "$PWD/src-tauri/resources/pdfium.dll"   # for `tauri dev`
 ```
 
-If PDFium is absent, opening a PDF reports a clear `PDFIUM_UNAVAILABLE` error;
-plain text and Markdown files work regardless.
+The installed app finds it automatically — it is bundled beside the executable, and
+the loader also probes a `resources/` subdirectory. If PDFium is missing entirely,
+opening a PDF reports a clear `PDFIUM_UNAVAILABLE` error; text and Markdown files
+work regardless.
 
 ## Tests
 
