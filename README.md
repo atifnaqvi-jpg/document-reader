@@ -40,9 +40,27 @@ librsvg2-dev libsoup-3.0-dev`).
 
 ```bash
 npm install
-npm run tauri dev      # run the app
-npm run tauri build    # produce the Windows installer (NSIS)
 ```
+
+### Running the app
+
+```bash
+npm run tauri dev      # desktop app, hot reload on both sides
+npm run tauri build    # Windows installer (NSIS) in src-tauri/target/release/bundle/
+```
+
+`tauri dev` starts the Vite server and the Rust binary together. The first run
+compiles the full Tauri dependency tree (~5 min); later runs are incremental.
+
+**UI-only iteration**: `npm run dev` serves the frontend at
+http://localhost:1420 in a normal browser. The UI renders and the error banner
+works, but every `invoke()` fails — there is no Rust backend, so `list_library`
+surfaces `UNKNOWN`. Useful for styling; not for anything touching data.
+
+**This app cannot run on a headless machine.** It is a native desktop GUI, and
+Tauri panics at startup with `Failed to initialize GTK` when there is no display.
+On a Linux box without a desktop session, prefix with `xvfb-run -a`, or work on
+Windows (the v1 target). This applies to the dev sandbox used to build P0.
 
 ### PDFium (needed for PDF metadata, and for rendering in P1)
 
