@@ -16,3 +16,6 @@ Thumbs.db
 # Local app data
 *.db
 *.db-journal
+
+# Agent working state (kept on disk, not in the repo)
+.openhands/
