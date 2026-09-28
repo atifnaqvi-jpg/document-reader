@@ -11,6 +11,11 @@ const PDFIUM_DEV_ENV_VAR: &str = "PDFIUM_LIBRARY_PATH";
 /// Shipped beside the executable in release installs (docs/P0-DESIGN.md §2).
 const PDFIUM_BUNDLED_FILE: &str = "pdfium.dll";
 
+/// Clamp for the render scale. A caller asking for 0 would otherwise produce a
+/// zero-pixel image; an unbounded value (600 DPI ≈ 8.3×) can allocate gigabytes.
+const MIN_RENDER_SCALE: f32 = 0.1;
+const MAX_RENDER_SCALE: f32 = 8.0;
+
 /// Every place a bundled `pdfium.dll` may live, in priority order, given the
 /// executable's directory. Pure so the resolution order is unit-testable.
 fn candidate_paths_in(exe_dir: &Path) -> Vec<PathBuf> {
@@ -76,9 +81,26 @@ fn resolve_library_path(
 }
 
 /// Native PDFium rendering (DECISIONS Q1) — the OS webview PDF viewer is never used.
-/// P0 reads metadata only; `render_page`/`extract_text` land in P1.
 #[derive(Debug)]
 pub struct PdfProvider;
+
+/// A rasterized page: encoded PNG plus the pixel dimensions of that image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterizedPage {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Clamps a caller-supplied scale into a range that always yields a usable image.
+/// A non-finite or non-positive scale would otherwise produce a zero-pixel render,
+/// and an unbounded one can try to allocate gigabytes.
+fn clamp_scale(scale: f32) -> f32 {
+    if !scale.is_finite() {
+        return 1.0;
+    }
+    scale.clamp(MIN_RENDER_SCALE, MAX_RENDER_SCALE)
+}
 
 impl PdfProvider {
     fn ensure_file(path: &Path) -> Result<(), AppError> {
@@ -87,6 +109,88 @@ impl PdfProvider {
         } else {
             Err(AppError::FileNotFound(path.display().to_string()))
         }
+    }
+
+    /// Loads a document from disk. Kept as one place so the handle cache (P1.3) can
+    /// reuse exactly the same open path.
+    fn load<'a>(pdfium: &'a Pdfium, path: &Path) -> Result<PdfDocument<'a>, AppError> {
+        pdfium
+            .load_pdf_from_file(&path.display().to_string(), None)
+            .map_err(|e| AppError::Other(format!("failed to open PDF: {e}")))
+    }
+
+    /// Rasterizes one page to PNG, with the bitmap's pixel dimensions.
+    fn rasterize(
+        document: &PdfDocument<'_>,
+        page: u32,
+        scale: f32,
+    ) -> Result<RasterizedPage, AppError> {
+        let page = document
+            .pages()
+            .get(page as u16)
+            .map_err(|e| AppError::Other(format!("page {page} unavailable: {e}")))?;
+
+        let config = PdfRenderConfig::new().scale_page_by_factor(clamp_scale(scale));
+        let bitmap = page
+            .render_with_config(&config)
+            .map_err(|e| AppError::Other(format!("render failed: {e}")))?;
+
+        let width = bitmap.width() as u32;
+        let height = bitmap.height() as u32;
+
+        // `as_image()` copies out of PDFium's own buffer, so the encoded result
+        // stays valid after the bitmap and document are dropped.
+        let mut png = Vec::new();
+        bitmap
+            .as_image()
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| AppError::Other(format!("PNG encode failed: {e}")))?;
+
+        Ok(RasterizedPage {
+            bytes: png,
+            width,
+            height,
+        })
+    }
+
+    /// Extracts one page's text layer. An empty string means the page simply has no
+    /// text layer (a scanned image) — a valid answer, not an error, per DECISIONS Q3.
+    fn page_text(document: &PdfDocument<'_>, page: u32) -> Result<String, AppError> {
+        let page = document
+            .pages()
+            .get(page as u16)
+            .map_err(|e| AppError::Other(format!("page {page} unavailable: {e}")))?;
+
+        let text = page
+            .text()
+            .map_err(|e| AppError::Other(format!("text extraction failed: {e}")))?;
+
+        Ok(text.all().trim_end().to_string())
+    }
+
+    /// Renders a page of the PDF at `path`. This is the workhorse the handle cache
+    /// (P1.3) and neighbour pre-render (P1.4) build on.
+    pub fn render_page_at(path: &Path, page: u32, scale: f32) -> Result<RasterizedPage, AppError> {
+        Self::ensure_file(path)?;
+        let pdfium = Pdfium::new(Self::bind()?);
+        let document = Self::load(&pdfium, path)?;
+        Self::rasterize(&document, page, scale)
+    }
+
+    /// Extracts the text layer of a single page.
+    pub fn extract_page_text(path: &Path, page: u32) -> Result<String, AppError> {
+        Self::ensure_file(path)?;
+        let pdfium = Pdfium::new(Self::bind()?);
+        let document = Self::load(&pdfium, path)?;
+        Self::page_text(&document, page)
+    }
+
+    /// Page count, read without keeping the document open.
+    pub fn page_count(path: &Path) -> Result<u32, AppError> {
+        Self::ensure_file(path)?;
+        let pdfium = Pdfium::new(Self::bind()?);
+        let document = Self::load(&pdfium, path)?;
+        Ok(document.pages().len() as u32)
     }
 
     /// Resolves once per process. Deliberately lazy: `current_exe()` only reflects
@@ -121,12 +225,8 @@ impl PdfProvider {
 impl ReaderProvider for PdfProvider {
     fn open(&self, path: &Path) -> Result<DocumentMeta, AppError> {
         Self::ensure_file(path)?;
-        let bindings = Self::bind()?;
-
-        let pdfium = Pdfium::new(bindings);
-        let document = pdfium
-            .load_pdf_from_file(&path.display().to_string(), None)
-            .map_err(|e| AppError::Other(format!("failed to open PDF: {e}")))?;
+        let pdfium = Pdfium::new(Self::bind()?);
+        let document = Self::load(&pdfium, path)?;
 
         let metadata = document.metadata();
         let tag = |kind: PdfDocumentMetadataTagType| {
@@ -149,42 +249,25 @@ impl ReaderProvider for PdfProvider {
         })
     }
 
-    /// Real rasterization lands in P1.2 (PDFium -> PNG).
+    /// Real rasterization via PDFium, returned as encoded PNG (DECISIONS P1-D1).
     fn render_page(
         &self,
-        _entry: &LibraryEntry,
-        _page: u32,
-        _scale: f32,
+        entry: &LibraryEntry,
+        page: u32,
+        scale: f32,
     ) -> Result<Vec<u8>, AppError> {
-        Err(AppError::RenderUnavailable)
+        Ok(Self::render_page_at(Path::new(&entry.path), page, scale)?.bytes)
     }
 
-    /// PDFium text-layer extraction lands in P1.2.
-    fn extract_text(&self, _entry: &LibraryEntry, _page: u32) -> Result<String, AppError> {
-        Err(AppError::RenderUnavailable)
+    /// PDFium text layer for one page (DECISIONS Q3/D7).
+    fn extract_text(&self, entry: &LibraryEntry, page: u32) -> Result<String, AppError> {
+        Self::extract_page_text(Path::new(&entry.path), page)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Minimal library row; these tests never reach the filesystem through it.
-    fn entry() -> LibraryEntry {
-        LibraryEntry {
-            meta: DocumentMeta {
-                id: "x".into(),
-                title: None,
-                author: None,
-                pages: Some(1),
-                format: Format::Pdf,
-            },
-            path: "C:/docs/fixture.pdf".into(),
-            missing: false,
-            added_at: 0,
-            last_opened_at: None,
-        }
-    }
 
     #[test]
     fn missing_file_fails_before_touching_pdfium() {
@@ -210,19 +293,166 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Library row pointing at the committed PDF fixture.
+    fn fixture_entry() -> LibraryEntry {
+        LibraryEntry {
+            meta: DocumentMeta {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: Some("Fixture".into()),
+                author: None,
+                pages: Some(3),
+                format: Format::Pdf,
+            },
+            path: fixture_pdf().display().to_string(),
+            missing: false,
+            added_at: 0,
+            last_opened_at: None,
+        }
+    }
+
+    fn fixture_pdf() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample.pdf")
+    }
+
     #[test]
-    fn render_is_deferred_to_a_later_phase() {
+    fn scale_is_clamped_into_a_usable_range() {
+        // Guards the render path against zero/absurd scales without needing PDFium.
+        assert_eq!(clamp_scale(0.0), MIN_RENDER_SCALE);
+        assert_eq!(clamp_scale(-3.0), MIN_RENDER_SCALE);
+        assert_eq!(clamp_scale(1_000.0), MAX_RENDER_SCALE);
+        assert_eq!(clamp_scale(1.5), 1.5);
+
+        // Non-finite input falls back to the default rather than clamping to MAX:
+        // a NaN or infinite zoom is a caller bug, and silently rendering at the
+        // maximum scale could attempt a gigabyte-sized allocation.
+        assert_eq!(clamp_scale(f32::NAN), 1.0);
+        assert_eq!(clamp_scale(f32::INFINITY), 1.0);
+        assert_eq!(clamp_scale(f32::NEG_INFINITY), 1.0);
+    }
+
+    #[test]
+    fn renders_page_zero_of_the_fixture_to_a_valid_png() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let rendered = PdfProvider::render_page_at(&fixture_pdf(), 0, 1.0).unwrap();
+
+        // PNG magic number: a valid encoded image, not raw pixels.
+        assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
+        // Letter page at 1.0 scale ≈ 612x792; assert non-degenerate and roughly right.
+        assert!(
+            rendered.width > 100 && rendered.height > 100,
+            "{rendered:?}"
+        );
+        assert!(rendered.height > rendered.width, "portrait page expected");
+    }
+
+    #[test]
+    fn renders_are_scaled_by_the_requested_factor() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let small = PdfProvider::render_page_at(&fixture_pdf(), 0, 1.0).unwrap();
+        let large = PdfProvider::render_page_at(&fixture_pdf(), 0, 2.0).unwrap();
+
+        assert!(large.width > small.width, "{large:?} vs {small:?}");
+        assert!(large.height > small.height, "{large:?} vs {small:?}");
+        assert!(large.bytes.len() > small.bytes.len());
+    }
+
+    #[test]
+    fn extracts_the_text_layer_of_the_fixture_per_page() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let path = fixture_pdf();
+        for (page, token) in [(0_u32, "ALPHA"), (1, "BRAVO"), (2, "CHARLIE")] {
+            let text = PdfProvider::extract_page_text(&path, page).unwrap();
+            assert!(
+                text.contains(token),
+                "page {page} should contain {token}, got {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_extraction_does_not_bleed_between_pages() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let path = fixture_pdf();
+        let page_two = PdfProvider::extract_page_text(&path, 1).unwrap();
+        assert!(page_two.contains("BRAVO"));
+        assert!(
+            !page_two.contains("ALPHA"),
+            "page 2 leaked page 1 text: {page_two:?}"
+        );
+        assert!(
+            !page_two.contains("CHARLIE"),
+            "page 2 leaked page 3 text: {page_two:?}"
+        );
+    }
+
+    #[test]
+    fn out_of_range_page_is_an_error_not_a_panic() {
+        // Deliberately not PDFium-gated in spirit, but page access needs the library.
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let error = PdfProvider::render_page_at(&fixture_pdf(), 99, 1.0).unwrap_err();
+        assert_eq!(error.code(), "OTHER");
+    }
+
+    #[test]
+    fn provider_trait_render_and_extract_use_the_entry_path() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let entry = fixture_entry();
+        let bytes = PdfProvider.render_page(&entry, 0, 1.0).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert!(PdfProvider
+            .extract_text(&entry, 0)
+            .unwrap()
+            .contains("ALPHA"));
+    }
+
+    #[test]
+    fn an_entry_pointing_at_a_missing_file_reports_file_not_found() {
+        let mut entry = fixture_entry();
+        entry.path = "definitely/not/here.pdf".into();
         assert_eq!(
-            PdfProvider
-                .render_page(&entry(), 0, 1.0)
-                .unwrap_err()
-                .code(),
-            "RENDER_UNAVAILABLE"
+            PdfProvider.render_page(&entry, 0, 1.0).unwrap_err().code(),
+            "FILE_NOT_FOUND"
         );
         assert_eq!(
-            PdfProvider.extract_text(&entry(), 0).unwrap_err().code(),
-            "RENDER_UNAVAILABLE"
+            PdfProvider.extract_text(&entry, 0).unwrap_err().code(),
+            "FILE_NOT_FOUND"
         );
+    }
+
+    #[test]
+    fn page_count_matches_the_fixture() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+        assert_eq!(PdfProvider::page_count(&fixture_pdf()).unwrap(), 3);
     }
 
     fn names(paths: &[PathBuf]) -> Vec<String> {

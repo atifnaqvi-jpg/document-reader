@@ -69,6 +69,18 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// A rendered page as it crosses to the frontend (P1-D2): encoded pixel bytes plus
+/// dimensions, so the UI can size its container without a second round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderedPage {
+    /// Encoded PNG.
+    pub bytes: Vec<u8>,
+    /// Pixels.
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("file not found: {0}")]

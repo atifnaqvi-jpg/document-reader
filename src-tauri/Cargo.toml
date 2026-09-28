@@ -23,6 +23,8 @@ thiserror = "2"
 sha2 = "0.10"
 hex = "0.4"
 pdfium-render = "0.8"
+image = "0.25"
+lru = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
