@@ -37,10 +37,42 @@ fn exe_directory() -> Option<PathBuf> {
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
 }
 
-fn candidate_paths() -> Vec<PathBuf> {
-    exe_directory()
-        .map(|dir| candidate_paths_in(&dir))
-        .unwrap_or_default()
+/// Resolution order, first hit wins:
+///   1. `PDFIUM_LIBRARY_PATH` — explicit override, for dev and troubleshooting.
+///   2. `pdfium.dll` beside the executable — where NSIS puts bundled resources.
+///   3. `resources/pdfium.dll` under the executable directory or a close ancestor —
+///      the other layout Tauri uses, depending on version.
+///
+/// Pure on purpose: environment and executable paths are passed in, so the whole
+/// priority order is testable without mutating process-global env state.
+fn resolve_library_path(
+    env_override: Option<&str>,
+    exe_dir: Option<&Path>,
+) -> Result<PathBuf, AppError> {
+    if let Some(raw) = env_override {
+        let path = PathBuf::from(raw);
+        if path.is_file() {
+            return Ok(path);
+        }
+        // An explicit override that does not resolve is a configuration mistake
+        // worth reporting, not something to silently paper over by falling back.
+        return Err(AppError::PdfiumUnavailable(format!(
+            "{PDFIUM_DEV_ENV_VAR} points at a missing file: {}",
+            path.display()
+        )));
+    }
+
+    if let Some(dir) = exe_dir {
+        for candidate in candidate_paths_in(dir) {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(AppError::PdfiumUnavailable(format!(
+        "set {PDFIUM_DEV_ENV_VAR} or place {PDFIUM_BUNDLED_FILE} next to the executable"
+    )))
 }
 
 /// Native PDFium rendering (DECISIONS Q1) — the OS webview PDF viewer is never used.
@@ -57,44 +89,26 @@ impl PdfProvider {
         }
     }
 
-    /// Resolution order, first hit wins:
-    ///   1. `PDFIUM_LIBRARY_PATH` — explicit override, for dev and troubleshooting.
-    ///   2. `pdfium.dll` beside the executable — NSIS installs resources here.
-    ///   3. `<exe dir>/resources/pdfium.dll` — the other layout Tauri uses for
-    ///      bundled resources, depending on version and platform.
-    ///   4. `<exe dir>/../resources/pdfium.dll` — dev builds run from
-    ///      `target/<profile>/`, while the fetch script writes to `src-tauri/resources/`.
-    ///
-    /// Deliberately lazy: `current_exe()` only reflects the real install path once
-    /// Tauri has run `set_current_dir` during setup.
+    /// Resolves once per process. Deliberately lazy: `current_exe()` only reflects
+    /// the real install path once Tauri has run `set_current_dir` during setup.
     fn library_path() -> Result<&'static PathBuf, AppError> {
         static RESOLVED: OnceLock<Result<PathBuf, AppError>> = OnceLock::new();
 
         RESOLVED
             .get_or_init(|| {
-                if let Ok(from_env) = std::env::var(PDFIUM_DEV_ENV_VAR) {
-                    let path = PathBuf::from(from_env);
-                    if path.is_file() {
-                        return Ok(path);
-                    }
-                    return Err(AppError::PdfiumUnavailable(format!(
-                        "{PDFIUM_DEV_ENV_VAR} points at a missing file: {}",
-                        path.display()
-                    )));
-                }
-
-                for candidate in candidate_paths() {
-                    if candidate.is_file() {
-                        return Ok(candidate);
-                    }
-                }
-
-                Err(AppError::PdfiumUnavailable(format!(
-                    "set {PDFIUM_DEV_ENV_VAR} or place {PDFIUM_BUNDLED_FILE} next to the executable"
-                )))
+                let env_override = std::env::var(PDFIUM_DEV_ENV_VAR).ok();
+                resolve_library_path(env_override.as_deref(), exe_directory().as_deref())
             })
             .as_ref()
             .map_err(|e| AppError::PdfiumUnavailable(e.to_string()))
+    }
+
+    /// Whether a usable PDFium library is present on this machine.
+    ///
+    /// Tests gate real rasterization on this: the build machines (aarch64 Linux)
+    /// cannot load Windows PDFium, so a plain `cargo test` must stay green without it.
+    pub fn pdfium_available() -> bool {
+        Self::bind().is_ok()
     }
 
     fn bind() -> Result<Box<dyn PdfiumLibraryBindings>, AppError> {
@@ -270,5 +284,95 @@ mod tests {
         assert_eq!(resolved, Some(nested.join(PDFIUM_BUNDLED_FILE)));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("docreader-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn installed_layout_resolves_the_dll_beside_the_executable() {
+        // The exact shape the NSIS installer produces (verified against a real
+        // installer payload): pdfium.dll sits next to document-reader.exe.
+        let dir = scratch_dir("installed");
+        std::fs::write(dir.join(PDFIUM_BUNDLED_FILE), b"dll").unwrap();
+
+        let resolved = resolve_library_path(None, Some(&dir)).unwrap();
+        assert_eq!(resolved, dir.join(PDFIUM_BUNDLED_FILE));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_layout_resolves_the_resource_copy_up_the_tree() {
+        // target/debug/ -> walk up -> src-tauri/resources/pdfium.dll
+        let root = scratch_dir("dev");
+        let resources = root.join("resources");
+        let profile = root.join("target").join("debug");
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(resources.join(PDFIUM_BUNDLED_FILE), b"dll").unwrap();
+
+        let resolved = resolve_library_path(None, Some(&profile)).unwrap();
+        assert_eq!(resolved, resources.join(PDFIUM_BUNDLED_FILE));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn env_override_takes_priority_over_bundled_copies() {
+        let root = scratch_dir("override");
+        let bundled = root.join(PDFIUM_BUNDLED_FILE);
+        let override_path = root.join("elsewhere.pdfium");
+        std::fs::write(&bundled, b"bundled").unwrap();
+        std::fs::write(&override_path, b"override").unwrap();
+
+        let resolved =
+            resolve_library_path(Some(&override_path.display().to_string()), Some(&root)).unwrap();
+        assert_eq!(resolved, override_path, "env override must win");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_broken_env_override_is_reported_rather_than_silently_ignored() {
+        // Falling back to a bundled copy would mask a real misconfiguration.
+        let root = scratch_dir("broken-override");
+        std::fs::write(root.join(PDFIUM_BUNDLED_FILE), b"bundled").unwrap();
+
+        let error = resolve_library_path(Some("C:/nope/missing.dll"), Some(&root)).unwrap_err();
+        assert_eq!(error.code(), "PDFIUM_UNAVAILABLE");
+        assert!(error.to_string().contains("missing file"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn absent_pdfium_reports_an_actionable_error() {
+        let root = scratch_dir("absent");
+        let error = resolve_library_path(None, Some(&root)).unwrap_err();
+        assert_eq!(error.code(), "PDFIUM_UNAVAILABLE");
+        // The message must tell the user how to fix it.
+        assert!(error.to_string().contains(PDFIUM_DEV_ENV_VAR), "{error}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolution_without_an_exe_directory_still_reports_cleanly() {
+        // current_exe() can fail; that must be an error, never a panic.
+        assert_eq!(
+            resolve_library_path(None, None).unwrap_err().code(),
+            "PDFIUM_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn pdfium_availability_check_never_panics() {
+        // Gated render tests call this; it must be safe on machines without PDFium.
+        let _ = PdfProvider::pdfium_available();
     }
 }

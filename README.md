@@ -107,6 +107,23 @@ the loader also probes a `resources/` subdirectory. If PDFium is missing entirel
 opening a PDF reports a clear `PDFIUM_UNAVAILABLE` error; text and Markdown files
 work regardless.
 
+**Resolution order** (first hit wins):
+
+1. `PDFIUM_LIBRARY_PATH`, if set. A value that does not point at a real file is
+   reported as an error rather than silently ignored — a typo here is worth
+   surfacing.
+2. `pdfium.dll` next to the executable — where the NSIS installer places it.
+3. `resources/pdfium.dll` next to the executable or a close ancestor directory —
+   covers `tauri dev`, which runs from `target/<profile>/`.
+
+**Troubleshooting.** If a PDF reports `PDFIUM_UNAVAILABLE`:
+
+- Confirm the DLL is actually present: `Test-Path "$env:LOCALAPPDATA\Programs\Document Reader\pdfium.dll"`.
+- Check architecture: the fetch script downloads **Windows x64**. An ARM64 build
+  cannot load it.
+- Set `PDFIUM_LIBRARY_PATH` to an absolute path to bypass resolution entirely.
+- The error message names the path that was tried and why it failed.
+
 ## Tests
 
 ```bash
