@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use pdfium_render::prelude::*;
 
-use crate::model::{AppError, DocumentMeta, Format};
+use crate::model::{AppError, DocumentMeta, Format, LibraryEntry};
 
 use super::ReaderProvider;
 
@@ -135,16 +135,18 @@ impl ReaderProvider for PdfProvider {
         })
     }
 
+    /// Real rasterization lands in P1.2 (PDFium -> PNG).
     fn render_page(
         &self,
-        _doc: &DocumentMeta,
+        _entry: &LibraryEntry,
         _page: u32,
         _scale: f32,
     ) -> Result<Vec<u8>, AppError> {
         Err(AppError::RenderUnavailable)
     }
 
-    fn extract_text(&self, _doc: &DocumentMeta, _page: u32) -> Result<String, AppError> {
+    /// PDFium text-layer extraction lands in P1.2.
+    fn extract_text(&self, _entry: &LibraryEntry, _page: u32) -> Result<String, AppError> {
         Err(AppError::RenderUnavailable)
     }
 }
@@ -153,13 +155,20 @@ impl ReaderProvider for PdfProvider {
 mod tests {
     use super::*;
 
-    fn doc() -> DocumentMeta {
-        DocumentMeta {
-            id: "x".into(),
-            title: None,
-            author: None,
-            pages: Some(1),
-            format: Format::Pdf,
+    /// Minimal library row; these tests never reach the filesystem through it.
+    fn entry() -> LibraryEntry {
+        LibraryEntry {
+            meta: DocumentMeta {
+                id: "x".into(),
+                title: None,
+                author: None,
+                pages: Some(1),
+                format: Format::Pdf,
+            },
+            path: "C:/docs/fixture.pdf".into(),
+            missing: false,
+            added_at: 0,
+            last_opened_at: None,
         }
     }
 
@@ -190,11 +199,14 @@ mod tests {
     #[test]
     fn render_is_deferred_to_a_later_phase() {
         assert_eq!(
-            PdfProvider.render_page(&doc(), 0, 1.0).unwrap_err().code(),
+            PdfProvider
+                .render_page(&entry(), 0, 1.0)
+                .unwrap_err()
+                .code(),
             "RENDER_UNAVAILABLE"
         );
         assert_eq!(
-            PdfProvider.extract_text(&doc(), 0).unwrap_err().code(),
+            PdfProvider.extract_text(&entry(), 0).unwrap_err().code(),
             "RENDER_UNAVAILABLE"
         );
     }

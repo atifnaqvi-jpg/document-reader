@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use crate::model::{AppError, DocumentMeta, Format};
+use crate::model::{AppError, DocumentMeta, Format, LibraryEntry};
 
 use super::ReaderProvider;
 
 /// Plain text and Markdown share one provider: both are read whole-file and
-/// paginated later (P1) by the UI layer, not by a layout engine.
+/// paginated later (P2) by the UI layer, not by a layout engine.
 #[derive(Debug, Default, Clone)]
 pub struct TextProvider;
 
@@ -44,16 +44,17 @@ impl ReaderProvider for TextProvider {
 
     fn render_page(
         &self,
-        _doc: &DocumentMeta,
+        _entry: &LibraryEntry,
         _page: u32,
         _scale: f32,
     ) -> Result<Vec<u8>, AppError> {
         Err(AppError::RenderUnavailable)
     }
 
-    fn extract_text(&self, doc: &DocumentMeta, _page: u32) -> Result<String, AppError> {
-        let path = Path::new(&doc.id);
-        self.read(path)
+    /// Reads the file recorded in the library row. `LibraryEntry::path` is the only
+    /// source of the filesystem location; `DocumentMeta::id` is a UUID.
+    fn extract_text(&self, entry: &LibraryEntry, _page: u32) -> Result<String, AppError> {
+        self.read(Path::new(&entry.path))
     }
 }
 
@@ -106,10 +107,86 @@ mod tests {
     #[test]
     fn render_is_deferred_to_a_later_phase() {
         let path = write_temp("render.txt", b"abc");
-        let meta = TextProvider.open(&path).unwrap();
+        let entry = entry_for(&path);
         assert_eq!(
-            TextProvider.render_page(&meta, 0, 1.0).unwrap_err().code(),
+            TextProvider.render_page(&entry, 0, 1.0).unwrap_err().code(),
             "RENDER_UNAVAILABLE"
+        );
+    }
+
+    /// A `LibraryEntry` whose `id` is a UUID and whose `path` is the real file —
+    /// the exact shape the library layer produces.
+    fn entry_for(path: &Path) -> LibraryEntry {
+        LibraryEntry {
+            meta: DocumentMeta {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: path.file_stem().and_then(|s| s.to_str()).map(str::to_owned),
+                author: None,
+                pages: None,
+                format: Format::Txt,
+            },
+            path: path.display().to_string(),
+            missing: false,
+            added_at: 1,
+            last_opened_at: None,
+        }
+    }
+
+    #[test]
+    fn extract_text_reads_the_real_file_via_the_stored_path() {
+        // Regression test for the P1.0 bug: extraction used `Path::new(&doc.id)`,
+        // i.e. tried to open a UUID as a filename, so it could never succeed.
+        let contents = b"the quick brown fox";
+        let path = write_temp("extract.txt", contents);
+        let entry = entry_for(&path);
+
+        let text = TextProvider.extract_text(&entry, 0).unwrap();
+        assert_eq!(text, "the quick brown fox");
+    }
+
+    #[test]
+    fn extraction_follows_the_library_path_when_the_id_is_not_path_like() {
+        // The id must have no bearing on which file is read.
+        let path = write_temp("by-path.txt", b"located by path");
+        let mut entry = entry_for(&path);
+        entry.meta.id = "not-a-path-at-all".into();
+        assert_eq!(
+            TextProvider.extract_text(&entry, 0).unwrap(),
+            "located by path"
+        );
+    }
+
+    #[test]
+    fn extraction_uses_the_path_even_when_the_id_looks_like_one() {
+        // Guards the reverse mistake: a stale id that happens to look like a path
+        // must not win over the stored path.
+        let path = write_temp("authoritative.txt", b"from the stored path");
+        let mut entry = entry_for(&path);
+        entry.meta.id = "C:/somewhere/else.txt".into();
+        assert_eq!(
+            TextProvider.extract_text(&entry, 0).unwrap(),
+            "from the stored path"
+        );
+    }
+
+    #[test]
+    fn extraction_reports_a_missing_file_rather_than_panicking() {
+        let entry = LibraryEntry {
+            meta: DocumentMeta {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: None,
+                author: None,
+                pages: None,
+                format: Format::Txt,
+            },
+            path: "definitely/not/here.txt".into(),
+            missing: true,
+            added_at: 1,
+            last_opened_at: None,
+        };
+        assert_eq!(
+            TextProvider.extract_text(&entry, 0).unwrap_err().code(),
+            "FILE_NOT_FOUND"
         );
     }
 }

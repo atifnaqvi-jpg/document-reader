@@ -1,16 +1,22 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::model::{AppError, DocumentMeta, Format};
+use crate::model::{AppError, DocumentMeta, Format, LibraryEntry};
 
 /// The single architectural seam (DECISIONS §5). Every format lives behind this
 /// trait so the rest of the app never learns about PDFs or Markdown.
+///
+/// Page operations take a [`LibraryEntry`], not a bare `DocumentMeta`: `DocumentMeta`
+/// carries no path (DECISIONS §5) and every provider needs one to reach the bytes on
+/// disk. `DocumentMeta::id` is a library UUID, never a path — using it as one was the
+/// P1.0 bug. Passing the entry keeps path and metadata together by construction.
 pub trait ReaderProvider: Send + Sync + std::fmt::Debug {
     fn open(&self, path: &Path) -> Result<DocumentMeta, AppError>;
 
-    fn render_page(&self, doc: &DocumentMeta, page: u32, scale: f32) -> Result<Vec<u8>, AppError>;
+    fn render_page(&self, entry: &LibraryEntry, page: u32, scale: f32)
+        -> Result<Vec<u8>, AppError>;
 
-    fn extract_text(&self, doc: &DocumentMeta, page: u32) -> Result<String, AppError>;
+    fn extract_text(&self, entry: &LibraryEntry, page: u32) -> Result<String, AppError>;
 }
 
 /// OCR slots in behind the same shape later (DECISIONS §5); the v1 implementation

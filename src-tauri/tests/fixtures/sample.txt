@@ -1,0 +1,5 @@
+OpenHands document reader fixture.
+
+The quick brown fox jumps over the lazy dog.
+
+FTS5 indexing sentinel: zephyrium.

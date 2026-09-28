@@ -69,6 +69,6 @@ pub fn get_document_page_render(
     db.with(|connection| {
         let entry = crate::db::documents::get(connection, &doc_id)?
             .ok_or_else(|| AppError::Other("document not found".to_string()))?;
-        provider_for(std::path::Path::new(&entry.path))?.render_page(&entry.meta, page, scale)
+        provider_for(std::path::Path::new(&entry.path))?.render_page(&entry, page, scale)
     })
 }
