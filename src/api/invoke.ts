@@ -59,6 +59,13 @@ export const getDocumentPageRender = (docId: string, page: number, scale: number
 export const getDocumentPageText = (docId: string, page: number) =>
   invoke<string>("get_document_page_text", { docId, page });
 
+/**
+ * Page count as the renderer sees it. The import-time count can be `null`, so the
+ * viewer asks for this when it needs an authoritative bound for navigation.
+ */
+export const getDocumentPageCount = (docId: string) =>
+  invoke<number>("get_document_page_count", { docId });
+
 /** Builds a `data:` URL for a rendered page's base64 PNG. */
 export const pageImageSrc = (rendered: RenderedPage) =>
   `data:image/png;base64,${rendered.bytes}`;

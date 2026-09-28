@@ -236,6 +236,20 @@ impl DocumentHandles {
             .remove(&key);
     }
 
+    /// Drops every handle for a path regardless of content hash.
+    ///
+    /// This is what re-import needs: when a file is replaced in place the id and path
+    /// stay the same but the hash *changes*, so a hash-keyed [`forget`](Self::forget)
+    /// would compute a key that was never inserted and leave the stale document — and
+    /// its parsed pages — resident. Dropping by path cannot miss.
+    pub fn forget_path(&self, path: &Path) {
+        let prefix = format!("{}\u{1}", path.display());
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
     /// Number of documents currently held open.
     pub fn open_count(&self) -> usize {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
