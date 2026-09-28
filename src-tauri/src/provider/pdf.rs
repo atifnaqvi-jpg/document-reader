@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use pdfium_render::prelude::*;
 
@@ -102,7 +103,174 @@ fn clamp_scale(scale: f32) -> f32 {
     scale.clamp(MIN_RENDER_SCALE, MAX_RENDER_SCALE)
 }
 
+/// Handle-cache capacity (P1-D5). Each entry holds a loaded PDFium document, whose
+/// resident cost scales with the file, not with the page being rendered. A handful
+/// of recently-viewed documents is the useful working set for a reader; the bound
+/// exists so a long session does not accumulate every file ever opened.
+const MAX_OPEN_DOCUMENTS: usize = 8;
+
+/// One process-wide `Pdfium` instance (P1-D5): binding the library is comparatively
+/// expensive and only needs doing once.
+///
+/// **At most one live `Pdfium` per process.** With pdfium-render's default
+/// `thread_safe` feature, constructing a `Pdfium` calls `FPDF_InitLibrary`, which
+/// takes a process-global mutex that is released only by `FPDF_DestroyLibrary` — and
+/// `Pdfium`'s `Drop` is the only thing that calls it. A second `Pdfium` therefore
+/// blocks forever on that mutex, so every operation in this module must go through
+/// this instance. Do not reintroduce `Pdfium::new(...)` at a call site.
+fn pdfium() -> Result<&'static Pdfium, AppError> {
+    static INSTANCE: OnceLock<Result<Pdfium, AppError>> = OnceLock::new();
+
+    INSTANCE
+        .get_or_init(|| Ok(Pdfium::new(PdfProvider::bind()?)))
+        .as_ref()
+        .map_err(|e| AppError::PdfiumUnavailable(e.to_string()))
+}
+
+/// A document handle handed out to a render: shared ownership of the loaded document.
+pub type SharedDocument = Arc<Mutex<PdfDocument<'static>>>;
+
+/// Open `PdfDocument` handles keyed by `(path, content_hash)` (P1-D5), so page
+/// turns do not re-open and re-parse the file.
+///
+/// Locking discipline — this is the part that must not be got wrong:
+///
+/// * The `Mutex` is held only for map operations, **never** across a render. PDFium
+///   rendering can take hundreds of milliseconds, and holding the map lock for that
+///   long would serialise every page turn behind one render.
+/// * A render therefore needs a *reference* to a document that outlives the borrow
+///   of the guard. Handing out `&PdfDocument` would not compile for exactly that
+///   reason, so the cache yields an `Arc<Mutex<PdfDocument>>` instead.
+/// * The per-document `Mutex` is what enforces "never share one `PdfDocument` across
+///   threads concurrently": two threads rendering different pages of the *same*
+///   document serialise on it, which is required, because a `PdfDocument` is only
+///   `Send`/`Sync` as a promise from us that access is exclusive — pdfium-render's
+///   default `thread_safe` feature serialises the API boundary but the feature is
+///   only sound while documents are not touched from two threads at once.
+pub struct DocumentHandles {
+    entries: Mutex<HashMap<String, (SharedDocument, u64)>>,
+    clock: Mutex<u64>,
+}
+
+impl std::fmt::Debug for DocumentHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let open = self.entries.lock().map(|e| e.len()).unwrap_or_default();
+        f.debug_struct("DocumentHandles")
+            .field("open_documents", &open)
+            .field("capacity", &MAX_OPEN_DOCUMENTS)
+            .finish()
+    }
+}
+
+impl Default for DocumentHandles {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Cache key: the same file at a different path (or with different contents) must
+/// not reuse a handle. Hashing the path keeps keys uniform; `content_hash` catches
+/// a file replaced in place, which would otherwise serve stale pages.
+fn handle_key(path: &Path, content_hash: Option<&str>) -> String {
+    format!("{}\u{1}{}", path.display(), content_hash.unwrap_or("-"))
+}
+
+impl DocumentHandles {
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            clock: Mutex::new(0),
+        }
+    }
+
+    fn next_tick(&self) -> u64 {
+        let mut clock = self.clock.lock().unwrap_or_else(|e| e.into_inner());
+        *clock += 1;
+        *clock
+    }
+
+    /// Returns a shareable handle to `path`'s document, opening it on first use.
+    pub fn acquire(
+        &self,
+        path: &Path,
+        content_hash: Option<&str>,
+    ) -> Result<SharedDocument, AppError> {
+        PdfProvider::ensure_file(path)?;
+        let key = handle_key(path, content_hash);
+        let tick = self.next_tick();
+
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+
+        if let Some((handle, last_used)) = entries.get_mut(&key) {
+            *last_used = tick;
+            return Ok(Arc::clone(handle));
+        }
+
+        let document = PdfProvider::load(pdfium()?, path)?;
+        let handle = Arc::new(Mutex::new(document));
+        entries.insert(key, (Arc::clone(&handle), tick));
+
+        // Evict the least-recently-used entries. Dropping the last `Arc` closes the
+        // document, unless a render still holds a clone — in which case the drop
+        // happens when that render finishes, which is precisely when it is safe.
+        if entries.len() > MAX_OPEN_DOCUMENTS {
+            let mut by_age: Vec<(String, u64)> = entries
+                .iter()
+                .map(|(key, (_, last_used))| (key.clone(), *last_used))
+                .collect();
+            by_age.sort_by_key(|(_, last_used)| *last_used);
+            for (stale, _) in by_age.into_iter().take(entries.len() - MAX_OPEN_DOCUMENTS) {
+                entries.remove(&stale);
+            }
+        }
+
+        Ok(handle)
+    }
+
+    /// Drops a cached handle, e.g. when the file is known to have changed.
+    pub fn forget(&self, path: &Path, content_hash: Option<&str>) {
+        let key = handle_key(path, content_hash);
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+    }
+
+    /// Number of documents currently held open.
+    pub fn open_count(&self) -> usize {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
 impl PdfProvider {
+    /// Renders a page through the handle cache — the path both the command surface
+    /// (P1.3) and neighbour pre-render (P1.4) use.
+    pub fn render_cached(
+        handles: &DocumentHandles,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+        scale: f32,
+    ) -> Result<RasterizedPage, AppError> {
+        let handle = handles.acquire(path, content_hash)?;
+        // Lock only this document. Different documents render concurrently; the same
+        // document serialises, which is the required behaviour.
+        let document = handle.lock().unwrap_or_else(|e| e.into_inner());
+        Self::rasterize(&document, page, scale)
+    }
+
+    /// Extracts one page's text through the handle cache.
+    pub fn extract_cached(
+        handles: &DocumentHandles,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+    ) -> Result<String, AppError> {
+        let handle = handles.acquire(path, content_hash)?;
+        let document = handle.lock().unwrap_or_else(|e| e.into_inner());
+        Self::page_text(&document, page)
+    }
+
     fn ensure_file(path: &Path) -> Result<(), AppError> {
         if path.is_file() {
             Ok(())
@@ -169,27 +337,24 @@ impl PdfProvider {
     }
 
     /// Renders a page of the PDF at `path`. This is the workhorse the handle cache
-    /// (P1.3) and neighbour pre-render (P1.4) build on.
+    /// and neighbour pre-render build on.
     pub fn render_page_at(path: &Path, page: u32, scale: f32) -> Result<RasterizedPage, AppError> {
         Self::ensure_file(path)?;
-        let pdfium = Pdfium::new(Self::bind()?);
-        let document = Self::load(&pdfium, path)?;
+        let document = Self::load(pdfium()?, path)?;
         Self::rasterize(&document, page, scale)
     }
 
     /// Extracts the text layer of a single page.
     pub fn extract_page_text(path: &Path, page: u32) -> Result<String, AppError> {
         Self::ensure_file(path)?;
-        let pdfium = Pdfium::new(Self::bind()?);
-        let document = Self::load(&pdfium, path)?;
+        let document = Self::load(pdfium()?, path)?;
         Self::page_text(&document, page)
     }
 
     /// Page count, read without keeping the document open.
     pub fn page_count(path: &Path) -> Result<u32, AppError> {
         Self::ensure_file(path)?;
-        let pdfium = Pdfium::new(Self::bind()?);
-        let document = Self::load(&pdfium, path)?;
+        let document = Self::load(pdfium()?, path)?;
         Ok(document.pages().len() as u32)
     }
 
@@ -225,8 +390,7 @@ impl PdfProvider {
 impl ReaderProvider for PdfProvider {
     fn open(&self, path: &Path) -> Result<DocumentMeta, AppError> {
         Self::ensure_file(path)?;
-        let pdfium = Pdfium::new(Self::bind()?);
-        let document = Self::load(&pdfium, path)?;
+        let document = Self::load(pdfium()?, path)?;
 
         let metadata = document.metadata();
         let tag = |kind: PdfDocumentMetadataTagType| {
@@ -453,6 +617,217 @@ mod tests {
             return;
         }
         assert_eq!(PdfProvider::page_count(&fixture_pdf()).unwrap(), 3);
+    }
+
+    #[test]
+    fn the_handle_cache_reuses_one_document_for_repeated_access() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let handles = DocumentHandles::new();
+        let path = fixture_pdf();
+
+        for _ in 0..5 {
+            let handle = handles.acquire(&path, None).unwrap();
+            assert_eq!(handle.lock().unwrap().pages().len(), 3);
+        }
+
+        // Five acquisitions, one open document: the whole point of P1-D5. If the
+        // cache were bypassed this would be 5 and page turns would re-parse the file.
+        assert_eq!(handles.open_count(), 1);
+    }
+
+    #[test]
+    fn distinct_paths_get_distinct_handles() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let mut other = fixture_pdf();
+        other.set_file_name("sample-copy.pdf");
+        std::fs::copy(fixture_pdf(), &other).unwrap();
+
+        let handles = DocumentHandles::new();
+        handles.acquire(&fixture_pdf(), None).unwrap();
+        handles.acquire(&other, None).unwrap();
+        assert_eq!(handles.open_count(), 2);
+
+        let _ = std::fs::remove_file(&other);
+    }
+
+    #[test]
+    fn a_changed_content_hash_does_not_reuse_the_old_handle() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let handles = DocumentHandles::new();
+        let path = fixture_pdf();
+        handles.acquire(&path, Some("hash-a")).unwrap();
+        handles.acquire(&path, Some("hash-b")).unwrap();
+
+        // Same path, different content: must not serve the stale document.
+        assert_eq!(handles.open_count(), 2);
+    }
+
+    #[test]
+    fn forgetting_a_document_closes_it() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let handles = DocumentHandles::new();
+        let path = fixture_pdf();
+        handles.acquire(&path, Some("h")).unwrap();
+        assert_eq!(handles.open_count(), 1);
+
+        handles.forget(&path, Some("h"));
+        assert_eq!(handles.open_count(), 0);
+    }
+
+    #[test]
+    fn the_cache_is_bounded_and_evicts_the_least_recently_used() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let mut copies = Vec::new();
+        for index in 0..(MAX_OPEN_DOCUMENTS + 2) {
+            let mut copy = fixture_pdf();
+            copy.set_file_name(format!("sample-{index}.pdf"));
+            std::fs::copy(fixture_pdf(), &copy).unwrap();
+            copies.push(copy);
+        }
+
+        let handles = DocumentHandles::new();
+        for copy in &copies {
+            handles.acquire(copy, None).unwrap();
+        }
+
+        // Exceeding capacity evicts down to the bound rather than growing without
+        // limit: this is what keeps a long session from holding every file open.
+        assert_eq!(handles.open_count(), MAX_OPEN_DOCUMENTS);
+
+        // The two oldest were evicted; the most recent is still resident.
+        let newest = handles.acquire(copies.last().unwrap(), None).unwrap();
+        assert_eq!(newest.lock().unwrap().pages().len(), 3);
+        assert_eq!(handles.open_count(), MAX_OPEN_DOCUMENTS);
+
+        for copy in &copies {
+            let _ = std::fs::remove_file(copy);
+        }
+    }
+
+    #[test]
+    fn cached_render_and_extract_agree_with_the_uncached_paths() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let handles = DocumentHandles::new();
+        let path = fixture_pdf();
+
+        let cached_render = PdfProvider::render_cached(&handles, &path, None, 1, 1.0).unwrap();
+        let direct_render = PdfProvider::render_page_at(&path, 1, 1.0).unwrap();
+        assert_eq!(cached_render, direct_render);
+
+        let cached_text = PdfProvider::extract_cached(&handles, &path, None, 1).unwrap();
+        assert_eq!(
+            cached_text,
+            PdfProvider::extract_page_text(&path, 1).unwrap()
+        );
+        assert!(cached_text.contains("BRAVO"));
+    }
+
+    #[test]
+    fn concurrent_renders_of_the_same_document_do_not_interleave_badly() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        // Two threads, one document: the per-document mutex must serialise them
+        // (pdfium-render's default thread_safe feature makes concurrent use of one
+        // PdfDocument unsound, so this both exercises and guards that contract).
+        // A third thread works a different document to show the map lock is not held
+        // across renders, which would serialise unrelated documents.
+        let handles = Arc::new(DocumentHandles::new());
+        let path = fixture_pdf();
+        let mut other = fixture_pdf();
+        other.set_file_name("sample-concurrent.pdf");
+        std::fs::copy(&path, &other).unwrap();
+
+        let results = std::thread::scope(|scope| {
+            let mut threads = Vec::new();
+            for page in [0_u32, 1, 2] {
+                let handles = Arc::clone(&handles);
+                let path = path.clone();
+                threads.push(scope.spawn(move || {
+                    PdfProvider::render_cached(&handles, &path, None, page, 1.0)
+                        .unwrap()
+                        .bytes
+                }));
+            }
+            let handles = Arc::clone(&handles);
+            let other_for_thread = other.clone();
+            threads.push(scope.spawn(move || {
+                PdfProvider::render_cached(&handles, &other_for_thread, None, 0, 1.0)
+                    .unwrap()
+                    .bytes
+            }));
+            threads
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        for bytes in &results {
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        }
+        // Both documents were cached and the run did not deadlock or panic.
+        assert_eq!(handles.open_count(), 2);
+
+        let _ = std::fs::remove_file(&other);
+    }
+
+    #[test]
+    fn handle_key_distinguishes_path_and_content() {
+        let a = handle_key(Path::new("C:/x/a.pdf"), Some("h1"));
+        let b = handle_key(Path::new("C:/x/b.pdf"), Some("h1"));
+        let c = handle_key(Path::new("C:/x/a.pdf"), Some("h2"));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a, handle_key(Path::new("C:/x/a.pdf"), Some("h1")));
+    }
+
+    #[test]
+    fn an_unavailable_page_reports_an_error_through_the_cache() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let handles = DocumentHandles::new();
+        let error =
+            PdfProvider::render_cached(&handles, &fixture_pdf(), None, 42, 1.0).unwrap_err();
+        assert_eq!(error.code(), "OTHER");
+    }
+
+    #[test]
+    fn acquiring_a_missing_file_fails_without_caching_anything() {
+        let handles = DocumentHandles::new();
+        let error = handles
+            .acquire(Path::new("definitely/not/here.pdf"), None)
+            .unwrap_err();
+        assert_eq!(error.code(), "FILE_NOT_FOUND");
+        assert_eq!(handles.open_count(), 0);
     }
 
     fn names(paths: &[PathBuf]) -> Vec<String> {

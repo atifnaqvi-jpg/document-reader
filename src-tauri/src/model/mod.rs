@@ -74,8 +74,10 @@ pub struct SearchHit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderedPage {
-    /// Encoded PNG.
-    pub bytes: Vec<u8>,
+    /// Base64-encoded PNG, not a raw byte array. Tauri serialises `Vec<u8>` as a JSON
+    /// array of numbers, which turns a 200 KB PNG into ~800 KB of IPC payload plus
+    /// parse cost; base64 costs ~33% and the frontend can build a `data:` URL directly.
+    pub bytes: String,
     /// Pixels.
     pub width: u32,
     pub height: u32,

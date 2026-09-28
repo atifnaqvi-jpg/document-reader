@@ -7,6 +7,7 @@ pub mod provider;
 use tauri::Manager;
 
 use db::Db;
+use provider::DocumentHandles;
 
 pub fn run() {
     tauri::Builder::default()
@@ -22,6 +23,10 @@ pub fn run() {
                 format!("cannot open library database at {}: {e}", db_path.display())
             })?;
             app.manage(db);
+            // One handle cache for the process (P1-D5): page turns reuse open PDFium
+            // documents instead of re-parsing the file each time. Behind an `Arc` so a
+            // blocking worker can hold it for the duration of a render.
+            app.manage(std::sync::Arc::new(DocumentHandles::new()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -33,6 +38,7 @@ pub fn run() {
             commands::remove_bookmark,
             commands::set_app_state,
             commands::get_document_page_render,
+            commands::get_document_page_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

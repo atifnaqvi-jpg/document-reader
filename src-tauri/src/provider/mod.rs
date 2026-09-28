@@ -28,7 +28,7 @@ pub trait TextExtractor: Send + Sync + std::fmt::Debug {
 mod pdf;
 mod text;
 
-pub use pdf::PdfProvider;
+pub use pdf::{DocumentHandles, PdfProvider, RasterizedPage};
 pub use text::TextProvider;
 
 pub fn provider_for(path: &Path) -> Result<Arc<dyn ReaderProvider>, AppError> {

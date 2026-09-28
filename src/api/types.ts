@@ -32,6 +32,17 @@ export interface SearchHit {
   snippet: string;
 }
 
+/**
+ * A rendered page (P1-D2). `bytes` is base64-encoded PNG as serialized by Tauri;
+ * `width`/`height` are the rendered pixel dimensions, so the viewer can reserve the
+ * right space before the image decodes and avoid a layout jump on page turn.
+ */
+export interface RenderedPage {
+  bytes: string;
+  width: number;
+  height: number;
+}
+
 export interface AppError {
   code: string;
   message: string;

@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppError, Bookmark, DocumentMeta, LibraryEntry, SearchHit } from "./types";
+import type {
+  AppError,
+  Bookmark,
+  DocumentMeta,
+  LibraryEntry,
+  RenderedPage,
+  SearchHit,
+} from "./types";
 
 export function isAppError(value: unknown): value is AppError {
   return (
@@ -39,3 +46,19 @@ export const removeBookmark = (bookmarkId: string) =>
 
 export const setAppState = (key: string, value: string) =>
   invoke<void>("set_app_state", { key, value });
+
+/**
+ * Renders one page (P1-D2). Expensive on the Rust side — the backend runs it on a
+ * blocking worker, so callers should treat concurrent calls as normal and rely on the
+ * document handle cache + render cache rather than de-duplicating here.
+ */
+export const getDocumentPageRender = (docId: string, page: number, scale: number) =>
+  invoke<RenderedPage>("get_document_page_render", { docId, page, scale });
+
+/** Extracts one page's text layer (feeds indexing/search in P1.6/P1.7). */
+export const getDocumentPageText = (docId: string, page: number) =>
+  invoke<string>("get_document_page_text", { docId, page });
+
+/** Builds a `data:` URL for a rendered page's base64 PNG. */
+export const pageImageSrc = (rendered: RenderedPage) =>
+  `data:image/png;base64,${rendered.bytes}`;

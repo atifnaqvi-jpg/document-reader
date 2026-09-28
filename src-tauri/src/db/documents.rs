@@ -107,6 +107,20 @@ pub fn get(connection: &Connection, id: &str) -> Result<Option<LibraryEntry>, Ap
     Ok(entry)
 }
 
+/// Stored content hash for a document, used as part of the render handle-cache key
+/// (P1-D5): if the file was replaced in place, the old handle must not be reused.
+pub fn content_hash(connection: &Connection, id: &str) -> Result<Option<String>, AppError> {
+    let hash = connection
+        .query_row(
+            "SELECT content_hash FROM Document WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(hash)
+}
+
 pub fn list(connection: &Connection) -> Result<Vec<LibraryEntry>, AppError> {
     let mut statement = connection.prepare(
         "SELECT id, path, title, author, format, pages, added_at, last_opened_at, missing
