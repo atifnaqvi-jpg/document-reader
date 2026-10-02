@@ -47,3 +47,28 @@ export interface AppError {
   code: string;
   message: string;
 }
+
+export type IndexState = "running" | "done" | "failed";
+
+/** Mirrors `index::IndexStatus` (P1-D6). Read back after a remount, not just on event. */
+export interface IndexStatus {
+  state: IndexState;
+  done: number;
+  total: number;
+}
+
+/** Payload of the `index://progress` event. */
+export interface IndexProgress {
+  docId: string;
+  done: number;
+  total: number;
+}
+
+export interface IndexSummary {
+  pagesIndexed: number;
+  pagesSkipped: number;
+  cancelled: boolean;
+}
+
+/** Event name emitted by the backend while indexing (P1-D6). */
+export const INDEX_PROGRESS_EVENT = "index://progress";

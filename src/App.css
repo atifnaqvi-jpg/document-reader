@@ -203,3 +203,89 @@ button:disabled {
   color: var(--text-muted);
   font-size: 12px;
 }
+
+/* Search sidebar (P1.7). Fixed width like the library pane, but narrower: it holds a
+   query box and a result list, not document metadata. */
+.search-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  padding: 6px;
+}
+
+.search-box input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.search-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.search-results button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.search-results button:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+}
+
+.search-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.search-page {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* FTS5 snippets are prose, so they need to wrap rather than push the pane wide. */
+.search-snippet {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.search-pane .muted {
+  font-size: 11px;
+}
+
+/* Indexing indicator sits above the viewer so progress is visible without displacing
+   the page image. */
+.index-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.index-status.failed {
+  color: var(--text-warning, #b06000);
+}
+
+.index-status progress {
+  width: 120px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

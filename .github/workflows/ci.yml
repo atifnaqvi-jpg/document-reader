@@ -56,7 +56,7 @@ jobs:
       - run: npm run build
 
   windows-check:
-    name: Windows compile check (shipping target)
+    name: Windows compile check + render smoke (shipping target)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,3 +78,33 @@ jobs:
       - name: cargo check
         working-directory: src-tauri
         run: cargo check --target x86_64-pc-windows-msvc
+
+      # The render smoke test (docs/P1-DESIGN.md §5). Linux CI cannot load the Windows
+      # DLL, so every PDFium-guarded test skips there and a green suite proves nothing
+      # about rendering. This is the only job that exercises the real PDFium code path:
+      # rasterization, the render cache under a byte budget, and the memory assertion.
+      #
+      # PDFIUM_LIBRARY_PATH is set explicitly because the tests run from `target/`, not
+      # from the install layout the app resolves the DLL from.
+      - name: Render smoke tests (real PDFium)
+        working-directory: src-tauri
+        env:
+          PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
+        run: cargo test --test memory -- --nocapture
+
+      # A silently-skipped test suite is worse than none: it looks green while testing
+      # nothing. Fail loudly if the guards turned out to be tripping.
+      - name: Assert the PDFium tests actually ran
+        working-directory: src-tauri
+        env:
+          PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
+        shell: pwsh
+        run: |
+          $output = cargo test 2>&1 | Out-String
+          $output | Write-Output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $skipped = ([regex]::Matches($output, "skipping: PDFium")).Count
+          if ($skipped -gt 0) {
+            Write-Error "PDFium tests skipped ($skipped) despite PDFium being fetched"
+            exit 1
+          }

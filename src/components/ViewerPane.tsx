@@ -11,7 +11,20 @@ import type { AppError, LibraryEntry, RenderedPage } from "../api/types";
 const ZOOM_LEVELS = [0.5, 0.75, 1, 1.5, 2, 3] as const;
 const DEFAULT_ZOOM = 2;
 
-export function ViewerPane({ entry }: { entry: LibraryEntry | null }) {
+/** A request to move the viewer to a page. The nonce makes an identical request (same
+ * page, same document — e.g. clicking the same search hit twice) retrigger the effect. */
+export interface JumpRequest {
+  page: number;
+  nonce: number;
+}
+
+export function ViewerPane({
+  entry,
+  jump,
+}: {
+  entry: LibraryEntry | null;
+  jump?: JumpRequest | null;
+}) {
   const [page, setPage] = useState(0);
   const [pageCount, setPageCount] = useState<number | null>(null);
   const [zoom, setZoom] = useState<number>(DEFAULT_ZOOM);
@@ -26,6 +39,8 @@ export function ViewerPane({ entry }: { entry: LibraryEntry | null }) {
   const requestRef = useRef(0);
 
   const docId = entry?.id ?? null;
+  const jumpPage = jump?.page ?? null;
+  const jumpNonce = jump?.nonce ?? 0;
 
   // Reset per-document state when the selection changes, so the page number of the
   // previous document does not carry into the new one.
@@ -50,6 +65,26 @@ export function ViewerPane({ entry }: { entry: LibraryEntry | null }) {
       cancelled = true;
     };
   }, [docId, entry?.pages]);
+
+  // Latest count, readable from the jump effect without making `pageCount` a dependency:
+  // including it would re-run the jump whenever the count arrives and yank the user back
+  // to the hit page after they had already navigated away.
+  const pageCountRef = useRef<number | null>(null);
+  pageCountRef.current = pageCount;
+
+  // A search hit asks the viewer to go to a specific page. Clamping happens here rather
+  // than at the call site because `pageCount` is only authoritative after the count
+  // request resolves, so the caller cannot know the last page. The nonce means clicking
+  // the same hit twice still re-fires.
+  const lastJumpNonce = useRef(0);
+  useEffect(() => {
+    if (jumpPage === null || jumpNonce === lastJumpNonce.current) return;
+    lastJumpNonce.current = jumpNonce;
+
+    const count = pageCountRef.current;
+    const target = count !== null ? Math.min(jumpPage, Math.max(0, count - 1)) : jumpPage;
+    setPage(Math.max(0, target));
+  }, [jumpPage, jumpNonce]);
 
   useEffect(() => {
     if (!docId) return;

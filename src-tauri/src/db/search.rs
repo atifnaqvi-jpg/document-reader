@@ -37,6 +37,58 @@ pub fn query(connection: &Connection, query: &str, limit: u32) -> Result<Vec<Sea
     }
 }
 
+/// Inserts a batch of pages for one document (P1-D6).
+///
+/// Batched rather than one INSERT per page: a 500-page index is 500 statements, and
+/// each one would otherwise be its own implicit transaction (500 fsyncs on a real
+/// database). One transaction for the batch is what makes indexing a 500-page PDF
+/// finish in seconds rather than minutes.
+///
+/// Pages with no extractable text are skipped: FTS5 has nothing to index for them, and
+/// storing an empty row would only inflate the table and produce noise hits.
+pub fn insert_pages(
+    connection: &Connection,
+    document_id: &str,
+    pages: &[(u32, String)],
+) -> Result<u64, AppError> {
+    let mut statement = connection
+        .prepare("INSERT INTO Search (document_id, page, content) VALUES (?1, ?2, ?3)")?;
+
+    let mut inserted = 0;
+    for (page, content) in pages {
+        if content.trim().is_empty() {
+            continue;
+        }
+        statement.execute(params![document_id, *page as i64, content])?;
+        inserted += 1;
+    }
+    Ok(inserted)
+}
+
+/// Removes every indexed row for a document. Must run before re-indexing, or a
+/// re-index would leave the previous generation's rows behind and return stale hits
+/// for pages whose text has since changed.
+pub fn delete_document(connection: &Connection, document_id: &str) -> Result<usize, AppError> {
+    let removed = connection.execute(
+        "DELETE FROM Search WHERE document_id = ?1",
+        params![document_id],
+    )?;
+    Ok(removed)
+}
+
+/// How many rows a document has in the index. Zero means "never indexed", which is
+/// how a content change is detected (P1-D6): the id is stable across re-imports, so
+/// row count plus the stored `content_hash` is what distinguishes first-open from
+/// re-index.
+pub fn row_count(connection: &Connection, document_id: &str) -> Result<u64, AppError> {
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM Search WHERE document_id = ?1",
+        params![document_id],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(0) as u64)
+}
+
 fn quote_phrase(phrase: &str) -> String {
     let escaped = phrase.replace('"', "\"\"");
     format!("\"{escaped}\"")
@@ -119,5 +171,71 @@ mod tests {
         assert_eq!(query(&connection, "alpha beta", 10).unwrap().len(), 1);
         // Word order matters inside a quoted phrase, which is the intent.
         assert!(query(&connection, "beta alpha", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn insert_pages_makes_all_pages_searchable() {
+        let connection = setup();
+        let pages = vec![
+            (0, "ALPHA first page".to_string()),
+            (1, "BRAVO second page".to_string()),
+            (2, "CHARLIE third page".to_string()),
+        ];
+
+        assert_eq!(insert_pages(&connection, "d1", &pages).unwrap(), 3);
+
+        assert_eq!(query(&connection, "ALPHA", 10).unwrap()[0].page, 0);
+        assert_eq!(query(&connection, "BRAVO", 10).unwrap()[0].page, 1);
+        assert_eq!(query(&connection, "CHARLIE", 10).unwrap()[0].page, 2);
+        assert_eq!(row_count(&connection, "d1").unwrap(), 3);
+    }
+
+    #[test]
+    fn insert_pages_skips_blank_content_rather_than_indexing_empty_rows() {
+        let connection = setup();
+        let pages = vec![
+            (0, "real text".to_string()),
+            (1, String::new()),
+            (2, "   \n ".to_string()),
+        ];
+
+        // Only the page with actual text is stored; blank pages are not indexed.
+        assert_eq!(insert_pages(&connection, "d1", &pages).unwrap(), 1);
+        assert_eq!(row_count(&connection, "d1").unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_document_scopes_to_one_document() {
+        let connection = setup();
+        insert_pages(&connection, "d1", &[(0, "needle in doc one".to_string())]).unwrap();
+        insert_pages(&connection, "d2", &[(0, "needle in doc two".to_string())]).unwrap();
+
+        assert_eq!(delete_document(&connection, "d1").unwrap(), 1);
+
+        // d2's rows survive: re-indexing one document must not wipe another's.
+        assert_eq!(row_count(&connection, "d1").unwrap(), 0);
+        assert_eq!(row_count(&connection, "d2").unwrap(), 1);
+        let hits = query(&connection, "needle", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document_id, "d2");
+    }
+
+    #[test]
+    fn reindexing_replaces_previous_content_instead_of_duplicating() {
+        let connection = setup();
+        insert_pages(&connection, "d1", &[(0, "obsolete wording".to_string())]).unwrap();
+
+        delete_document(&connection, "d1").unwrap();
+        insert_pages(&connection, "d1", &[(0, "current wording".to_string())]).unwrap();
+
+        assert!(query(&connection, "obsolete", 10).unwrap().is_empty());
+        assert_eq!(query(&connection, "current", 10).unwrap().len(), 1);
+        assert_eq!(row_count(&connection, "d1").unwrap(), 1);
+    }
+
+    #[test]
+    fn row_count_for_an_unindexed_document_is_zero() {
+        let connection = setup();
+        assert_eq!(row_count(&connection, "never-seen").unwrap(), 0);
     }
 }

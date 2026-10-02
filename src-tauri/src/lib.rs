@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod db;
+pub mod index;
 pub mod library;
 pub mod model;
 pub mod provider;
@@ -28,6 +29,10 @@ pub fn run() {
             // cache (P1-D5) and the byte-budgeted page raster cache (P1-D3), so both
             // are shared across commands and blocking workers.
             app.manage(std::sync::Arc::new(RenderService::new()));
+            // One index service for the process, so "who is indexing this document" is a
+            // single answer. Kept separate from `RenderService` because indexing outlives
+            // a single render and must be cancellable per document (P1-D6).
+            app.manage(std::sync::Arc::new(index::IndexService::new()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -38,6 +43,9 @@ pub fn run() {
             commands::list_bookmarks,
             commands::remove_bookmark,
             commands::set_app_state,
+            commands::get_app_state,
+            commands::index_document,
+            commands::get_index_status,
             commands::get_document_page_render,
             commands::get_document_page_text,
             commands::get_document_page_count,

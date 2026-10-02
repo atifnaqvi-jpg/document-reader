@@ -3,6 +3,8 @@ import type {
   AppError,
   Bookmark,
   DocumentMeta,
+  IndexStatus,
+  IndexSummary,
   LibraryEntry,
   RenderedPage,
   SearchHit,
@@ -46,6 +48,25 @@ export const removeBookmark = (bookmarkId: string) =>
 
 export const setAppState = (key: string, value: string) =>
   invoke<void>("set_app_state", { key, value });
+
+/** Reads back state written by {@link setAppState} (P1-D7). `null` when never set. */
+export const getAppState = (key: string) =>
+  invoke<string | null>("get_app_state", { key });
+
+/**
+ * A document's index status (P1-D6). `null` means never indexed. Read after a remount,
+ * because the `index://progress` event may have fired while the pane was unmounted.
+ */
+export const getIndexStatus = (documentId: string) =>
+  invoke<IndexStatus | null>("get_index_status", { documentId });
+
+/**
+ * Indexes a document and resolves when the run finishes. `open_document` already starts
+ * indexing, so this is for an explicit retry; progress normally arrives via the
+ * `index://progress` event rather than by awaiting this.
+ */
+export const indexDocument = (documentId: string) =>
+  invoke<IndexSummary>("index_document", { documentId });
 
 /**
  * Renders one page (P1-D2). Expensive on the Rust side — the backend runs it on a

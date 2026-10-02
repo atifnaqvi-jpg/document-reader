@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 use crate::db::{app_state, bookmarks, search, Db};
+use crate::index::{IndexService, IndexStatus, IndexSummary};
 use crate::library;
 use crate::model::{
     AppError, Bookmark, DocumentMeta, Format, LibraryEntry, RenderedPage, SearchHit,
@@ -21,11 +22,13 @@ fn now() -> i64 {
 
 #[tauri::command]
 pub fn open_document(
+    app: tauri::AppHandle,
     db: State<'_, Db>,
     service: State<'_, Arc<RenderService>>,
+    index_service: State<'_, Arc<IndexService>>,
     path: String,
 ) -> Result<DocumentMeta, AppError> {
-    db.with(|connection| {
+    let (meta, doc_id, path_on_disk) = db.with(|connection| {
         let entry = library::open_and_import(connection, path.as_ref(), now())?;
 
         // Re-opening is the only moment a document's bytes can change under a stable id,
@@ -33,8 +36,54 @@ pub fn open_document(
         // file edited outside the app would keep serving its previous pages.
         service.forget_document(&entry.meta.id, Path::new(&entry.path));
 
-        Ok(entry.meta)
-    })
+        // A run already indexing this document is working from content that no longer
+        // exists, so it is told to abandon the rest. It cannot be joined by a second run
+        // (single writer per document), so the surviving run restarts for the new bytes.
+        index_service.invalidate(&entry.meta.id);
+
+        let doc_id = entry.meta.id.clone();
+        Ok((entry.meta, doc_id, entry.path))
+    })?;
+
+    // Indexing is started here rather than from the viewer, so a document is searchable
+    // even if the user opens it and immediately moves to another one.
+    spawn_indexing(&app, doc_id, path_on_disk);
+
+    Ok(meta)
+}
+
+/// Starts a background index for a document if one is needed and none is running.
+///
+/// Detached on purpose: the import must not wait for a 500-page extraction to finish.
+/// Failures are swallowed here because they are already recorded as an index status,
+/// which is what the UI reads.
+fn spawn_indexing(app: &tauri::AppHandle, doc_id: String, path: String) {
+    use tauri::Manager;
+
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // State is re-fetched from the handle inside the task: `State<'_, T>` borrows the
+        // app and cannot be moved into a `'static` worker.
+        let db = app.state::<Db>();
+        let render = app.state::<Arc<RenderService>>();
+        let index_service = app.state::<Arc<IndexService>>();
+
+        // Format is decided by the file itself, so a `.docx` never reaches the indexer.
+        let Ok(Some(entry)) = db.with(|connection| crate::db::documents::get(connection, &doc_id))
+        else {
+            return;
+        };
+        if !crate::index::app::indexable(&entry) {
+            return;
+        }
+        // A missing file would only produce a page's worth of failures.
+        if !Path::new(&path).is_file() {
+            return;
+        }
+
+        let _ =
+            crate::index::app::index_document(Some(&app), &db, &render, &index_service, &doc_id);
+    });
 }
 
 #[tauri::command]
@@ -71,6 +120,49 @@ pub fn remove_bookmark(db: State<'_, Db>, bookmark_id: String) -> Result<(), App
 #[tauri::command]
 pub fn set_app_state(db: State<'_, Db>, key: String, value: String) -> Result<(), AppError> {
     db.with(|connection| app_state::set(connection, &key, &value))
+}
+
+/// Reads a value written by [`set_app_state`] (P1-D7).
+///
+/// P0 could only write state, so the theme was applied on change and lost on restart.
+/// A missing key is `None`, not an error: on first run every key is missing.
+#[tauri::command]
+pub fn get_app_state(db: State<'_, Db>, key: String) -> Result<Option<String>, AppError> {
+    db.with(|connection| app_state::get(connection, &key))
+}
+
+/// A document's index status, or `None` if it has never been indexed (P1-D6).
+#[tauri::command]
+pub fn get_index_status(
+    db: State<'_, Db>,
+    document_id: String,
+) -> Result<Option<IndexStatus>, AppError> {
+    crate::index::app::document_status(&db, &document_id)
+}
+
+/// Indexes a document and waits for it to finish (P1-D6).
+///
+/// `open_document` already starts indexing, so the UI needs this only for an explicit
+/// retry after a failure. It is `async` and returns once the index is complete, which
+/// can be seconds for a large document; callers should rely on `index://progress`
+/// rather than blocking a UI affordance on it.
+#[tauri::command]
+pub async fn index_document(
+    app: tauri::AppHandle,
+    service: State<'_, Arc<RenderService>>,
+    index_service: State<'_, Arc<IndexService>>,
+    document_id: String,
+) -> Result<IndexSummary, AppError> {
+    let render = Arc::clone(&service);
+    let index_service = Arc::clone(&index_service);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let db = app.state::<Db>();
+        crate::index::app::index_document(Some(&app), &db, &render, &index_service, &document_id)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("index task failed: {e}")))?
 }
 
 /// Renders one page as PNG bytes plus its pixel size (P1-D2).
