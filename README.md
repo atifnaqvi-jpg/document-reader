@@ -25,12 +25,14 @@ React + TypeScript frontend.
 
 ## Status
 
-**P0 skeleton implemented.** The app shell runs: open a file, it appears in your
-library with its metadata. Page rendering, text extraction and search indexing
-are P1 work — the seams for them are already in place.
+**P1 implemented.** Open a file and it appears in your library; it can be read
+(pages, zoom, keyboard navigation) and searched full-text, with indexing running
+in the background on import.
 
 - ✅ P0 — Skeleton: app shell, provider seam, SQLite schema, full command surface.
-- ⏭️ P1 — Read PDF: PDFium rendering, page navigation, zoom, text extraction.
+- ✅ P1 — Read PDF: PDFium rendering, page navigation, zoom, text extraction,
+  background indexing into FTS5, and a search UI.
+- ⏭️  P2 — next phase, not yet specified.
 
 ## Build
 
@@ -127,7 +129,22 @@ work regardless.
 ## Tests
 
 ```bash
-cd src-tauri && cargo test          # 48 tests: schema, FTS5, search, library, providers
+cd src-tauri && cargo test          # schema, FTS5, search, library, providers,
+                                    # render cache, indexer, memory assertion
 cd src-tauri && cargo clippy --all-targets -- -D warnings
+cd src-tauri && cargo fmt --check
 npm run build                       # typecheck + frontend bundle
 ```
+
+A green `cargo test` is **not** on its own evidence that rendering works. The
+PDFium-backed tests (rasterization, the render cache, the memory assertion) skip
+themselves where PDFium is absent, which is the common case on a Linux box: it
+cannot load the Windows `pdfium.dll`. Count the skips — the only acceptable
+answer is zero:
+
+```bash
+cd src-tauri && cargo test 2>&1 | grep -c "skipping: PDFium"
+```
+
+The full render path is exercised in CI on `windows-latest`, which fails the
+build if any of those tests skipped.
