@@ -51,9 +51,33 @@ jobs:
           }
           Get-Item "src-tauri/resources/pdfium.dll" | Select-Object Name, Length
 
+      # PDFium is fetched into `src-tauri/resources/`, but the tests run from `target/`
+      # and the app's resolver only looks next to the executable, so the path has to be
+      # given explicitly. Without it every PDFium-guarded test skips itself and the whole
+      # rendering path — rasterization, the cache's byte budget, the memory assertion —
+      # goes unvalidated in the very build that produces the shipped installer.
       - name: Run tests
         working-directory: src-tauri
+        env:
+          PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
         run: cargo test
+
+      # A skipped suite looks exactly like a passing one. This is the check that tells
+      # them apart, so it is worth failing the release over.
+      - name: Assert the PDFium tests actually ran
+        working-directory: src-tauri
+        env:
+          PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
+        shell: pwsh
+        run: |
+          $output = cargo test 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { Write-Output $output; exit $LASTEXITCODE }
+          $skipped = ([regex]::Matches($output, "skipping: PDFium")).Count
+          if ($skipped -gt 0) {
+            Write-Error "PDFium tests skipped ($skipped) despite PDFium being fetched; the installer would ship unvalidated"
+            exit 1
+          }
+          Write-Output "PDFium tests ran (0 skips)."
 
       - name: Build installer
         run: npm run tauri build
