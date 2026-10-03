@@ -56,6 +56,7 @@ pub fn run() {
             commands::list_page_annotations,
             commands::remove_annotation,
             commands::next_save_path,
+            commands::restore_annotation,
             commands::save_edits,
         ])
         .run(tauri::generate_context!())

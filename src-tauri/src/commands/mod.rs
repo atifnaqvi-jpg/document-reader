@@ -401,7 +401,10 @@ pub fn save_edits(db: State<'_, Db>, document_id: String) -> Result<String, AppE
         let path = documents::get(connection, &document_id)?
             .map(|entry| entry.path)
             .ok_or_else(|| AppError::Other(format!("document not found: {document_id}")))?;
-        Ok((path, annotations::list_for_document(connection, &document_id)?))
+        Ok((
+            path,
+            annotations::list_for_document(connection, &document_id)?,
+        ))
     })?;
 
     let source = std::fs::read(&original_path)
@@ -421,4 +424,13 @@ pub fn save_edits(db: State<'_, Db>, document_id: String) -> Result<String, AppE
     // rasters of the original stay correct. Opening the edited file routes through
     // `open_document`, which invalidates by path (P2-D6).
     Ok(target.to_string_lossy().to_string())
+}
+
+/// Re-inserts a deleted annotation under its original id, for undo (P2-D7).
+///
+/// Takes the whole row rather than rebuilding it from the current DB state: the row is
+/// gone, so the caller's captured copy is the only record of its id and timestamps.
+#[tauri::command]
+pub fn restore_annotation(db: State<'_, Db>, annotation: Annotation) -> Result<(), AppError> {
+    db.with_mut(|connection| annotations::restore(connection, &annotation))
 }

@@ -6,6 +6,9 @@ import {
   toAppError,
 } from "../api/invoke";
 import type { AppError, LibraryEntry, RenderedPage } from "../api/types";
+import { AnnotationOverlay } from "./AnnotationOverlay";
+import type { PageMetrics } from "./AnnotationOverlay";
+import { useEditor } from "../state/EditorProvider";
 
 /** Zoom levels offered by the viewer. Scale multiplies the PDF's nominal 96 DPI. */
 const ZOOM_LEVELS = [0.5, 0.75, 1, 1.5, 2, 3] as const;
@@ -37,7 +40,9 @@ export interface ViewerHandle {
 export const ViewerPane = forwardRef<ViewerHandle, {
   entry: LibraryEntry | null;
   jump?: JumpRequest | null;
-}>(function ViewerPane({ entry, jump }, ref) {
+  /** Reports the visible page up so the editor can scope its annotation list. */
+  onPageChange?: (page: number) => void;
+}>(function ViewerPane({ entry, jump, onPageChange }, ref) {
 
   const [page, setPage] = useState(0);
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -45,6 +50,7 @@ export const ViewerPane = forwardRef<ViewerHandle, {
   const [rendered, setRendered] = useState<RenderedPage | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [rendering, setRendering] = useState(false);
+  const { annotations } = useEditor();
 
   // Renders are async and can be superseded by a newer page/zoom request. Tracking the
   // in-flight request lets a stale response be dropped instead of flashing over the
@@ -153,6 +159,14 @@ export const ViewerPane = forwardRef<ViewerHandle, {
   // does not change identity on every page turn.
   const pageRef = useRef(page);
   pageRef.current = page;
+
+  // Report the visible page upward for the editor's benefit. Kept in a ref too, so a
+  // caller passing an inline lambda does not re-run the effect on every render.
+  const onPageChangeRef = useRef(onPageChange);
+  onPageChangeRef.current = onPageChange;
+  useEffect(() => {
+    onPageChangeRef.current?.(page);
+  }, [page]);
 
   useImperativeHandle(
     ref,
@@ -265,15 +279,18 @@ export const ViewerPane = forwardRef<ViewerHandle, {
         ) : null}
 
         {rendered && !error ? (
-          <img
-            className="page-image"
-            src={pageImageSrc(rendered)}
-            // Explicit pixel size from the backend (P1-D2): the container is sized
-            // before the PNG decodes, so a page turn does not reflow the viewer.
-            width={rendered.width}
-            height={rendered.height}
-            alt={`Page ${page + 1}`}
-          />
+          <div className="page-stage">
+            <img
+              className="page-image"
+              src={pageImageSrc(rendered)}
+              // Explicit pixel size from the backend (P1-D2): the container is sized
+              // before the PNG decodes, so a page turn does not reflow the viewer.
+              width={rendered.width}
+              height={rendered.height}
+              alt={`Page ${page + 1}`}
+            />
+            <AnnotationOverlay metrics={pageMetrics(rendered, page, zoom)} annotations={annotations} />
+          </div>
         ) : null}
 
         {rendering ? <p className="muted">Rendering page…</p> : null}
@@ -281,3 +298,29 @@ export const ViewerPane = forwardRef<ViewerHandle, {
     </div>
   );
 });
+
+/**
+ * PDF points for a rendered page.
+ *
+ * The backend renders at the PDF's nominal 96 DPI multiplied by `scale`, and a PDF point
+ * is 1/72", so points = renderedPixels / scale. Deriving it here keeps the viewer from
+ * needing a second round trip just to learn the page box.
+ */
+function pagePoints(rendered: RenderedPage, scale: number): number {
+  const safeScale = scale > 0 ? scale : 1;
+  return rendered.height / safeScale;
+}
+
+function pageMetrics(
+  rendered: RenderedPage,
+  pageNumber: number,
+  scale: number,
+): PageMetrics {
+  return {
+    pageNumber,
+    width: rendered.width,
+    height: rendered.height,
+    pageHeightPoints: pagePoints(rendered, scale),
+    scale,
+  };
+}

@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
+  Annotation,
+  AnnotationKind,
   AppError,
   Bookmark,
   DocumentMeta,
@@ -119,3 +121,52 @@ export const setWindowFullscreen = (value: boolean) =>
  */
 export const onWindowResized = (handler: () => void) =>
   getCurrentWindow().onResized(() => handler());
+
+// --- P2: editing ---------------------------------------------------------------
+
+/** Creates an annotation; the backend writes its FTS row in the same transaction (D5). */
+export const addAnnotation = (
+  documentId: string,
+  page: number,
+  kind: AnnotationKind,
+  data: string,
+  text: string | null,
+) => invoke<Annotation>("add_annotation", { documentId, page, kind, data, text });
+
+export const updateAnnotation = (
+  annotationId: string,
+  data: string,
+  text: string | null,
+) => invoke<Annotation>("update_annotation", { annotationId, data, text });
+
+export const listAnnotations = (documentId: string) =>
+  invoke<Annotation[]>("list_annotations", { documentId });
+
+/** Only the annotations on one page, which is what the overlay renders. */
+export const listPageAnnotations = (documentId: string, page: number) =>
+  invoke<Annotation[]>("list_page_annotations", { documentId, page });
+
+export const removeAnnotation = (annotationId: string) =>
+  invoke<void>("remove_annotation", { annotationId });
+
+/**
+ * The path a "save edits" would write (P2-D2), for showing the filename in a confirm
+ * dialog before committing. Resolved on the Rust side so the version number in the name
+ * cannot race between two saves.
+ */
+export const nextSavePath = (documentId: string) =>
+  invoke<string>("next_save_path", { documentId });
+
+/**
+ * Writes the document's annotations to a new versioned file (P2-D2) and returns that
+ * path. The original is never modified by this call.
+ */
+export const saveEdits = (documentId: string) =>
+  invoke<string>("save_edits", { documentId });
+
+/**
+ * Re-inserts a deleted annotation under its original id (P2-D7). Undo needs the whole
+ * row back — a fresh id would break anything already holding the old one.
+ */
+export const restoreAnnotation = (annotation: Annotation) =>
+  invoke<void>("restore_annotation", { annotation });

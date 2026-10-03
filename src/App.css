@@ -394,3 +394,125 @@ button:disabled {
 .menu-error {
   color: var(--danger);
 }
+
+/* --- P2: editing ------------------------------------------------------------- */
+
+.page-stage {
+  position: relative;
+  /* Shrink-wraps the page image so the overlay's pixel coordinates line up with the
+     rendered PNG. */
+  display: inline-block;
+  line-height: 0;
+}
+
+.annotation-overlay {
+  position: absolute;
+  inset: 0;
+  /* Must not swallow clicks while reading; only an active tool captures the pointer,
+     and saved marks re-enable it on themselves. */
+  pointer-events: none;
+}
+
+.annotation-overlay.drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.annotation-mark {
+  position: absolute;
+  background: none;
+  border: none;
+  padding: 0;
+  pointer-events: none;
+}
+
+.annotation-mark.selected {
+  outline: 2px solid var(--accent, #1f6feb);
+}
+
+.annotation-rect {
+  position: absolute;
+  display: block;
+}
+
+.kind-note,
+.kind-shape {
+  position: absolute;
+  background: transparent;
+}
+
+.kind-note {
+  border-left: 4px solid;
+  border-radius: 2px;
+}
+
+.kind-shape {
+  border: 2px solid;
+}
+
+.annotation-draft {
+  position: absolute;
+  border: 1px dashed;
+  background: currentColor;
+  opacity: 0.25;
+}
+
+.annotation-draft-ink {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.editor-pane {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border, #d0d7de);
+}
+
+.editor-tools,
+.editor-actions,
+.editor-style {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.editor-tools button[aria-pressed="true"] {
+  background: var(--accent, #1f6feb);
+  color: #fff;
+}
+
+.editor-confirm {
+  flex-basis: 100%;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+}
+
+.editor-confirm .path,
+.editor-saved .path {
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
+
+.editor-saved {
+  flex-basis: 100%;
+  color: var(--ok, #1a7f37);
+}
+
+.editor-error {
+  flex-basis: 100%;
+  color: var(--danger, #d1242f);
+}
+
+.search-origin {
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  background: var(--accent-soft, #ddf4ff);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}

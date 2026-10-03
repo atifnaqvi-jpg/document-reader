@@ -61,6 +61,35 @@ pub fn add(
     Ok(annotation)
 }
 
+/// Re-inserts a previously deleted annotation **under its original id** (P2-D7).
+///
+/// Undo must be able to put an annotation back exactly as it was: a fresh id would
+/// break anything already holding the old one (a selection, a search hit), and would
+/// make redo-then-undo sequences accumulate rows nobody can reference. Callers pass the
+/// full row they captured before deleting.
+pub fn restore(connection: &mut Connection, annotation: &Annotation) -> Result<(), AppError> {
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT INTO Annotation (id, document_id, page, atype, data, text, created_at, modified_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            annotation.id,
+            annotation.document_id,
+            annotation.page,
+            annotation.kind.as_str(),
+            annotation.data,
+            annotation.text,
+            annotation.created_at,
+            annotation.modified_at
+        ],
+    )?;
+    if let Some(text) = annotation.text.as_deref() {
+        index_text(&transaction, annotation, text)?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Replaces an annotation's payload and text, updating both indexes.
 pub fn update(
     connection: &mut Connection,
@@ -437,5 +466,87 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows, 0, "whitespace-only text has nothing to index");
+    }
+
+    #[test]
+    fn restore_reinstates_a_deleted_row_exactly() {
+        // P2-D7: undo must put the annotation back as it was, or anything holding
+        // its id (a selection, a search hit) breaks.
+        let mut connection = setup();
+        let created = add(
+            &mut connection,
+            "d1",
+            3,
+            AnnotationKind::Note,
+            "{\"v\":1}".to_string(),
+            Some("remember".to_string()),
+            10,
+        )
+        .unwrap();
+
+        remove(&mut connection, &created.id).unwrap();
+        assert_eq!(count_for_document(&connection, "d1").unwrap(), 0);
+
+        restore(&mut connection, &created).unwrap();
+
+        let rows = list_for_document(&connection, "d1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], created, "every field survives the round trip");
+    }
+
+    #[test]
+    fn restore_puts_the_row_back_in_the_search_index() {
+        // A restored note must be searchable again; otherwise undo quietly loses the
+        // annotation from search while it is visible on the page.
+        let mut connection = setup();
+        let created = add(
+            &mut connection,
+            "d1",
+            1,
+            AnnotationKind::Note,
+            "{\"v\":1}".to_string(),
+            Some("quartzite".to_string()),
+            10,
+        )
+        .unwrap();
+
+        remove(&mut connection, &created.id).unwrap();
+        assert_eq!(matches(&connection, "quartzite"), 0);
+
+        restore(&mut connection, &created).unwrap();
+        assert_eq!(matches(&connection, "quartzite"), 1);
+    }
+
+    #[test]
+    fn restoring_twice_is_rejected_rather_than_duplicated() {
+        // A double undo (or a race) must not silently create a second row with the
+        // same id; the primary key rejects it.
+        let mut connection = setup();
+        let created = add(
+            &mut connection,
+            "d1",
+            1,
+            AnnotationKind::Note,
+            "{\"v\":1}".to_string(),
+            None,
+            10,
+        )
+        .unwrap();
+
+        remove(&mut connection, &created.id).unwrap();
+        restore(&mut connection, &created).unwrap();
+        assert!(restore(&mut connection, &created).is_err());
+        assert_eq!(count_for_document(&connection, "d1").unwrap(), 1);
+    }
+
+    /// How many indexed rows match a term, for asserting the FTS side is in lockstep.
+    fn matches(connection: &Connection, term: &str) -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM AnnotationSearch WHERE AnnotationSearch MATCH ?1",
+                params![term],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 }

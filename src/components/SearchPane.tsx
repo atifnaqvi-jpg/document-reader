@@ -93,6 +93,13 @@ export function SearchPane({ entries, onOpenHit }: Props) {
               >
                 <span className="search-title">{titleFor(hit.documentId)}</span>
                 <span className="search-page">p. {hit.page + 1}</span>
+                {/* A hit from a note the user wrote is labelled (P2-D5): without it,
+                    "my own comment" and "the book's text" look identical in the list. */}
+                {hit.origin === "annotation" ? (
+                  <span className="search-origin" title="From your annotation">
+                    note
+                  </span>
+                ) : null}
                 {/* The snippet is FTS5's own output: matches are wrapped in [ ] by the
                     backend's snippet() call, so it is rendered as text, never as HTML. */}
                 <span className="search-snippet">{hit.snippet}</span>

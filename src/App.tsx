@@ -5,12 +5,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { listLibrary, openDocument, toAppError } from "./api/invoke";
 import type { AppError, LibraryEntry } from "./api/types";
+import { EditorPane } from "./components/EditorPane";
 import { ErrorBanner, LibraryPane } from "./components/LibraryPane";
 import { IndexingIndicator, SearchPane } from "./components/SearchPane";
 import { Toolbar } from "./components/Toolbar";
 import { ViewerPane } from "./components/ViewerPane";
 import type { JumpRequest, ViewerHandle } from "./components/ViewerPane";
 import type { NavigationTarget } from "./components/Menu";
+import { EditorProvider } from "./state/EditorProvider";
 import { ReadingModeProvider, useReadingMode } from "./state/ReadingMode";
 import { ThemeProvider } from "./theme/ThemeProvider";
 
@@ -24,6 +26,9 @@ function Workspace() {
   const [error, setError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
   const [jump, setJump] = useState<JumpRequest | null>(null);
+  // Which page the viewer is showing, reported up only so the EditorProvider can scope
+  // its annotation list. The viewer remains the owner of its own page state.
+  const [visiblePage, setVisiblePage] = useState(0);
   const { isFullscreen, chromeHidden, error: fullscreenError, toggleFullscreen, toggleChrome } =
     useReadingMode();
 
@@ -70,6 +75,8 @@ function Workspace() {
   // even when the page does not, so clicking the same hit twice re-navigates.
   const handleOpenHit = useCallback((entry: LibraryEntry, page: number) => {
     setSelected(entry);
+    // A hit inside a note on another page has to move the viewer too, so annotation
+    // hits navigate exactly like text hits (D5c).
     setJump((previous) => ({ page, nonce: (previous?.nonce ?? 0) + 1 }));
   }, []);
 
@@ -122,7 +129,18 @@ function Workspace() {
         </aside>
         <section className="content">
           <IndexingIndicator docId={selected?.id ?? null} />
-          <ViewerPane ref={viewerRef} entry={selected} jump={jump} />
+          {/* The provider sits above both the palette and the viewer: the palette sets
+              the tool, the viewer's overlay draws with it, and the provider needs the
+              page the viewer is on. */}
+          <EditorProvider documentId={selected?.id ?? null} page={visiblePage}>
+            <EditorPane entry={selected} />
+            <ViewerPane
+              ref={viewerRef}
+              entry={selected}
+              jump={jump}
+              onPageChange={setVisiblePage}
+            />
+          </EditorProvider>
         </section>
       </main>
     </div>

@@ -57,7 +57,11 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
 
     let page_ids = document.get_pages();
     for annotation in annotations {
-        let Some(page_id) = page_ids.get(&annotation.page).copied() else {
+        // `get_pages()` is keyed by lopdf's **1-based** page number, while the DB and the
+        // UI both use 0-based indices (the renderer's `page` is a 0-based index). Without
+        // the +1 every annotation would land one page late -- and page 0's would silently
+        // disappear, since lopdf has no page 0.
+        let Some(page_id) = page_ids.get(&(annotation.page + 1)).copied() else {
             // An annotation pointing past the end of the file means the document
             // was replaced under a stable id. Skip it rather than writing it onto
             // an unrelated page.
@@ -290,6 +294,11 @@ mod tests {
     use lopdf::Object;
 
     fn sample_pdf() -> Vec<u8> {
+        two_page_pdf(1)
+    }
+
+    /// A minimal valid PDF with `pages` pages, so page-number mapping can be tested.
+    fn two_page_pdf(pages: usize) -> Vec<u8> {
         let mut document = Document::with_version("1.4");
         let pages_id = document.new_object_id();
         let font_id = document.add_object(dictionary! {
@@ -309,23 +318,29 @@ mod tests {
                 Operation::new("ET", vec![]),
             ],
         };
-        let content_id = document.add_object(lopdf::Stream::new(
-            dictionary! {},
-            content.encode().unwrap(),
-        ));
-        let page_id = document.add_object(dictionary! {
-            "Type" => "Page",
-            "Parent" => pages_id,
-            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
-            "Contents" => content_id,
-            "Resources" => resources_id,
-        });
+        let mut kids = Vec::new();
+        for _ in 0..pages {
+            // A fresh content stream per page: sharing one is legal but makes the
+            // fixture harder to reason about when a test asserts on page contents.
+            let content_id = document.add_object(lopdf::Stream::new(
+                dictionary! {},
+                content.encode().unwrap(),
+            ));
+            let page_id = document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                "Contents" => content_id,
+                "Resources" => resources_id,
+            });
+            kids.push(page_id.into());
+        }
         document.objects.insert(
             pages_id,
             Object::Dictionary(dictionary! {
                 "Type" => "Pages",
-                "Kids" => vec![page_id.into()],
-                "Count" => 1,
+                "Kids" => kids,
+                "Count" => pages as i64,
             }),
         );
         let catalog_id = document.add_object(dictionary! {
@@ -366,7 +381,7 @@ mod tests {
     fn a_highlight_survives_the_round_trip() {
         // P2 definition of done #4, in miniature: annotate -> save -> re-open.
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Highlight,
             r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]],"color":"#fff3b0"}"##,
             None,
@@ -380,37 +395,37 @@ mod tests {
     fn every_tool_writes_an_annotation() {
         let rows = vec![
             annotation(
-                1,
+                0,
                 AnnotationKind::Highlight,
                 r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]],"color":"#ffff00"}"##,
                 None,
             ),
             annotation(
-                1,
+                0,
                 AnnotationKind::Underline,
                 r##"{"v":1,"rects":[[72.0,680.0,300.0,700.0]],"color":"#0000ff"}"##,
                 None,
             ),
             annotation(
-                1,
+                0,
                 AnnotationKind::Strikeout,
                 r##"{"v":1,"rects":[[72.0,660.0,300.0,680.0]],"color":"#ff0000"}"##,
                 None,
             ),
             annotation(
-                1,
+                0,
                 AnnotationKind::Note,
                 r##"{"v":1,"point":[80.0,640.0],"color":"#ffcc00"}"##,
                 Some("a remark"),
             ),
             annotation(
-                1,
+                0,
                 AnnotationKind::Shape,
                 r##"{"v":1,"rect":[72.0,600.0,300.0,640.0],"color":"#00ff00"}"##,
                 None,
             ),
             annotation(
-                1,
+                0,
                 AnnotationKind::Ink,
                 r##"{"v":1,"strokes":[[[72.0,580.0],[120.0,600.0]]],"color":"#000000"}"##,
                 None,
@@ -425,7 +440,7 @@ mod tests {
     fn rebuilding_is_idempotent_when_starting_from_the_original() {
         // Saving twice from the same source and DB state must not double up.
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Highlight,
             r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]]}"##,
             None,
@@ -444,7 +459,7 @@ mod tests {
         // Documents the trap the doc comment warns about: `bytes` must be the
         // original. This is the behaviour, asserted so it is not a surprise.
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Highlight,
             r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]]}"##,
             None,
@@ -458,7 +473,7 @@ mod tests {
     fn an_annotation_past_the_last_page_is_skipped() {
         // Guards against a stale row landing on an unrelated page.
         let rows = vec![annotation(
-            99,
+            5,
             AnnotationKind::Highlight,
             r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]]}"##,
             None,
@@ -470,7 +485,7 @@ mod tests {
     #[test]
     fn a_newer_blob_version_is_ignored_rather_than_misread() {
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Highlight,
             r##"{"v":99,"rects":[[1.0,2.0,3.0,4.0]]}"##,
             None,
@@ -481,7 +496,7 @@ mod tests {
 
     #[test]
     fn malformed_json_is_reported_with_the_annotation_id() {
-        let row = annotation(1, AnnotationKind::Highlight, "{not json", None);
+        let row = annotation(0, AnnotationKind::Highlight, "{not json", None);
         let id = row.id.clone();
         let error = apply_annotations(&sample_pdf(), &[row]).unwrap_err();
         assert!(error.to_string().contains(&id));
@@ -490,7 +505,7 @@ mod tests {
     #[test]
     fn multi_line_highlight_is_written_as_one_union_rect() {
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Highlight,
             r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0],[72.0,660.0,300.0,680.0]]}"##,
             None,
@@ -513,7 +528,7 @@ mod tests {
     #[test]
     fn contents_are_carried_into_the_pdf() {
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Note,
             r##"{"v":1,"point":[80.0,640.0]}"##,
             Some("remember this"),
@@ -562,7 +577,7 @@ mod tests {
         let with_foreign = lopdf_write::save_to_bytes(&mut document).unwrap();
 
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Underline,
             r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]]}"##,
             None,
@@ -583,7 +598,7 @@ mod tests {
     #[test]
     fn an_ink_row_with_no_drawable_strokes_is_skipped_not_fatal() {
         let rows = vec![annotation(
-            1,
+            0,
             AnnotationKind::Ink,
             r##"{"v":1,"strokes":[[[10.0,10.0]]]}"##,
             None,
@@ -603,5 +618,83 @@ mod tests {
     fn corrupted_input_bytes_are_reported() {
         let error = apply_annotations(b"not a pdf at all", &[]).unwrap_err();
         assert!(error.to_string().contains("could not read pdf"));
+    }
+
+    #[test]
+    fn page_zero_maps_to_the_first_pdf_page() {
+        // Regression: the DB/UI use 0-based page indices, lopdf's get_pages() is 1-based.
+        // Getting this wrong puts every annotation one page late and silently loses the
+        // first page's entirely, so this asserts the *location*, not just a count.
+        let rows = vec![annotation(
+            0,
+            AnnotationKind::Highlight,
+            r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]]}"##,
+            None,
+        )];
+
+        let bytes = apply_annotations(&two_page_pdf(2), &rows).unwrap();
+
+        let document = Document::load_mem(&bytes).unwrap();
+        let pages = document.get_pages();
+        let first = pages.get(&1).copied().unwrap();
+        let second = pages.get(&2).copied().unwrap();
+        assert_eq!(lopdf_write::page_annotation_count(&document, first), 1);
+        assert_eq!(
+            lopdf_write::page_annotation_count(&document, second),
+            0,
+            "annotation belongs to page 0, not page 1"
+        );
+    }
+
+    #[test]
+    fn the_last_page_is_addressable() {
+        let rows = vec![annotation(
+            1,
+            AnnotationKind::Highlight,
+            r##"{"v":1,"rects":[[72.0,700.0,300.0,720.0]]}"##,
+            None,
+        )];
+
+        let bytes = apply_annotations(&two_page_pdf(2), &rows).unwrap();
+        let document = Document::load_mem(&bytes).unwrap();
+        let pages = document.get_pages();
+        let second = pages.get(&2).copied().unwrap();
+        assert_eq!(lopdf_write::page_annotation_count(&document, second), 1);
+    }
+
+    #[test]
+    fn one_annotation_per_page_lands_on_its_own_page() {
+        let rows = vec![
+            annotation(
+                0,
+                AnnotationKind::Highlight,
+                r##"{"v":1,"rects":[[10.0,700.0,60.0,720.0]]}"##,
+                None,
+            ),
+            annotation(
+                1,
+                AnnotationKind::Highlight,
+                r##"{"v":1,"rects":[[20.0,600.0,70.0,620.0]]}"##,
+                None,
+            ),
+        ];
+
+        let bytes = apply_annotations(&two_page_pdf(2), &rows).unwrap();
+        let document = Document::load_mem(&bytes).unwrap();
+        let pages = document.get_pages();
+        let first = pages.get(&1).copied().unwrap();
+        let second = pages.get(&2).copied().unwrap();
+
+        let rect_of = |page_id| {
+            document.get_page_annotations(page_id).unwrap()[0]
+                .get(b"Rect")
+                .unwrap()
+                .as_array()
+                .unwrap()[0]
+                .as_float()
+                .unwrap()
+        };
+        assert_eq!(rect_of(first), 10.0);
+        assert_eq!(rect_of(second), 20.0);
     }
 }
