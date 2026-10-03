@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod db;
+pub mod editor;
 pub mod index;
 pub mod library;
 pub mod model;

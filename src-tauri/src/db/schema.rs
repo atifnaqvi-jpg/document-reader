@@ -41,6 +41,30 @@ CREATE VIRTUAL TABLE IF NOT EXISTS Search USING fts5(
   content
 );
 
+CREATE TABLE IF NOT EXISTS Annotation (
+  id          TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES Document(id) ON DELETE CASCADE,
+  page        INTEGER NOT NULL,
+  atype       TEXT NOT NULL,
+  data        TEXT NOT NULL,
+  text        TEXT,
+  created_at  INTEGER NOT NULL,
+  modified_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_annotation_document ON Annotation(document_id);
+CREATE INDEX IF NOT EXISTS idx_annotation_document_page ON Annotation(document_id, page);
+
+-- Annotation text gets its own FTS5 index rather than sharing `Search` (P2-D5):
+-- a hit must say *which* it was, and mixing the two would force the UI to guess.
+-- Kept in lockstep with `Annotation` inside one transaction.
+CREATE VIRTUAL TABLE IF NOT EXISTS AnnotationSearch USING fts5(
+  annotation_id UNINDEXED,
+  document_id UNINDEXED,
+  page UNINDEXED,
+  content
+);
+
 CREATE TABLE IF NOT EXISTS AppState (
   key   TEXT PRIMARY KEY,
   value TEXT

@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use crate::model::AppError;
 
+pub mod annotations;
 pub mod app_state;
 pub mod bookmarks;
 pub mod documents;

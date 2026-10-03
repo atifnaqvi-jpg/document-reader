@@ -61,12 +61,73 @@ pub struct Bookmark {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
     pub document_id: String,
     pub page: u32,
     pub snippet: String,
+}
+
+/// Tools a user can place on a page (P2-D4). `atype` in the database is the
+/// serialised form of this enum, so adding a tool never needs a migration --
+/// only the JSON blob's `v` may need to grow (see [`Annotation::data`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnotationKind {
+    Highlight,
+    Underline,
+    Strikeout,
+    Note,
+    Ink,
+    Shape,
+}
+
+impl AnnotationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AnnotationKind::Highlight => "highlight",
+            AnnotationKind::Underline => "underline",
+            AnnotationKind::Strikeout => "strikeout",
+            AnnotationKind::Note => "note",
+            AnnotationKind::Ink => "ink",
+            AnnotationKind::Shape => "shape",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "highlight" => Some(AnnotationKind::Highlight),
+            "underline" => Some(AnnotationKind::Underline),
+            "strikeout" => Some(AnnotationKind::Strikeout),
+            "note" => Some(AnnotationKind::Note),
+            "ink" => Some(AnnotationKind::Ink),
+            "shape" => Some(AnnotationKind::Shape),
+            _ => None,
+        }
+    }
+}
+
+/// A user annotation on a page (P2-D4).
+///
+/// `data` is a schema-versioned JSON blob rather than typed columns: each tool
+/// has a different geometry (a highlight is rectangles, ink is a polyline, a note
+/// is a point plus text), and a blob lets a new tool ship without a table
+/// migration. `v` inside the blob handles shape changes within a tool.
+///
+/// `text` is denormalised out of `data` on purpose: it is what the FTS5 index
+/// needs (P2-D5), and extracting it in SQL would mean parsing JSON in queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotation {
+    pub id: String,
+    pub document_id: String,
+    pub page: u32,
+    pub kind: AnnotationKind,
+    pub data: String,
+    pub text: Option<String>,
+    pub created_at: i64,
+    pub modified_at: i64,
 }
 
 /// A rendered page as it crosses to the frontend (P1-D2): encoded pixel bytes plus
