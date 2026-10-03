@@ -19,3 +19,6 @@ Thumbs.db
 
 # Agent working state (kept on disk, not in the repo)
 .openhands/
+
+# Built installers (large binaries, delivered out-of-band)
+artifacts/
