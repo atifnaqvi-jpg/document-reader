@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   getDocumentPageCount,
   getDocumentPageRender,
@@ -18,13 +18,27 @@ export interface JumpRequest {
   nonce: number;
 }
 
-export function ViewerPane({
-  entry,
-  jump,
-}: {
+/**
+ * Commands the viewer exposes to the rest of the app (P1.9 D6). The menu lives in App
+ * while the page and zoom state live here, so the menu drives the viewer through this
+ * handle rather than the state being lifted — the P1 architecture keeps viewer state
+ * local on purpose.
+ */
+export interface ViewerHandle {
+  step: (delta: number) => void;
+  goToFirst: () => void;
+  goToLast: () => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
+  /** Current page, zero-based, for "bookmark this page". */
+  getCurrentPage: () => number;
+}
+
+export const ViewerPane = forwardRef<ViewerHandle, {
   entry: LibraryEntry | null;
   jump?: JumpRequest | null;
-}) {
+}>(function ViewerPane({ entry, jump }, ref) {
+
   const [page, setPage] = useState(0);
   const [pageCount, setPageCount] = useState<number | null>(null);
   const [zoom, setZoom] = useState<number>(DEFAULT_ZOOM);
@@ -117,6 +131,40 @@ export function ViewerPane({
       });
     },
     [pageCount],
+  );
+
+  const goToFirst = useCallback(() => setPage(0), []);
+  const goToLast = useCallback(() => {
+    if (pageCount !== null) setPage(Math.max(0, pageCount - 1));
+  }, [pageCount]);
+
+  const zoomBy = useCallback((delta: number) => {
+    setZoom((current) => {
+      const index = ZOOM_LEVELS.indexOf(current as (typeof ZOOM_LEVELS)[number]);
+      // An unlisted value (only reachable if the list changes shape) falls back to the
+      // nearest step rather than jumping to an end of the range.
+      const from = index === -1 ? ZOOM_LEVELS.indexOf(DEFAULT_ZOOM) : index;
+      const next = Math.min(Math.max(from + delta, 0), ZOOM_LEVELS.length - 1);
+      return ZOOM_LEVELS[next];
+    });
+  }, []);
+
+  // The page state the menu reads for "bookmark this page", kept in a ref so the handle
+  // does not change identity on every page turn.
+  const pageRef = useRef(page);
+  pageRef.current = page;
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      step,
+      goToFirst,
+      goToLast,
+      zoomIn: () => zoomBy(1),
+      zoomOut: () => zoomBy(-1),
+      getCurrentPage: () => pageRef.current,
+    }),
+    [step, goToFirst, goToLast, zoomBy],
   );
 
   // Keyboard navigation: a reader is a keyboard-first surface, and arrows/PageUp/Down
@@ -232,4 +280,4 @@ export function ViewerPane({
       </div>
     </div>
   );
-}
+});

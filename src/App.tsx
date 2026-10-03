@@ -1,7 +1,7 @@
 import "./theme/tokens.css";
 import "./App.css";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { listLibrary, openDocument, toAppError } from "./api/invoke";
 import type { AppError, LibraryEntry } from "./api/types";
@@ -9,7 +9,9 @@ import { ErrorBanner, LibraryPane } from "./components/LibraryPane";
 import { IndexingIndicator, SearchPane } from "./components/SearchPane";
 import { Toolbar } from "./components/Toolbar";
 import { ViewerPane } from "./components/ViewerPane";
-import type { JumpRequest } from "./components/ViewerPane";
+import type { JumpRequest, ViewerHandle } from "./components/ViewerPane";
+import type { NavigationTarget } from "./components/Menu";
+import { ReadingModeProvider, useReadingMode } from "./state/ReadingMode";
 import { ThemeProvider } from "./theme/ThemeProvider";
 
 const OPEN_FILTERS = [
@@ -22,6 +24,12 @@ function Workspace() {
   const [error, setError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
   const [jump, setJump] = useState<JumpRequest | null>(null);
+  const { isFullscreen, chromeHidden, error: fullscreenError, toggleFullscreen, toggleChrome } =
+    useReadingMode();
+
+  // The menu drives page/zoom through the viewer's own handle rather than by lifting
+  // viewer state into App (P1.9 D6).
+  const viewerRef = useRef<ViewerHandle | null>(null);
 
   const refreshLibrary = useCallback(async () => {
     const list = await listLibrary();
@@ -65,11 +73,43 @@ function Workspace() {
     setJump((previous) => ({ page, nonce: (previous?.nonce ?? 0) + 1 }));
   }, []);
 
+  const handleNavigate = useCallback((where: NavigationTarget) => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    if (where === "first") viewer.goToFirst();
+    else if (where === "last") viewer.goToLast();
+    else if (where === "previous") viewer.step(-1);
+    else viewer.step(1);
+  }, []);
+
+  // A bookmark click reuses the search-hit path, so the viewer's clamping and nonce
+  // handling stay in one place.
+  const handleOpenBookmark = useCallback(
+    (page: number) => {
+      if (!selected) return;
+      setJump((previous) => ({ page, nonce: (previous?.nonce ?? 0) + 1 }));
+    },
+    [selected],
+  );
+
+  const getCurrentPage = useCallback(() => viewerRef.current?.getCurrentPage() ?? 0, []);
+
   return (
     <div className="app">
-      <Toolbar busy={busy} onOpen={handleOpen} />
-      <ErrorBanner error={error} />
-      <main className="workspace">
+      <Toolbar
+        busy={busy}
+        onOpen={handleOpen}
+        entry={selected}
+        isFullscreen={isFullscreen}
+        chromeHidden={chromeHidden}
+        onToggleFullscreen={toggleFullscreen}
+        onToggleChrome={toggleChrome}
+        onNavigate={handleNavigate}
+        onOpenBookmark={handleOpenBookmark}
+        getCurrentPage={getCurrentPage}
+      />
+      <ErrorBanner error={error ?? fullscreenError} />
+      <main className={`workspace${chromeHidden ? " chrome-hidden" : ""}`}>
         <aside className="sidebar">
           <LibraryPane
             entries={entries}
@@ -82,7 +122,7 @@ function Workspace() {
         </aside>
         <section className="content">
           <IndexingIndicator docId={selected?.id ?? null} />
-          <ViewerPane entry={selected} jump={jump} />
+          <ViewerPane ref={viewerRef} entry={selected} jump={jump} />
         </section>
       </main>
     </div>
@@ -92,7 +132,9 @@ function Workspace() {
 export default function App() {
   return (
     <ThemeProvider>
-      <Workspace />
+      <ReadingModeProvider>
+        <Workspace />
+      </ReadingModeProvider>
     </ThemeProvider>
   );
 }

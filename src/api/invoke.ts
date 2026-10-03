@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   AppError,
   Bookmark,
@@ -90,3 +91,31 @@ export const getDocumentPageCount = (docId: string) =>
 /** Builds a `data:` URL for a rendered page's base64 PNG. */
 export const pageImageSrc = (rendered: RenderedPage) =>
   `data:image/png;base64,${rendered.bytes}`;
+
+/**
+ * Whether the OS window is currently fullscreen (P1.9). `is_fullscreen` is part of
+ * Tauri's `core:window:default` permission set, so unlike {@link setWindowFullscreen}
+ * this needs no extra grant.
+ *
+ * Read back after toggling rather than trusting local state: the OS can leave
+ * fullscreen on its own, and a permission failure would otherwise leave the UI
+ * claiming a mode the window is not in.
+ */
+export const isWindowFullscreen = () => getCurrentWindow().isFullscreen();
+
+/**
+ * Puts the OS window in or out of fullscreen (P1.9).
+ *
+ * Requires `core:window:allow-set-fullscreen`, which is **not** in
+ * `core:window:default`; it is granted in `capabilities/default.json` and asserted by
+ * `src-tauri/tests/capabilities.rs`. Without the grant this rejects at runtime.
+ */
+export const setWindowFullscreen = (value: boolean) =>
+  getCurrentWindow().setFullscreen(value);
+
+/**
+ * Subscribes to window resizes, used to notice the OS leaving fullscreen (P1.9).
+ * Resolves to an unlisten function.
+ */
+export const onWindowResized = (handler: () => void) =>
+  getCurrentWindow().onResized(() => handler());

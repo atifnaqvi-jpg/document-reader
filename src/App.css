@@ -289,3 +289,99 @@ button:disabled {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* Fullscreen reading mode (P1.9 D1, D8). The toolbar deliberately stays: it holds the
+   Menu and the exit control, so a mouse user is never stranded in fullscreen. */
+.workspace.chrome-hidden .sidebar,
+.workspace.chrome-hidden .search-sidebar {
+  display: none;
+}
+
+/* The document metadata is reference material, not reading material; the page controls
+   above it stay, because a page indicator is part of reading. */
+.workspace.chrome-hidden .metadata {
+  display: none;
+}
+
+/* Menu (P1.9 D5/D9). */
+.menu-root {
+  position: relative;
+}
+
+.menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 240px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 25%);
+}
+
+.menu-panel button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.menu-group {
+  margin: 8px 6px 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.menu-group:first-child {
+  margin-top: 2px;
+}
+
+.menu-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.menu-bookmarks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.menu-bookmarks li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.menu-bookmark {
+  flex: 1;
+}
+
+.menu-bookmark-remove {
+  flex: 0 0 auto;
+  min-width: 26px;
+  padding: 4px 6px;
+  color: var(--text-muted);
+}
+
+.menu-bookmark-remove:hover {
+  color: var(--danger);
+}
+
+.menu-empty,
+.menu-error {
+  margin: 4px 6px 8px;
+  font-size: 12px;
+}
+
+.menu-error {
+  color: var(--danger);
+}
