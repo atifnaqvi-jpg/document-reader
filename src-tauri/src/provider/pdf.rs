@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use pdfium_render::prelude::*;
 
@@ -127,6 +127,63 @@ fn pdfium() -> Result<&'static Pdfium, AppError> {
         .map_err(|e| AppError::PdfiumUnavailable(e.to_string()))
 }
 
+/// The process-wide PDFium serialisation lock, re-entrant per thread.
+///
+/// pdfium-render's `thread_safe` feature does **not** make concurrent PDFium calls
+/// safe, despite what its name and our earlier comments claimed. It wraps only
+/// `FPDF_InitLibrary`/`FPDF_DestroyLibrary` in a mutex whose guard is held from init
+/// until destroy, and delegates the other 76 FFI entry points straight through
+/// unguarded. Upstream's README says the mutex "has the effect of sequencing all calls
+/// to Pdfium", but that only follows if every thread owns its own `Pdfium` and so
+/// contends for the mutex. D5 mandates a *single* instance, whose mutex is therefore
+/// taken once and serialises nothing.
+///
+/// The consequence was real heap corruption: two renders of *different* documents on
+/// different threads abort the process (`tcache_thread_shutdown(): unaligned tcache
+/// chunk detected` on Linux; `STATUS_ACCESS_VIOULATION` on Windows). Renders of the
+/// *same* document survived only because the per-document mutex happened to serialise
+/// them. It surfaced only once the suite actually loaded PDFium — the guarded tests had
+/// been skipping, so nothing exercised it.
+///
+/// So the lock lives here. Every public entry point that calls into PDFium holds it for
+/// the whole logical operation, which makes PDFium calls execute as if single-threaded.
+/// Re-entrancy matters because the call graph nests (`render_cached` -> `acquire` ->
+/// `load`) and a plain `Mutex` would self-deadlock; it also lets document `Drop`s —
+/// which call `FPDF_CloseDocument` — happen under the lock.
+///
+/// Lock order is always gate -> handle map -> document. Every thread takes the gate
+/// first, so there is no cycle to deadlock on.
+struct PdfiumGate {
+    /// `Some` only on the outermost acquisition; inner ones just raise the depth.
+    _guard: Option<MutexGuard<'static, ()>>,
+}
+
+thread_local! {
+    /// Per-thread nesting depth. A `thread_local!` is enough: the invariant is only
+    /// ever "this thread already holds the gate", which is thread-local by definition.
+    static PDFIUM_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl PdfiumGate {
+    fn acquire() -> Self {
+        static GATE: Mutex<()> = Mutex::new(());
+        let outermost = PDFIUM_DEPTH.with(|depth| {
+            let current = depth.get();
+            depth.set(current + 1);
+            current == 0
+        });
+        Self {
+            _guard: outermost.then(|| GATE.lock().unwrap_or_else(|e| e.into_inner())),
+        }
+    }
+}
+
+impl Drop for PdfiumGate {
+    fn drop(&mut self) {
+        PDFIUM_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
 /// A document handle handed out to a render: shared ownership of the loaded document.
 pub type SharedDocument = Arc<Mutex<PdfDocument<'static>>>;
 
@@ -143,10 +200,10 @@ pub type SharedDocument = Arc<Mutex<PdfDocument<'static>>>;
 ///   reason, so the cache yields an `Arc<Mutex<PdfDocument>>` instead.
 /// * The per-document `Mutex` is what enforces "never share one `PdfDocument` across
 ///   threads concurrently": two threads rendering different pages of the *same*
-///   document serialise on it, which is required, because a `PdfDocument` is only
-///   `Send`/`Sync` as a promise from us that access is exclusive — pdfium-render's
-///   default `thread_safe` feature serialises the API boundary but the feature is
-///   only sound while documents are not touched from two threads at once.
+///   document serialise on it. That alone is not sufficient for safety, though — two
+///   threads on *different* documents still race inside PDFium's global allocator — so
+///   every entry point additionally holds [`PdfiumGate`]. See its docs for the crash
+///   that demonstrated this.
 pub struct DocumentHandles {
     entries: Mutex<HashMap<String, (SharedDocument, u64)>>,
     clock: Mutex<u64>,
@@ -195,6 +252,10 @@ impl DocumentHandles {
         path: &Path,
         content_hash: Option<&str>,
     ) -> Result<SharedDocument, AppError> {
+        // Held for the whole operation, including the load below. Callers lock the
+        // returned document and keep rendering while this guard is alive, so a render
+        // is covered end to end.
+        let _gate = PdfiumGate::acquire();
         PdfProvider::ensure_file(path)?;
         let key = handle_key(path, content_hash);
         let tick = self.next_tick();
@@ -227,8 +288,32 @@ impl DocumentHandles {
         Ok(handle)
     }
 
+    /// Runs `f` against `path`'s document with every lock held in the correct order:
+    /// gate → handle map → document.
+    ///
+    /// This is the only place PDFium is touched for a cached document, so the locking
+    /// discipline cannot drift as call sites are added. The gate is acquired *before*
+    /// the document lock and is **held while `f` runs**, which is what makes a render
+    /// safe: acquiring it only for [`acquire`](Self::acquire) would release it before
+    /// the actual PDFium work and reintroduce the race.
+    pub fn with_document<T>(
+        &self,
+        path: &Path,
+        content_hash: Option<&str>,
+        f: impl FnOnce(&PdfDocument<'static>) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let _gate = PdfiumGate::acquire();
+        let handle = self.acquire(path, content_hash)?;
+        let document = handle.lock().unwrap_or_else(|e| e.into_inner());
+        f(&document)
+    }
+
     /// Drops a cached handle, e.g. when the file is known to have changed.
+    ///
+    /// Takes the gate because dropping the last `Arc` calls `FPDF_CloseDocument`, which
+    /// must not race a render on another thread.
     pub fn forget(&self, path: &Path, content_hash: Option<&str>) {
+        let _gate = PdfiumGate::acquire();
         let key = handle_key(path, content_hash);
         self.entries
             .lock()
@@ -243,6 +328,7 @@ impl DocumentHandles {
     /// would compute a key that was never inserted and leave the stale document — and
     /// its parsed pages — resident. Dropping by path cannot miss.
     pub fn forget_path(&self, path: &Path) {
+        let _gate = PdfiumGate::acquire();
         let prefix = format!("{}\u{1}", path.display());
         self.entries
             .lock()
@@ -266,11 +352,11 @@ impl PdfProvider {
         page: u32,
         scale: f32,
     ) -> Result<RasterizedPage, AppError> {
-        let handle = handles.acquire(path, content_hash)?;
-        // Lock only this document. Different documents render concurrently; the same
-        // document serialises, which is the required behaviour.
-        let document = handle.lock().unwrap_or_else(|e| e.into_inner());
-        Self::rasterize(&document, page, scale)
+        // The gate is held for the whole rasterization, not just the lookup: PDFium
+        // renders on different documents must not overlap.
+        handles.with_document(path, content_hash, |document| {
+            Self::rasterize(document, page, scale)
+        })
     }
 
     /// Extracts one page's text through the handle cache.
@@ -280,9 +366,9 @@ impl PdfProvider {
         content_hash: Option<&str>,
         page: u32,
     ) -> Result<String, AppError> {
-        let handle = handles.acquire(path, content_hash)?;
-        let document = handle.lock().unwrap_or_else(|e| e.into_inner());
-        Self::page_text(&document, page)
+        handles.with_document(path, content_hash, |document| {
+            Self::page_text(document, page)
+        })
     }
 
     fn ensure_file(path: &Path) -> Result<(), AppError> {
@@ -353,6 +439,7 @@ impl PdfProvider {
     /// Renders a page of the PDF at `path`. This is the workhorse the handle cache
     /// and neighbour pre-render build on.
     pub fn render_page_at(path: &Path, page: u32, scale: f32) -> Result<RasterizedPage, AppError> {
+        let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
         let document = Self::load(pdfium()?, path)?;
         Self::rasterize(&document, page, scale)
@@ -360,6 +447,7 @@ impl PdfProvider {
 
     /// Extracts the text layer of a single page.
     pub fn extract_page_text(path: &Path, page: u32) -> Result<String, AppError> {
+        let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
         let document = Self::load(pdfium()?, path)?;
         Self::page_text(&document, page)
@@ -367,6 +455,7 @@ impl PdfProvider {
 
     /// Page count, read without keeping the document open.
     pub fn page_count(path: &Path) -> Result<u32, AppError> {
+        let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
         let document = Self::load(pdfium()?, path)?;
         Ok(document.pages().len() as u32)
@@ -403,6 +492,7 @@ impl PdfProvider {
 
 impl ReaderProvider for PdfProvider {
     fn open(&self, path: &Path) -> Result<DocumentMeta, AppError> {
+        let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
         let document = Self::load(pdfium()?, path)?;
 
@@ -767,11 +857,9 @@ mod tests {
             return;
         }
 
-        // Two threads, one document: the per-document mutex must serialise them
-        // (pdfium-render's default thread_safe feature makes concurrent use of one
-        // PdfDocument unsound, so this both exercises and guards that contract).
-        // A third thread works a different document to show the map lock is not held
-        // across renders, which would serialise unrelated documents.
+        // Two threads, one document: the per-document mutex serialises them. A third
+        // thread works a different document, which is the case that used to corrupt
+        // the heap — see `concurrent_renders_and_evictions_do_not_corrupt_pdfium`.
         let handles = Arc::new(DocumentHandles::new());
         let path = fixture_pdf();
         let mut other = fixture_pdf();
@@ -809,6 +897,76 @@ mod tests {
         assert_eq!(handles.open_count(), 2);
 
         let _ = std::fs::remove_file(&other);
+    }
+
+    /// Regression guard for the crash that `PdfiumGate` exists to prevent.
+    ///
+    /// PDFium is not thread-safe beyond init/teardown, and pdfium-render's
+    /// `thread_safe` feature does not change that (see [`PdfiumGate`]). The unsound
+    /// interleavings are: two renders of *different* documents, and a cached render
+    /// racing an uncached load that drops its document (`FPDF_CloseDocument` on `Drop`).
+    /// This test drives both, plus eviction past [`MAX_OPEN_DOCUMENTS`]. Without the
+    /// gate it aborts reliably (`tcache_thread_shutdown(): unaligned tcache chunk
+    /// detected` here, `STATUS_ACCESS_VIOLATION` on Windows).
+    ///
+    /// The failure mode is a process abort, not a wrong return value, so a clean join is
+    /// the whole assertion.
+    #[test]
+    fn concurrent_renders_and_evictions_do_not_corrupt_pdfium() {
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        let handles = Arc::new(DocumentHandles::new());
+        let source = fixture_pdf();
+
+        // Comfortably more documents than the cache can hold, so every acquire past
+        // the first MAX_OPEN_DOCUMENTS also evicts.
+        let copies: Vec<PathBuf> = (0..(MAX_OPEN_DOCUMENTS * 3))
+            .map(|index| {
+                let copy = source.with_file_name(format!("docreader-stress-{index}.pdf"));
+                std::fs::copy(&source, &copy).unwrap();
+                copy
+            })
+            .collect();
+
+        std::thread::scope(|scope| {
+            let mut threads = Vec::new();
+            for (index, path) in copies.iter().enumerate() {
+                let handles = Arc::clone(&handles);
+                let path = path.clone();
+                threads.push(scope.spawn(move || {
+                    let page = (index % 3) as u32;
+                    let rendered =
+                        PdfProvider::render_cached(&handles, &path, None, page, 1.0).unwrap();
+                    assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
+                    // Force contention with the eviction path in other threads.
+                    let _ = PdfProvider::extract_cached(&handles, &path, None, page);
+                }));
+            }
+            // Uncached loads open and immediately drop a document, so these threads call
+            // `FPDF_CloseDocument` while the render threads are inside PDFium.
+            for path in copies.iter() {
+                let path = path.clone();
+                threads.push(scope.spawn(move || {
+                    for _ in 0..8 {
+                        let _ = PdfProvider::page_count(&path);
+                        let _ = PdfProvider::render_page_at(&path, 0, 1.0);
+                    }
+                }));
+            }
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        });
+
+        // The cache stayed within its bound despite the churn.
+        assert!(handles.open_count() <= MAX_OPEN_DOCUMENTS);
+
+        for copy in &copies {
+            let _ = std::fs::remove_file(copy);
+        }
     }
 
     #[test]

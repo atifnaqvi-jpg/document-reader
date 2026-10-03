@@ -315,15 +315,10 @@ impl RenderService {
         page: u32,
         scale: f32,
     ) -> usize {
-        let Ok(handle) = self.handles.acquire(path, content_hash) else {
+        // Read the page count through the gate, then release it before rendering:
+        // holding it across two renders would stall the page the user is waiting for.
+        let Ok(page_count) = self.page_count(path, content_hash) else {
             return 0;
-        };
-        // Read the page count under the document lock, then release it before
-        // rendering: holding it across two renders would stall the page the user is
-        // actually waiting for.
-        let page_count = {
-            let document = handle.lock().unwrap_or_else(|e| e.into_inner());
-            document.pages().len() as u32
         };
 
         // The page the user is waiting for is already cached by the foreground render
@@ -356,9 +351,9 @@ impl RenderService {
     /// Page count as PDFium sees it. Authoritative when P0's import-time count was
     /// unavailable, and needed by the viewer to bound navigation and pre-rendering.
     pub fn page_count(&self, path: &Path, content_hash: Option<&str>) -> Result<u32, AppError> {
-        let handle = self.handles.acquire(path, content_hash)?;
-        let document = handle.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(document.pages().len() as u32)
+        self.handles.with_document(path, content_hash, |document| {
+            Ok(document.pages().len() as u32)
+        })
     }
 
     /// Extracts one page's text layer through the shared handle cache.

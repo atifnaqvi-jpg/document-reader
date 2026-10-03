@@ -48,7 +48,7 @@ installers/updater/signing, macOS/Linux targets, search UI polish (thin UI only)
 | **D2** | **Return shape = `{ bytes, width, height }`** (encoded pixel dims) from `get_document_page_render`. | Frontend can size the container without a second round trip. Additive change to the P0 command contract; TS types updated. |
 | **D3** | **Render cache = in-process byte-budgeted LRU**, ~200 MB, keyed `(doc_id, page, scale)`. | A 600 DPI render is ~10× a 72 DPI one — bound by *bytes*, not entry count. Cache miss is never an error. |
 | **D4** | **Pre-render neighbours (±1 page)** in a background task after each page view. | Page turns must feel instant; rendering ahead is the standard viewer pattern. |
-| **D5** | **PDFium document handle cache**: one `Pdfium` instance in Tauri state; open `PdfDocument`s held in a `Mutex`-guarded map keyed by `(path, content_hash)`. **All PDFium calls run on `spawn_blocking` workers.** | Re-binding + re-loading per page render is wasteful. PDFium documents are not `Sync`; never share one across threads concurrently. |
+| **D5** | **PDFium document handle cache**: one `Pdfium` instance in Tauri state; open `PdfDocument`s held in a `Mutex`-guarded map keyed by `(path, content_hash)`. **All PDFium calls run on `spawn_blocking` workers.** A process-wide re-entrant `PdfiumGate` serialises every PDFium entry point. | Re-binding + re-loading per page render is wasteful. PDFium documents are not `Sync`; never share one across threads concurrently. The gate is required because PDFium is *not* thread-safe at all: `pdfium-render`'s `thread_safe` feature only guards init/teardown, so with a single `Pdfium` instance (as mandated here) concurrent calls corrupt the heap (P1.7). |
 | **D6** | **Indexing = background task per import**, extracting all pages then batch-inserting into `Search`, emitting progress events. | A 500-page index must not look like a hang. Progress via Tauri events + `AppState` key `index_status:<doc_id>`. |
 | **D7** | **Text extraction granularity**: per-page on demand (`extract_text(doc, page)`) AND a whole-document pass for indexing. Same provider call in a loop. | One code path, two call sites. |
 
@@ -187,7 +187,7 @@ No `lopdf` — editing is out of scope.
 | Risk | Mitigation |
 |------|-----------|
 | PDFium needs ARM64 build on VM | Accept Windows-CI verification; guard render tests with `pdfium_available()`. |
-| PDFium thread-safety | One document per blocking worker; never share `PdfDocument` concurrently; `Mutex`-guarded handle map. |
+| PDFium thread-safety | `PdfiumGate` serialises every PDFium entry point process-wide; per-document `Mutex` additionally serialises one document; `Mutex`-guarded handle map. Regression test: `concurrent_renders_and_evictions_do_not_corrupt_pdfium`. |
 | Memory blow-up | Byte-budgeted LRU (§4) + memory assertion test (7). |
 | Corrupt/odd PDFs | Provider error containment already exists; add a malformed-PDF fixture to the error path tests. |
 | Long indexing blocks UI | Background task + progress events (§4), never on the IPC thread. |
