@@ -61,12 +61,31 @@ pub struct Bookmark {
     pub created_at: i64,
 }
 
+/// Where a search hit came from (P2-D5).
+///
+/// The two live in different FTS5 tables and mean different things to the user:
+/// a `Document` hit is the file's own text ("the book says this"), an
+/// `Annotation` hit is something the user wrote ("I marked this"). Merging them
+/// into one untagged list would make a search for a note the user wrote look
+/// like it came from the book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchOrigin {
+    Document,
+    Annotation,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
     pub document_id: String,
     pub page: u32,
     pub snippet: String,
+    /// Labels the hit as document text or user annotation (P2-D5).
+    pub origin: SearchOrigin,
+    /// For an annotation hit, the annotation it came from, so the UI can select
+    /// or scroll to it. `None` for document hits.
+    pub annotation_id: Option<String>,
 }
 
 /// Tools a user can place on a page (P2-D4). `atype` in the database is the

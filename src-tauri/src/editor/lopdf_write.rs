@@ -25,6 +25,7 @@ pub fn annotation_dictionary(
     kind: AnnotationKind,
     rect: PdfRect,
     color: (f32, f32, f32),
+    opacity: f32,
     contents: Option<&str>,
 ) -> Result<Dictionary, AppError> {
     let rect = rect.normalised();
@@ -113,6 +114,11 @@ pub fn annotation_dictionary(
         }
     };
 
+    // /CA is the "constant alpha" used for the annotation's non-stroking areas,
+    // which is what a highlight's fill uses. Clamped because a stored 0 would make
+    // the mark invisible and a negative value is invalid.
+    dictionary.set("CA", Object::Real(opacity.clamp(0.05, 1.0)));
+
     if let Some(text) = contents {
         if !text.trim().is_empty() {
             dictionary.set("Contents", Object::string_literal(text));
@@ -128,6 +134,7 @@ pub fn ink_annotation_dictionary(
     rect: PdfRect,
     strokes: &[Vec<(f32, f32)>],
     color: (f32, f32, f32),
+    opacity: f32,
     contents: Option<&str>,
 ) -> Result<Dictionary, AppError> {
     let rect = rect.normalised();
@@ -173,6 +180,8 @@ pub fn ink_annotation_dictionary(
         ]),
         "F" => Object::Integer(4),
     };
+
+    dictionary.set("CA", Object::Real(opacity.clamp(0.05, 1.0)));
 
     if let Some(text) = contents {
         if !text.trim().is_empty() {
@@ -355,6 +364,7 @@ mod tests {
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
+            0.4,
             None,
         )
         .unwrap();
@@ -372,6 +382,7 @@ mod tests {
                 AnnotationKind::Highlight,
                 sample_rect(),
                 (1.0, 0.9, 0.2),
+                0.4,
                 None,
             )
             .unwrap();
@@ -388,6 +399,7 @@ mod tests {
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
+            0.4,
             Some("important"),
         )
         .unwrap();
@@ -428,6 +440,7 @@ mod tests {
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
+            0.4,
             None,
         )
         .unwrap();
@@ -460,7 +473,7 @@ mod tests {
             let mut document = one_page_pdf();
             let page_id = first_page(&document);
             let annotation =
-                annotation_dictionary(kind, sample_rect(), (1.0, 0.0, 0.0), None).unwrap();
+                annotation_dictionary(kind, sample_rect(), (1.0, 0.0, 0.0), 0.4, None).unwrap();
             attach_annotation(&mut document, page_id, annotation).unwrap();
 
             let reloaded = Document::load_mem(&save_to_bytes(&mut document).unwrap()).unwrap();
@@ -493,9 +506,14 @@ mod tests {
             vec![(72.0, 700.0), (100.0, 720.0), (140.0, 705.0)],
             vec![(200.0, 700.0), (240.0, 730.0)],
         ];
-        let annotation =
-            ink_annotation_dictionary(sample_rect(), &strokes, (0.0, 0.0, 1.0), Some("sketch"))
-                .unwrap();
+        let annotation = ink_annotation_dictionary(
+            sample_rect(),
+            &strokes,
+            (0.0, 0.0, 1.0),
+            0.6,
+            Some("sketch"),
+        )
+        .unwrap();
         attach_annotation(&mut document, page_id, annotation).unwrap();
 
         let reloaded = Document::load_mem(&save_to_bytes(&mut document).unwrap()).unwrap();
@@ -529,6 +547,7 @@ mod tests {
             sample_rect(),
             &[vec![(10.0, 10.0)], vec![]],
             (0.0, 0.0, 1.0),
+            0.6,
             None,
         )
         .unwrap_err();
@@ -543,8 +562,9 @@ mod tests {
             x1: 10.0,
             y1: 10.0,
         };
-        let error = annotation_dictionary(AnnotationKind::Highlight, click, (1.0, 0.9, 0.2), None)
-            .unwrap_err();
+        let error =
+            annotation_dictionary(AnnotationKind::Highlight, click, (1.0, 0.9, 0.2), 0.4, None)
+                .unwrap_err();
         assert!(error.to_string().contains("too small"));
     }
 
@@ -555,6 +575,7 @@ mod tests {
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
+            0.4,
             Some("   "),
         )
         .unwrap();
@@ -572,6 +593,7 @@ mod tests {
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.0, 0.0),
+            0.4,
             None,
         )
         .unwrap();
@@ -589,6 +611,7 @@ mod tests {
             AnnotationKind::Underline,
             sample_rect(),
             (0.0, 0.0, 1.0),
+            0.4,
             None,
         )
         .unwrap();
@@ -616,6 +639,7 @@ mod tests {
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
+            0.4,
             None,
         )
         .unwrap();

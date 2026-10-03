@@ -50,6 +50,13 @@ pub fn run() {
             commands::get_document_page_render,
             commands::get_document_page_text,
             commands::get_document_page_count,
+            commands::add_annotation,
+            commands::update_annotation,
+            commands::list_annotations,
+            commands::list_page_annotations,
+            commands::remove_annotation,
+            commands::next_save_path,
+            commands::save_edits,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

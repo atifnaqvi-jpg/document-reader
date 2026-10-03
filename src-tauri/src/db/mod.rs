@@ -42,4 +42,21 @@ impl Db {
             .map_err(|_| AppError::Other("database lock poisoned".to_string()))?;
         f(&connection)
     }
+
+    /// Same as [`Db::with`], but hands out a mutable connection.
+    ///
+    /// Needed only by operations that use an explicit transaction
+    /// (`Connection::transaction` takes `&mut self`). Multi-statement writes must
+    /// use this rather than issuing statements one by one, so a failure halfway
+    /// through cannot leave the annotation table and its FTS index disagreeing.
+    pub fn with_mut<T>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let mut connection = self
+            .0
+            .lock()
+            .map_err(|_| AppError::Other("database lock poisoned".to_string()))?;
+        f(&mut connection)
+    }
 }

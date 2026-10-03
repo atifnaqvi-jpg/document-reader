@@ -1,18 +1,38 @@
 use rusqlite::{params, Connection};
 
-use crate::model::{AppError, SearchHit};
+use crate::model::{AppError, SearchHit, SearchOrigin};
 
-/// FTS5 query over extracted text. The index is populated from P1 onwards, so an
-/// empty result is a normal answer, not an error.
+/// FTS5 query over extracted text and user annotations (P2-D5).
 ///
-/// User input is passed to MATCH as a quoted phrase: raw FTS5 syntax from the
-/// search box (`AND`, `*`, `"`, `-`) would otherwise be a parse error.
+/// The index is populated from P1 onwards, so an empty result is a normal answer,
+/// not an error.
+///
+/// Both tables are searched and the results merged, tagged by origin. A `UNION`
+/// in one statement would be tidier, but the two tables have different columns
+/// (only annotations have an id), and `snippet()` cannot be used across a union
+/// without a subquery that FTS5 would not be able to optimise with the index.
 pub fn query(connection: &Connection, query: &str, limit: u32) -> Result<Vec<SearchHit>, AppError> {
     let phrase = query.trim();
     if phrase.is_empty() {
         return Ok(Vec::new());
     }
+    let phrase = quote_phrase(phrase);
 
+    // Document hits first: for a term that appears in both, what the file says is
+    // usually what the user is looking for.
+    let mut hits = query_documents(connection, &phrase, limit)?;
+    let remaining = limit.saturating_sub(hits.len() as u32);
+    if remaining > 0 {
+        hits.extend(query_annotations(connection, &phrase, remaining)?);
+    }
+    Ok(hits)
+}
+
+fn query_documents(
+    connection: &Connection,
+    phrase: &str,
+    limit: u32,
+) -> Result<Vec<SearchHit>, AppError> {
     let mut statement = connection.prepare(
         "SELECT document_id, page, snippet(Search, 2, '[', ']', '…', 12)
            FROM Search
@@ -20,18 +40,56 @@ pub fn query(connection: &Connection, query: &str, limit: u32) -> Result<Vec<Sea
           LIMIT ?2",
     )?;
 
-    let rows = statement.query_map(params![quote_phrase(phrase), limit], |row| {
+    let rows = statement.query_map(params![phrase, limit], |row| {
         Ok(SearchHit {
             document_id: row.get(0)?,
             page: row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0) as u32,
             snippet: row.get(2)?,
+            origin: SearchOrigin::Document,
+            annotation_id: None,
         })
     });
 
+    collect(rows)
+}
+
+fn query_annotations(
+    connection: &Connection,
+    phrase: &str,
+    limit: u32,
+) -> Result<Vec<SearchHit>, AppError> {
+    // `column 2` is `content`, the only indexed column; the snippet markers match
+    // the document query so the UI can highlight both the same way.
+    let mut statement = connection.prepare(
+        "SELECT document_id, page, snippet(AnnotationSearch, 2, '[', ']', '…', 12), annotation_id
+           FROM AnnotationSearch
+          WHERE AnnotationSearch MATCH ?1
+          LIMIT ?2",
+    )?;
+
+    let rows = statement.query_map(params![phrase, limit], |row| {
+        Ok(SearchHit {
+            document_id: row.get(0)?,
+            page: row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0) as u32,
+            snippet: row.get(2)?,
+            origin: SearchOrigin::Annotation,
+            annotation_id: Some(row.get(3)?),
+        })
+    });
+
+    collect(rows)
+}
+
+/// A malformed MATCH expression is a user-input problem, not a failure: report
+/// "no results" instead of surfacing a database error.
+fn collect(
+    rows: Result<
+        rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<SearchHit>>,
+        rusqlite::Error,
+    >,
+) -> Result<Vec<SearchHit>, AppError> {
     match rows {
         Ok(rows) => Ok(rows.collect::<Result<Vec<_>, _>>()?),
-        // A malformed MATCH expression is a user-input problem, not a failure:
-        // report "no results" instead of surfacing a database error.
         Err(rusqlite::Error::SqliteFailure(_, _)) => Ok(Vec::new()),
         Err(error) => Err(AppError::Db(error)),
     }
@@ -101,6 +159,14 @@ mod tests {
     fn setup() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         crate::db::schema::apply(&connection).unwrap();
+        // Annotation inserts carry a FK to Document, so tests that attach notes
+        // need the row to exist even though search itself never reads it.
+        connection
+            .execute(
+                "INSERT INTO Document (id, path, format, added_at) VALUES ('d1', 'C:/a.pdf', 'pdf', 0)",
+                [],
+            )
+            .unwrap();
         connection
     }
 
@@ -237,5 +303,110 @@ mod tests {
     fn row_count_for_an_unindexed_document_is_zero() {
         let connection = setup();
         assert_eq!(row_count(&connection, "never-seen").unwrap(), 0);
+    }
+
+    #[test]
+    fn document_hits_are_tagged_as_document_text() {
+        let connection = setup();
+        insert_pages(&connection, "d1", &[(0, "the needle is here".to_string())]).unwrap();
+
+        let hits = query(&connection, "needle", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].origin, SearchOrigin::Document);
+        assert_eq!(hits[0].annotation_id, None);
+    }
+
+    #[test]
+    fn annotation_hits_are_tagged_and_carry_their_id() {
+        // P2-D5: a note the user wrote must not be presented as document text.
+        let mut connection = setup();
+        insert_pages(&connection, "d1", &[(0, "unrelated body text".to_string())]).unwrap();
+        let note = crate::db::annotations::add(
+            &mut connection,
+            "d1",
+            2,
+            crate::model::AnnotationKind::Note,
+            "{}".to_string(),
+            Some("my needle remark".to_string()),
+            1,
+        )
+        .unwrap();
+
+        let hits = query(&connection, "needle", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].origin, SearchOrigin::Annotation);
+        assert_eq!(hits[0].annotation_id.as_deref(), Some(note.id.as_str()));
+        assert_eq!(hits[0].page, 2);
+    }
+
+    #[test]
+    fn document_hits_rank_before_annotation_hits() {
+        let mut connection = setup();
+        insert_pages(
+            &connection,
+            "d1",
+            &[(0, "shared term in the book".to_string())],
+        )
+        .unwrap();
+        crate::db::annotations::add(
+            &mut connection,
+            "d1",
+            5,
+            crate::model::AnnotationKind::Note,
+            "{}".to_string(),
+            Some("shared term in my note".to_string()),
+            1,
+        )
+        .unwrap();
+
+        let hits = query(&connection, "shared", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].origin, SearchOrigin::Document);
+        assert_eq!(hits[1].origin, SearchOrigin::Annotation);
+    }
+
+    #[test]
+    fn removing_an_annotation_removes_its_search_hit() {
+        let mut connection = setup();
+        let note = crate::db::annotations::add(
+            &mut connection,
+            "d1",
+            1,
+            crate::model::AnnotationKind::Note,
+            "{}".to_string(),
+            Some("ephemeral needle".to_string()),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(query(&connection, "needle", 10).unwrap().len(), 1);
+        crate::db::annotations::remove(&mut connection, &note.id).unwrap();
+        assert!(query(&connection, "needle", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_limit_is_shared_between_both_sources() {
+        // A flood of document hits must not let annotation hits push the result
+        // past the caller's limit -- the caller gets one list of `limit` items.
+        let mut connection = setup();
+        let pages: Vec<(u32, String)> = (0..5)
+            .map(|page| (page, "repeated needle".to_string()))
+            .collect();
+        insert_pages(&connection, "d1", &pages).unwrap();
+        for page in 0..5 {
+            crate::db::annotations::add(
+                &mut connection,
+                "d1",
+                page,
+                crate::model::AnnotationKind::Note,
+                "{}".to_string(),
+                Some("note needle".to_string()),
+                1,
+            )
+            .unwrap();
+        }
+
+        let hits = query(&connection, "needle", 4).unwrap();
+        assert_eq!(hits.len(), 4);
     }
 }

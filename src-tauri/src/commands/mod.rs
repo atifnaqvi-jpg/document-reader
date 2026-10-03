@@ -4,11 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::State;
 
-use crate::db::{app_state, bookmarks, search, Db};
+use crate::db::{annotations, app_state, bookmarks, documents, search, Db};
 use crate::index::{IndexService, IndexStatus, IndexSummary};
 use crate::library;
 use crate::model::{
-    AppError, Bookmark, DocumentMeta, Format, LibraryEntry, RenderedPage, SearchHit,
+    Annotation, AnnotationKind, AppError, Bookmark, DocumentMeta, Format, LibraryEntry,
+    RenderedPage, SearchHit,
 };
 use crate::provider::ReaderProvider;
 use crate::render::RenderService;
@@ -307,4 +308,117 @@ pub async fn get_document_page_text(
     })
     .await
     .map_err(|e| AppError::Other(format!("text task failed: {e}")))?
+}
+
+// --- P2: annotations ---------------------------------------------------------
+//
+// These commands are the D1 seam: they resolve paths and translate arguments, and
+// every decision about PDF structure lives in `crate::editor`. Keeping that split
+// means the write path is testable without a Tauri app.
+
+/// Creates an annotation and, in the same call, its FTS index row (P2-D5).
+#[tauri::command]
+pub fn add_annotation(
+    db: State<'_, Db>,
+    document_id: String,
+    page: u32,
+    kind: String,
+    data: String,
+    text: Option<String>,
+) -> Result<Annotation, AppError> {
+    let kind = AnnotationKind::parse(&kind)
+        .ok_or_else(|| AppError::Other(format!("unknown annotation kind: {kind}")))?;
+    db.with_mut(|connection| {
+        annotations::add(connection, &document_id, page, kind, data, text, now())
+    })
+}
+
+#[tauri::command]
+pub fn update_annotation(
+    db: State<'_, Db>,
+    annotation_id: String,
+    data: String,
+    text: Option<String>,
+) -> Result<Annotation, AppError> {
+    db.with_mut(|connection| annotations::update(connection, &annotation_id, data, text, now()))
+}
+
+#[tauri::command]
+pub fn list_annotations(
+    db: State<'_, Db>,
+    document_id: String,
+) -> Result<Vec<Annotation>, AppError> {
+    db.with(|connection| annotations::list_for_document(connection, &document_id))
+}
+
+/// Lists annotations for a single page, which is what the viewer overlay needs.
+#[tauri::command]
+pub fn list_page_annotations(
+    db: State<'_, Db>,
+    document_id: String,
+    page: u32,
+) -> Result<Vec<Annotation>, AppError> {
+    db.with(|connection| annotations::list_for_page(connection, &document_id, page))
+}
+
+#[tauri::command]
+pub fn remove_annotation(db: State<'_, Db>, annotation_id: String) -> Result<(), AppError> {
+    db.with_mut(|connection| annotations::remove(connection, &annotation_id))
+}
+
+/// Resolves a document id to its path on disk.
+///
+/// Every write command starts here rather than taking a path from the frontend:
+/// the frontend's copy could be stale, and an edit written to a path that no longer
+/// matches the document is how a user's changes end up in the wrong file.
+fn document_path(db: &Db, document_id: &str) -> Result<String, AppError> {
+    db.with(|connection| {
+        documents::get(connection, document_id)?
+            .map(|entry| entry.path)
+            .ok_or_else(|| AppError::Other(format!("document not found: {document_id}")))
+    })
+}
+
+/// Where a "save edits" action would write, so the UI can confirm the filename
+/// before the user commits (P2-D2). Never returns the original path.
+#[tauri::command]
+pub fn next_save_path(db: State<'_, Db>, document_id: String) -> Result<String, AppError> {
+    let path = document_path(&db, &document_id)?;
+    let next =
+        crate::editor::save::next_edited_path(Path::new(&path), |candidate| candidate.exists())?;
+    Ok(next.to_string_lossy().to_string())
+}
+
+/// Saves the document's annotations into a **new** file beside the original (P2-D2).
+///
+/// Returns the path written. The original file is never touched: it is opened
+/// read-only, and the result goes to a versioned name chosen by
+/// [`next_edited_path`]. An explicit overwrite is a separate, differently-named
+/// command precisely so it cannot be reached by a path that means "save".
+#[tauri::command]
+pub fn save_edits(db: State<'_, Db>, document_id: String) -> Result<String, AppError> {
+    let (original_path, rows) = db.with(|connection| {
+        let path = documents::get(connection, &document_id)?
+            .map(|entry| entry.path)
+            .ok_or_else(|| AppError::Other(format!("document not found: {document_id}")))?;
+        Ok((path, annotations::list_for_document(connection, &document_id)?))
+    })?;
+
+    let source = std::fs::read(&original_path)
+        .map_err(|error| AppError::Other(format!("could not read {original_path}: {error}")))?;
+
+    // Written from the original bytes, not from whatever the viewer last
+    // rendered: rebuilding from source is idempotent, so a second save cannot
+    // stack duplicate annotations on top of the first.
+    let edited = crate::editor::annotate::apply_annotations(&source, &rows)?;
+
+    let target = crate::editor::save::next_edited_path(Path::new(&original_path), |candidate| {
+        candidate.exists()
+    })?;
+    crate::editor::save::write_atomically(&target, &edited)?;
+
+    // No cache invalidation here on purpose: writes go to a *new* path, so cached
+    // rasters of the original stay correct. Opening the edited file routes through
+    // `open_document`, which invalidates by path (P2-D6).
+    Ok(target.to_string_lossy().to_string())
 }
