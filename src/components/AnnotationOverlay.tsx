@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type {
   Annotation,
   AnnotationData,
@@ -54,6 +54,10 @@ export function AnnotationOverlay({
   const { activeTool, style, create, selectedId, setSelectedId } = useEditor();
   const [draft, setDraft] = useState<UiRect | null>(null);
   const [inkPoints, setInkPoints] = useState<{ x: number; y: number }[]>([]);
+  // A note is the one tool whose value is its text, so it is captured before the row is
+  // written rather than left empty. Held in UI pixels for placement only.
+  const [notePrompt, setNotePrompt] = useState<{ x: number; y: number } | null>(null);
+  const [noteText, setNoteText] = useState("");
   const surfaceRef = useRef<HTMLDivElement | null>(null);
 
   /** Pointer position relative to the overlay, which is what all geometry assumes. */
@@ -72,9 +76,10 @@ export function AnnotationOverlay({
       const point = localPoint(event);
 
       if (activeTool === "note") {
-        const [x, y] = pointToPdf(point.x, point.y, metrics.scale, metrics.pageHeightPoints);
-        const data: NoteData = { v: 1, point: [x, y], color: style.color };
-        void create(metrics.pageNumber, "note", data, null);
+        // Capture first, write on confirm: a note with no text is a pin with nothing pinned
+        // to it, and the DB row is the only place the text can live.
+        setNoteText("");
+        setNotePrompt(point);
         return;
       }
 
@@ -140,6 +145,40 @@ export function AnnotationOverlay({
     [activeTool, metrics, localPoint, inkPoints, create, style],
   );
 
+  /** Commits a note once its text is known, then clears the prompt. */
+  const commitNote = useCallback(async () => {
+    if (!notePrompt || !metrics) return;
+    const text = noteText.trim();
+    // An empty note is refused rather than written: it would be an anonymous pin that
+    // nothing can distinguish from a stray mark.
+    if (!text) return;
+    const [x, y] = pointToPdf(
+      notePrompt.x,
+      notePrompt.y,
+      metrics.scale,
+      metrics.pageHeightPoints,
+    );
+    const data: NoteData = { v: 1, point: [x, y], color: style.color };
+    setNotePrompt(null);
+    setNoteText("");
+    await create(metrics.pageNumber, "note", data, text);
+  }, [notePrompt, noteText, metrics, create, style.color]);
+
+  // Escape abandons the draft note, matching the menu's Escape handling.
+  useEffect(() => {
+    if (!notePrompt) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setNotePrompt(null);
+        setNoteText("");
+      }
+    };
+    // Capture phase: the overlay sits inside panes that also listen for Escape.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [notePrompt]);
+
   if (!metrics) return null;
 
   return (
@@ -180,6 +219,44 @@ export function AnnotationOverlay({
             borderColor: style.color,
           }}
         />
+      ) : null}
+
+      {/* Positioned where the click landed, so the note is placed and described in one
+          gesture rather than two disconnected ones. */}
+      {notePrompt ? (
+        <div
+          className="annotation-note-prompt"
+          style={{ left: notePrompt.x, top: notePrompt.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <textarea
+            autoFocus
+            value={noteText}
+            placeholder="Note text"
+            onChange={(event) => setNoteText(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter commits; Shift+Enter is a newline, the convention notes use.
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void commitNote();
+              }
+            }}
+          />
+          <div className="annotation-note-prompt-actions">
+            <button type="button" onClick={() => void commitNote()} disabled={!noteText.trim()}>
+              Add note
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setNotePrompt(null);
+                setNoteText("");
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {inkPoints.length > 1 ? (
@@ -244,8 +321,16 @@ function AnnotationMark({
                 // Underline and strikeout render as a rule, not a fill: a filled box
                 // over the text would hide it, which is not what those tools mean.
                 height: annotation.kind === "highlight" ? box.height : 2,
+                // Only the two rule tools offset their line within the box -- underline at
+                // the bottom, strikeout at mid-height. A highlight used to offset itself
+                // by `height - 2`, moving the fill down by its own height so it landed
+                // well below the text the user had swept.
                 marginTop:
-                  annotation.kind === "strikeout" ? Math.max(0, box.height / 2) : box.height - 2,
+                  annotation.kind === "highlight"
+                    ? 0
+                    : annotation.kind === "strikeout"
+                      ? Math.max(0, box.height / 2 - 1)
+                      : Math.max(0, box.height - 2),
                 background: colour,
                 opacity,
               }}
@@ -285,11 +370,51 @@ function AnnotationMark({
     );
   }
 
-  // Note and shape both anchor on a rect; a note also shows its text in a tooltip.
-  const rect =
-    annotation.kind === "shape"
-      ? (data as ShapeData).rect
-      : noteAnchorRect(data as { point?: [number, number] });
+  if (annotation.kind === "note") {
+    const rect = noteAnchorRect(data as { point?: [number, number] });
+    if (!rect) return null;
+    const box = pdfToPage(
+      { x0: rect[0], y0: rect[1], x1: rect[2], y1: rect[3] },
+      metrics.scale,
+      metrics.pageHeightPoints,
+    );
+    // A note is an icon, not an empty frame: without a glyph and a fill of its own it
+    // reads as a stray rectangle. Sized in UI pixels so it stays legible at every zoom
+    // rather than shrinking with the page.
+    const side = Math.max(box.width, 18);
+    return (
+      <>
+        <button
+          type="button"
+          className={className}
+          onClick={onSelect}
+          title={annotation.text ?? undefined}
+          aria-label="note annotation"
+          style={{
+            left: box.x,
+            top: box.y,
+            width: side,
+            height: side,
+            background: colour,
+            borderColor: colour,
+            pointerEvents: "auto",
+          }}
+        >
+          <span className="annotation-note-glyph" aria-hidden="true">
+            N
+          </span>
+        </button>
+        {/* Selecting a note opens its text for editing: a note's value is its text, and
+            without this the only way to fix a typo would be to delete and re-add it. */}
+        {selected ? (
+          <NoteEditor annotation={annotation} style={{ left: box.x + side, top: box.y }} />
+        ) : null}
+      </>
+    );
+  }
+
+  // A shape anchors on a rect and draws as an empty frame.
+  const rect = (data as ShapeData).rect;
   if (!rect) return null;
   const box = pdfToPage(
     { x0: rect[0], y0: rect[1], x1: rect[2], y1: rect[3] },
@@ -302,7 +427,7 @@ function AnnotationMark({
       className={className}
       onClick={onSelect}
       title={annotation.text ?? undefined}
-      aria-label={annotation.kind === "note" ? "note annotation" : "shape annotation"}
+      aria-label="shape annotation"
       style={{
         left: box.x,
         top: box.y,
@@ -312,6 +437,62 @@ function AnnotationMark({
         pointerEvents: "auto",
       }}
     />
+  );
+}
+
+/**
+ * Edits one note's text in place (P2-D11). Commits on blur or Enter.
+ *
+ * A local draft is kept rather than writing on every keystroke: each keystroke would
+ * otherwise be a DB write, a re-query and an undo entry.
+ */
+function NoteEditor({
+  annotation,
+  style,
+}: {
+  annotation: Annotation;
+  style: CSSProperties;
+}) {
+  const { updateText } = useEditor();
+  const [text, setText] = useState(annotation.text ?? "");
+  const committed = useRef(false);
+
+  const commit = useCallback(() => {
+    // Blur fires on unmount too, so the guard stops a second (identical) write.
+    if (committed.current) return;
+    committed.current = true;
+    const next = text.trim();
+    if (next === (annotation.text ?? "").trim()) return;
+    void updateText(annotation, next);
+  }, [annotation, text, updateText]);
+
+  return (
+    <div
+      className="annotation-note-editor"
+      style={style}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <textarea
+        autoFocus
+        value={text}
+        onChange={(event) => {
+          committed.current = false;
+          setText(event.target.value);
+        }}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            commit();
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            committed.current = true;
+            setText(annotation.text ?? "");
+          }
+        }}
+      />
+    </div>
   );
 }
 

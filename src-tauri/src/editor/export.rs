@@ -254,9 +254,38 @@ fn contents_array(document: &Document, page_id: ObjectId) -> Result<Vec<Object>,
     }
 }
 
+/// Smallest font size a fitted watermark will use, in points.
+const FONT_SIZE_FLOOR: f32 = 6.0;
+
+/// Mean glyph width as a fraction of font size for the standard Latin faces.
+const HELVETICA_MEAN_GLYPH_RATIO: f32 = 0.5;
+
+/// Width of `text` at `font_size`, in points.
+///
+/// An estimate, not a measurement: Helvetica's real widths live in the font's `/Widths`
+/// array and vary per glyph. This is only ever used to place a decorative watermark, where
+/// being a few points off is invisible -- measuring exactly would mean parsing the font.
+fn text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().count() as f32 * font_size * HELVETICA_MEAN_GLYPH_RATIO
+}
+
+/// Largest font size in `[floor, desired]` at which `text` fits within the rotated box.
+///
+/// The mark is drawn at 45 degrees, so the extent that has to fit is the page's diagonal.
+fn fit_font_size(text: &str, desired: f32, width: f32, height: f32, floor: f32) -> f32 {
+    let diagonal = (width * width + height * height).sqrt();
+    let characters = text.chars().count() as f32;
+    if characters <= 0.0 || diagonal <= 0.0 {
+        return desired;
+    }
+    let available = diagonal * 0.9;
+    let maximum = available / (characters * HELVETICA_MEAN_GLYPH_RATIO);
+    desired.min(maximum).max(floor)
+}
+
 /// The page's `/MediaBox`, falling back to US Letter when it is inherited or absent.
-fn media_box(document: &Document, page_id: ObjectId) -> (f32, f32) {
-    let default = (612.0_f32, 792.0_f32);
+fn media_box(document: &Document, page_id: ObjectId) -> (f32, f32, f32, f32) {
+    let default = (0.0_f32, 0.0_f32, 612.0, 792.0);
     let Ok(page) = document
         .get_object(page_id)
         .and_then(|object| object.as_dict())
@@ -274,8 +303,9 @@ fn media_box(document: &Document, page_id: ObjectId) -> (f32, f32) {
             .as_float()
             .or_else(|_| box_[index].as_i64().map(|v| v as f32))
     };
-    match (value(2), value(3)) {
-        (Ok(width), Ok(height)) => (width, height),
+    match (value(0), value(1), value(2), value(3)) {
+        // Normalised, because a box may legitimately be given with its corners swapped.
+        (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) => (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)),
         _ => default,
     }
 }
@@ -299,8 +329,20 @@ pub fn watermark(document: &mut Document, text: &str) -> Result<usize, AppError>
     });
 
     for page_id in page_ids {
-        let (width, height) = media_box(document, page_id);
+        let (x0, y0, x1, y1) = media_box(document, page_id);
+        let width = x1 - x0;
+        let height = y1 - y0;
+        // Rotation must happen about the page centre, not the origin. The content stream
+        // is not in page space -- it starts at (0,0) -- so the centre has to be expressed
+        // relative to the box's lower-left corner, or a non-zero `/MediaBox` origin puts
+        // the mark outside the page (and any page other than US Letter lands off-centre).
+        let centre_x = x0 + width / 2.0;
+        let centre_y = y0 + height / 2.0;
         let escaped = escape_text(text);
+
+        // Sized to the diagonal so the mark runs corner to corner on any page shape, then
+        // shrunk to fit when the text is long enough to overrun the box.
+        let fitted = fit_font_size(text, 48.0, width, height, FONT_SIZE_FLOOR);
 
         let operations = vec![
             Operation::new("q", vec![]),
@@ -313,14 +355,22 @@ pub fn watermark(document: &mut Document, text: &str) -> Result<usize, AppError>
                     std::f32::consts::FRAC_1_SQRT_2.into(),
                     (-std::f32::consts::FRAC_1_SQRT_2).into(),
                     std::f32::consts::FRAC_1_SQRT_2.into(),
-                    (width * 0.15).into(),
-                    (height * 0.15).into(),
+                    centre_x.into(),
+                    centre_y.into(),
                 ],
             ),
             Operation::new("rg", vec![0.5.into(), 0.5.into(), 0.5.into()]),
             Operation::new("BT", vec![]),
-            Operation::new("Tf", vec!["F1".into(), 48.into()]),
-            Operation::new("Td", vec![0.into(), 0.into()]),
+            Operation::new("Tf", vec!["F1".into(), fitted.into()]),
+            // Half the text's own extent, because `Tj` draws from the *baseline start* and
+            // would otherwise centre the beginning of the text rather than the text.
+            Operation::new(
+                "Td",
+                vec![
+                    (-text_width(&escaped, fitted) / 2.0).into(),
+                    (-fitted / 3.0).into(),
+                ],
+            ),
             Operation::new("Tj", vec![Object::string_literal(escaped)]),
             Operation::new("ET", vec![]),
             Operation::new("Q", vec![]),

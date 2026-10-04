@@ -34,7 +34,14 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
 /** Colours offered per tool; a full picker would be its own change, not a P2 need. */
 const COLOURS = ["#fff3b0", "#a8e6a1", "#9fd8ff", "#ffb3c1", "#f5a623", "#d1242f"];
 
-export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
+export function EditorPane({
+  entry,
+  currentPage,
+}: {
+  entry: LibraryEntry | null;
+  /** Zero-based page the viewer is showing, so the page tools start on it. */
+  currentPage: number;
+}) {
   const {
     activeTool,
     setActiveTool,
@@ -46,7 +53,13 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
     redo,
     error,
     clearError,
+    annotations,
+    selectedId,
+    setSelectedId,
+    remove,
   } = useEditor();
+
+  const selected = annotations.find((row) => row.id === selectedId) ?? null;
 
   const [saveError, setSaveError] = useState<AppError | null>(null);
   const [saving, setSaving] = useState(false);
@@ -58,7 +71,11 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
   const [pendingOverwrite, setPendingOverwrite] = useState(false);
   // P2-F3/F5: page tools and export are "write a new file" operations, so they report
   // their result through the same savedPath channel as a save and share its busy flag.
-  const [pageOneBased, setPageOneBased] = useState(1);
+  // Follows the visible page by default -- the page the user is looking at is almost
+  // always the one they mean, and 1 is right for the first page anyway. Typing in the
+  // box overrides it until the viewer moves again.
+  const [pageOverride, setPageOverride] = useState<number | null>(null);
+  const pageOneBased = pageOverride ?? currentPage + 1;
   const [watermark, setWatermark] = useState("");
 
   if (!entry) return null;
@@ -182,7 +199,11 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
             type="number"
             min={1}
             value={pageOneBased}
-            onChange={(event) => setPageOneBased(Number(event.target.value))}
+            onChange={(event) => {
+              const next = Number(event.target.value);
+              // Clearing the box must not snap it back to the viewer's page mid-edit.
+              if (Number.isFinite(next) && next >= 1) setPageOverride(next);
+            }}
           />
         </label>
         <button
@@ -254,6 +275,19 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
       </fieldset>
 
       <div className="editor-actions">
+        {/* Without this there is no way to remove a mark once drawn: annotations could be
+            created but never taken back, and undo only spans the current session. */}
+        <button
+          type="button"
+          disabled={!selected || saving}
+          onClick={() => {
+            if (!selected) return;
+            setSelectedId(null);
+            void remove(selected);
+          }}
+        >
+          Delete annotation
+        </button>
         <button type="button" onClick={undo} disabled={!canUndo}>
           Undo
         </button>

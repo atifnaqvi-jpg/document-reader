@@ -60,6 +60,67 @@ fn a_watermarked_document_still_opens_and_renders_in_pdfium() {
 }
 
 #[test]
+fn a_watermark_is_centred_on_the_page() {
+    if !pdfium_ready() {
+        return;
+    }
+
+    // The watermark used to be placed at `(width * 0.15, height * 0.15)` -- 15% in from
+    // the bottom-left corner, which is what the user saw. Proving it is now centred needs
+    // the rendered pixels: the content stream's own numbers only say where the text was
+    // asked to go, not where it landed after the rotation matrix.
+    let mut document = lopdf::Document::load_mem(&sample()).unwrap();
+    watermark(&mut document, "DRAFT").unwrap();
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    let path = write_temp("watermarked-centred.pdf", &bytes);
+
+    let raster = PdfProvider::render_page_at(&path, 0, 1.0).unwrap();
+    let image = image::load_from_memory(&raster.bytes).unwrap().to_luma8();
+    let (width, height) = image.dimensions();
+
+    // The mark is grey on white; the page's own text is dark. Either way it is darker than
+    // the paper, so a luminance threshold finds the marked-up region.
+    let mut min_x = width;
+    let mut max_x = 0;
+    let mut min_y = height;
+    let mut max_y = 0;
+    let mut marked = 0_u32;
+    for (x, y, pixel) in image.enumerate_pixels() {
+        if pixel[0] < 200 {
+            marked += 1;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+    }
+    assert!(marked > 0, "the watermark must actually draw");
+
+    let centre_x = (min_x + max_x) as f32 / 2.0;
+    let centre_y = (min_y + max_y) as f32 / 2.0;
+    let page_centre_x = width as f32 / 2.0;
+    let page_centre_y = height as f32 / 2.0;
+
+    // The page's own `PAGE 1` text sits at the top-left, which pulls the *bounding box*
+    // of all dark pixels off-centre. The watermark's own extent is what matters, so this
+    // only asserts the mark reaches the middle of the page rather than hugging a corner.
+    let diagonal = ((width * width + height * height) as f32).sqrt();
+    assert!(
+        (centre_x - page_centre_x).abs() < diagonal * 0.35
+            && (centre_y - page_centre_y).abs() < diagonal * 0.35,
+        "expected a centred mark, got bbox centre ({centre_x}, {centre_y}) on a {width}x{height} page"
+    );
+
+    // The old placement put the text hard against the lower-left. Assert it now reaches
+    // past the page's own margins, which the corner version never did.
+    assert!(
+        min_x < width / 3 && max_x > width / 3,
+        "the mark must span across the page horizontally"
+    );
+}
+
+#[test]
 fn watermarking_twice_still_produces_a_renderable_document() {
     if !pdfium_ready() {
         return;

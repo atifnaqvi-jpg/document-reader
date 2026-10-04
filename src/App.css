@@ -441,13 +441,84 @@ button:disabled {
   background: transparent;
 }
 
+/* A note is a filled icon with a centred glyph. It used to be a 4px left border on a
+   transparent box, which read as a stray sliver rather than a mark. */
 .kind-note {
-  border-left: 4px solid;
-  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.annotation-note-glyph {
+  pointer-events: none;
 }
 
 .kind-shape {
   border: 2px solid;
+}
+
+.annotation-note-prompt,
+.annotation-note-editor {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 15rem;
+  padding: 0.4rem;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 4px;
+  background: var(--panel, #fff);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 25%);
+  pointer-events: auto;
+}
+
+.annotation-note-editor {
+  width: 13rem;
+}
+
+.annotation-note-prompt textarea,
+.annotation-note-editor textarea {
+  width: 100%;
+  min-height: 3.5rem;
+  resize: vertical;
+  font: inherit;
+}
+
+.annotation-note-prompt-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+/* The page tools are a mixed row of buttons and labelled inputs. Without an explicit
+   alignment the labels sit on the text baseline while the buttons centre themselves, so
+   a label and its box drift apart. */
+.editor-pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 4px;
+}
+
+.editor-pages > label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+/* Spans the row so it reads as a note about the whole group of write-actions. */
+.editor-pages > .muted {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 .annotation-draft {

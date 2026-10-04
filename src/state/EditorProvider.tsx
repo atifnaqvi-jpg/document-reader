@@ -16,6 +16,7 @@ import {
   removeAnnotation,
   restoreAnnotation,
   setAppState,
+  updateAnnotation,
 } from "../api/invoke";
 import type {
   Annotation,
@@ -72,6 +73,8 @@ interface EditorContextValue {
   ) => Promise<void>;
   /** Deletes one annotation, recording it for undo. */
   remove: (annotation: Annotation) => Promise<void>;
+  /** Replaces one annotation's text, recording it for undo. */
+  updateText: (annotation: Annotation, text: string) => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   clearError: () => void;
@@ -307,6 +310,33 @@ export function EditorProvider({
     [documentId, docKey, refresh, push],
   );
 
+  const updateText = useCallback(
+    async (annotation: Annotation, text: string) => {
+      try {
+        await updateAnnotation(annotation.id, annotation.data, text);
+        await refresh();
+        // Undo restores the *previous* text rather than deleting the note, because editing
+        // text is a change to something that still exists. The entry closes over the old
+        // value, which is the only record of it once the update lands.
+        const previous = annotation.text;
+        push(docKey, {
+          label: `Edit ${annotation.kind} text`,
+          undo: async () => {
+            await updateAnnotation(annotation.id, annotation.data, previous);
+            await refresh();
+          },
+          redo: async () => {
+            await updateAnnotation(annotation.id, annotation.data, text);
+            await refresh();
+          },
+        });
+      } catch (e) {
+        setError(e as AppError);
+      }
+    },
+    [docKey, refresh, push],
+  );
+
   const undo = useCallback(async () => {
     const current = stacksRef.current.get(docKey) ?? { undo: [], redo: [] };
     const entry = current.undo[current.undo.length - 1];
@@ -359,6 +389,7 @@ export function EditorProvider({
       setSelectedId,
       create,
       remove,
+      updateText,
       undo,
       redo,
       clearError,
@@ -375,6 +406,7 @@ export function EditorProvider({
       setStyle,
       create,
       remove,
+      updateText,
       undo,
       redo,
       clearError,

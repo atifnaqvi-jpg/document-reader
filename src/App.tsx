@@ -139,7 +139,7 @@ function Workspace() {
               the tool, the viewer's overlay draws with it, and the provider needs the
               page the viewer is on. */}
           <EditorProvider documentId={selected?.id ?? null} page={visiblePage}>
-            <EditorPane entry={selected} />
+            <EditorPane entry={selected} currentPage={visiblePage} />
             <ViewerPane
               ref={viewerRef}
               entry={selected}
