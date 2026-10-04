@@ -345,17 +345,23 @@ impl DocumentHandles {
 impl PdfProvider {
     /// Renders a page through the handle cache — the path both the command surface
     /// (P1.3) and neighbour pre-render (P1.4) use.
+    ///
+    /// `annotations` is the P2-D9 "original vs annotated" view switch. It suppresses the
+    /// annotation layer PDFium composites during rasterization, rather than hiding
+    /// already-rendered marks in the DOM: hiding cannot remove pixels that are already in
+    /// the bitmap, and leaves stale selection targets behind.
     pub fn render_cached(
         handles: &DocumentHandles,
         path: &Path,
         content_hash: Option<&str>,
         page: u32,
         scale: f32,
+        annotations: bool,
     ) -> Result<RasterizedPage, AppError> {
         // The gate is held for the whole rasterization, not just the lookup: PDFium
         // renders on different documents must not overlap.
         handles.with_document(path, content_hash, |document| {
-            Self::rasterize(document, page, scale)
+            Self::rasterize(document, page, scale, annotations)
         })
     }
 
@@ -392,13 +398,18 @@ impl PdfProvider {
         document: &PdfDocument<'_>,
         page: u32,
         scale: f32,
+        annotations: bool,
     ) -> Result<RasterizedPage, AppError> {
         let page = document
             .pages()
             .get(page as u16)
             .map_err(|e| AppError::Other(format!("page {page} unavailable: {e}")))?;
 
-        let config = PdfRenderConfig::new().scale_page_by_factor(clamp_scale(scale));
+        let config = PdfRenderConfig::new()
+            .scale_page_by_factor(clamp_scale(scale))
+            // Default is `true` (PDFium composites the annotation layer), which is what
+            // the "annotated" view wants; `false` is the D9 "original" view.
+            .render_annotations(annotations);
         let bitmap = page
             .render_with_config(&config)
             .map_err(|e| AppError::Other(format!("render failed: {e}")))?;
@@ -442,7 +453,10 @@ impl PdfProvider {
         let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
         let document = Self::load(pdfium()?, path)?;
-        Self::rasterize(&document, page, scale)
+        // Annotations visible: the product default (D9). Callers that need the
+        // suppressed variant go through `render_cached`, which is the path the viewer
+        // uses and therefore the one that has to carry the flag.
+        Self::rasterize(&document, page, scale, true)
     }
 
     /// Extracts the text layer of a single page.
@@ -459,6 +473,28 @@ impl PdfProvider {
         Self::ensure_file(path)?;
         let document = Self::load(pdfium()?, path)?;
         Ok(document.pages().len() as u32)
+    }
+
+    /// Per-page annotation counts, read back by PDFium (P2 §7 item 4).
+    ///
+    /// PDFium exposes the annotation *list* even though it cannot create annotations
+    /// (P2 F1), which makes this the only check that the lopdf write path produced a
+    /// file a reader will actually show marks in. Reading it back with lopdf would only
+    /// prove lopdf agrees with itself.
+    pub fn annotation_counts(path: &Path, pages: u32) -> Result<Vec<usize>, AppError> {
+        let _gate = PdfiumGate::acquire();
+        Self::ensure_file(path)?;
+        let document = Self::load(pdfium()?, path)?;
+
+        (0..pages)
+            .map(|index| {
+                let page = document
+                    .pages()
+                    .get(index as u16)
+                    .map_err(|e| AppError::Other(format!("page {index} unavailable: {e}")))?;
+                Ok(page.annotations().len())
+            })
+            .collect()
     }
 
     /// Resolves once per process. Deliberately lazy: `current_exe()` only reflects
@@ -838,7 +874,8 @@ mod tests {
         let handles = DocumentHandles::new();
         let path = fixture_pdf();
 
-        let cached_render = PdfProvider::render_cached(&handles, &path, None, 1, 1.0).unwrap();
+        let cached_render =
+            PdfProvider::render_cached(&handles, &path, None, 1, 1.0, true).unwrap();
         let direct_render = PdfProvider::render_page_at(&path, 1, 1.0).unwrap();
         assert_eq!(cached_render, direct_render);
 
@@ -872,7 +909,7 @@ mod tests {
                 let handles = Arc::clone(&handles);
                 let path = path.clone();
                 threads.push(scope.spawn(move || {
-                    PdfProvider::render_cached(&handles, &path, None, page, 1.0)
+                    PdfProvider::render_cached(&handles, &path, None, page, 1.0, true)
                         .unwrap()
                         .bytes
                 }));
@@ -880,7 +917,7 @@ mod tests {
             let handles = Arc::clone(&handles);
             let other_for_thread = other.clone();
             threads.push(scope.spawn(move || {
-                PdfProvider::render_cached(&handles, &other_for_thread, None, 0, 1.0)
+                PdfProvider::render_cached(&handles, &other_for_thread, None, 0, 1.0, true)
                     .unwrap()
                     .bytes
             }));
@@ -939,7 +976,7 @@ mod tests {
                 threads.push(scope.spawn(move || {
                     let page = (index % 3) as u32;
                     let rendered =
-                        PdfProvider::render_cached(&handles, &path, None, page, 1.0).unwrap();
+                        PdfProvider::render_cached(&handles, &path, None, page, 1.0, true).unwrap();
                     assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
                     // Force contention with the eviction path in other threads.
                     let _ = PdfProvider::extract_cached(&handles, &path, None, page);
@@ -988,7 +1025,7 @@ mod tests {
 
         let handles = DocumentHandles::new();
         let error =
-            PdfProvider::render_cached(&handles, &fixture_pdf(), None, 42, 1.0).unwrap_err();
+            PdfProvider::render_cached(&handles, &fixture_pdf(), None, 42, 1.0, true).unwrap_err();
         assert_eq!(error.code(), "OTHER");
     }
 

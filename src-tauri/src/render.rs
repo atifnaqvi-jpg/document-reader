@@ -31,21 +31,26 @@ const SCALE_STEP: f32 = 0.25;
 const MIN_SCALE_STEPS: u16 = 4; // 1.0×
 const MAX_SCALE_STEPS: u16 = 32; // 8.0×
 
-/// Identifies one cached raster (P1-D3): `(doc_id, page, scale)`.
+/// Identifies one cached raster (P1-D3): `(doc_id, page, scale, annotations)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RenderKey {
     pub doc_id: String,
     pub page: u32,
     /// Quantised scale, in 1/4 steps, avoiding float keys.
     pub scale_steps: u16,
+    /// Whether the annotation layer was composited (P2-D9). Part of the key because the
+    /// two variants are different pixels for the same page: without it, toggling to
+    /// "original" would be served the annotated raster already in the cache.
+    pub annotations: bool,
 }
 
 impl RenderKey {
-    pub fn new(doc_id: &str, page: u32, scale: f32) -> Self {
+    pub fn new(doc_id: &str, page: u32, scale: f32, annotations: bool) -> Self {
         Self {
             doc_id: doc_id.to_string(),
             page,
             scale_steps: quantise_scale(scale),
+            annotations,
         }
     }
 }
@@ -247,8 +252,9 @@ impl RenderService {
         content_hash: Option<&str>,
         page: u32,
         scale: f32,
+        annotations: bool,
     ) -> Result<Arc<RenderedPage>, AppError> {
-        self.render_inner(doc_id, path, content_hash, page, scale, None)
+        self.render_inner(doc_id, path, content_hash, page, scale, annotations, None)
     }
 
     /// Opens the next pre-render generation (P1-D4).
@@ -268,6 +274,7 @@ impl RenderService {
         self.generation.load(Ordering::SeqCst) == ticket
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_inner(
         &self,
         doc_id: &str,
@@ -275,14 +282,22 @@ impl RenderService {
         content_hash: Option<&str>,
         page: u32,
         scale: f32,
+        annotations: bool,
         ticket: Option<u64>,
     ) -> Result<Arc<RenderedPage>, AppError> {
-        let key = RenderKey::new(doc_id, page, scale);
+        let key = RenderKey::new(doc_id, page, scale, annotations);
         if let Some(hit) = self.cache.get(&key) {
             return Ok(hit);
         }
 
-        let raster = PdfProvider::render_cached(&self.handles, path, content_hash, page, scale)?;
+        let raster = PdfProvider::render_cached(
+            &self.handles,
+            path,
+            content_hash,
+            page,
+            scale,
+            annotations,
+        )?;
         // Encode once, here: the cached value is exactly what goes over IPC, so a hit
         // costs no re-encoding and the byte budget tracks the real payload size.
         let page = Arc::new(RenderedPage {
@@ -306,6 +321,7 @@ impl RenderService {
     /// superseded the walk stops early.
     ///
     /// Returns how many neighbours were rendered, which is what tests assert on.
+    #[allow(clippy::too_many_arguments)]
     pub fn prerender_neighbours(
         &self,
         ticket: u64,
@@ -314,6 +330,7 @@ impl RenderService {
         content_hash: Option<&str>,
         page: u32,
         scale: f32,
+        annotations: bool,
     ) -> usize {
         // Read the page count through the gate, then release it before rendering:
         // holding it across two renders would stall the page the user is waiting for.
@@ -334,12 +351,22 @@ impl RenderService {
             if !self.is_current(ticket) {
                 break;
             }
-            let key = RenderKey::new(doc_id, candidate, scale);
+            // Speculative work is only useful if it matches what the foreground render
+            // will ask for, so the pre-render carries the same annotation flag.
+            let key = RenderKey::new(doc_id, candidate, scale, annotations);
             if self.cache.get(&key).is_some() {
                 continue;
             }
             if self
-                .render_inner(doc_id, path, content_hash, candidate, scale, Some(ticket))
+                .render_inner(
+                    doc_id,
+                    path,
+                    content_hash,
+                    candidate,
+                    scale,
+                    annotations,
+                    Some(ticket),
+                )
                 .is_ok()
             {
                 rendered += 1;
@@ -419,6 +446,24 @@ mod tests {
     }
 
     #[test]
+    fn the_annotated_and_original_views_are_separate_cache_entries() {
+        // P2-D9. If the annotation flag were left out of the key, the first view rendered
+        // for a page would be served for both — so switching to "original" would keep
+        // showing the marks, and switching back would show them missing until eviction.
+        let annotated = RenderKey::new("doc", 0, 1.0, true);
+        let original = RenderKey::new("doc", 0, 1.0, false);
+
+        assert_ne!(annotated, original);
+
+        let cache = RenderCache::new(1_000);
+        cache.insert(annotated.clone(), page(10));
+        assert!(
+            cache.get(&original).is_none(),
+            "the original view must not be answered by the annotated raster"
+        );
+    }
+
+    #[test]
     fn absurd_scales_are_clamped_into_the_quantised_range() {
         assert_eq!(quantise_scale(0.0), MIN_SCALE_STEPS);
         assert_eq!(quantise_scale(-5.0), MIN_SCALE_STEPS);
@@ -429,7 +474,7 @@ mod tests {
     #[test]
     fn a_hit_costs_nothing_and_a_miss_is_none() {
         let cache = RenderCache::new(1_000);
-        let key = RenderKey::new("doc", 3, 1.0);
+        let key = RenderKey::new("doc", 3, 1.0, true);
 
         assert!(cache.get(&key).is_none(), "cold cache must miss");
         cache.insert(key.clone(), page(10));
@@ -442,10 +487,10 @@ mod tests {
         // Room for exactly two 100-byte pages.
         let cache = RenderCache::new(200);
         for index in 0..5 {
-            cache.insert(RenderKey::new("doc", index, 1.0), page(100));
+            cache.insert(RenderKey::new("doc", index, 1.0, true), page(100));
             // Touching in order makes insertion order equal use order, so eviction
             // takes the lowest page each time.
-            cache.get(&RenderKey::new("doc", index, 1.0));
+            cache.get(&RenderKey::new("doc", index, 1.0, true));
         }
 
         // Five inserts of 100 bytes into a 200-byte budget must not hold 500 bytes.
@@ -456,14 +501,14 @@ mod tests {
     #[test]
     fn the_least_recently_used_entry_is_evicted_first() {
         let cache = RenderCache::new(200);
-        let first = RenderKey::new("doc", 0, 1.0);
-        let second = RenderKey::new("doc", 1, 1.0);
+        let first = RenderKey::new("doc", 0, 1.0, true);
+        let second = RenderKey::new("doc", 1, 1.0, true);
 
         cache.insert(first.clone(), page(100));
         cache.insert(second.clone(), page(100));
         // Touch the first so the second becomes the least recently used.
         cache.get(&first);
-        cache.insert(RenderKey::new("doc", 2, 1.0), page(100));
+        cache.insert(RenderKey::new("doc", 2, 1.0, true), page(100));
 
         assert!(
             cache.get(&first).is_some(),
@@ -475,14 +520,14 @@ mod tests {
     #[test]
     fn scale_is_part_of_the_key_so_zooming_does_not_serve_the_wrong_raster() {
         let cache = RenderCache::new(1_000);
-        cache.insert(RenderKey::new("doc", 0, 1.0), page(10));
+        cache.insert(RenderKey::new("doc", 0, 1.0, true), page(10));
 
         // A different zoom is a different raster: it must miss, and the miss must not
         // disturb the entry already cached.
-        assert!(cache.get(&RenderKey::new("doc", 0, 2.0)).is_none());
+        assert!(cache.get(&RenderKey::new("doc", 0, 2.0, true)).is_none());
         assert_eq!(cache.len(), 1);
 
-        cache.insert(RenderKey::new("doc", 0, 2.0), page(10));
+        cache.insert(RenderKey::new("doc", 0, 2.0, true), page(10));
         assert_eq!(cache.len(), 2);
     }
 
@@ -491,25 +536,25 @@ mod tests {
         // Budget 50, one page of 500 bytes: evicting everything else is right, but the
         // just-rendered page must not evict itself, or every draw would re-rasterize.
         let cache = RenderCache::new(50);
-        cache.insert(RenderKey::new("doc", 0, 1.0), page(10));
-        cache.insert(RenderKey::new("doc", 1, 1.0), page(500));
+        cache.insert(RenderKey::new("doc", 0, 1.0, true), page(10));
+        cache.insert(RenderKey::new("doc", 1, 1.0, true), page(500));
 
         assert_eq!(cache.len(), 1);
-        assert!(cache.get(&RenderKey::new("doc", 1, 1.0)).is_some());
+        assert!(cache.get(&RenderKey::new("doc", 1, 1.0, true)).is_some());
     }
 
     #[test]
     fn forgetting_a_document_drops_only_its_pages() {
         let cache = RenderCache::new(10_000);
-        cache.insert(RenderKey::new("a", 0, 1.0), page(10));
-        cache.insert(RenderKey::new("a", 1, 1.0), page(10));
-        cache.insert(RenderKey::new("b", 0, 1.0), page(10));
+        cache.insert(RenderKey::new("a", 0, 1.0, true), page(10));
+        cache.insert(RenderKey::new("a", 1, 1.0, true), page(10));
+        cache.insert(RenderKey::new("b", 0, 1.0, true), page(10));
 
         cache.forget_document("a");
 
         assert_eq!(cache.len(), 1);
-        assert!(cache.get(&RenderKey::new("a", 0, 1.0)).is_none());
-        assert!(cache.get(&RenderKey::new("b", 0, 1.0)).is_some());
+        assert!(cache.get(&RenderKey::new("a", 0, 1.0, true)).is_none());
+        assert!(cache.get(&RenderKey::new("b", 0, 1.0, true)).is_some());
         assert_eq!(cache.bytes(), 10);
     }
 
@@ -517,7 +562,7 @@ mod tests {
     fn byte_accounting_returns_to_zero_after_forgetting_everything() {
         let cache = RenderCache::new(10_000);
         for index in 0..4 {
-            cache.insert(RenderKey::new("doc", index, 1.0), page(50));
+            cache.insert(RenderKey::new("doc", index, 1.0, true), page(50));
         }
         assert_eq!(cache.bytes(), 200);
 
@@ -536,9 +581,9 @@ mod tests {
         let service = RenderService::new();
         let path = fixture_pdf();
 
-        let first = service.render("doc-1", &path, None, 0, 1.0).unwrap();
+        let first = service.render("doc-1", &path, None, 0, 1.0, true).unwrap();
         assert_eq!(service.cache().len(), 1);
-        let second = service.render("doc-1", &path, None, 0, 1.0).unwrap();
+        let second = service.render("doc-1", &path, None, 0, 1.0, true).unwrap();
 
         // Same cached Arc, so the second call did no work at all.
         assert!(Arc::ptr_eq(&first, &second));
@@ -554,10 +599,10 @@ mod tests {
 
         let service = RenderService::new();
         let path = fixture_pdf();
-        service.render("doc-1", &path, None, 1, 1.0).unwrap();
+        service.render("doc-1", &path, None, 1, 1.0, true).unwrap();
 
         let ticket = service.begin_pre_render();
-        let rendered = service.prerender_neighbours(ticket, "doc-1", &path, None, 1, 1.0);
+        let rendered = service.prerender_neighbours(ticket, "doc-1", &path, None, 1, 1.0, true);
         assert_eq!(rendered, 2);
 
         // Pages 0, 1, 2 are all resident now: the next page turn is a cache hit.
@@ -566,7 +611,7 @@ mod tests {
             assert!(
                 service
                     .cache()
-                    .get(&RenderKey::new("doc-1", page, 1.0))
+                    .get(&RenderKey::new("doc-1", page, 1.0, true))
                     .is_some(),
                 "page {page} should have been pre-rendered"
             );
@@ -585,21 +630,21 @@ mod tests {
 
         // Page 0 has no previous neighbour, so only page 1 is filled.
         let ticket = service.begin_pre_render();
-        let rendered = service.prerender_neighbours(ticket, "doc-1", &path, None, 0, 1.0);
+        let rendered = service.prerender_neighbours(ticket, "doc-1", &path, None, 0, 1.0, true);
         assert_eq!(rendered, 1);
         assert!(service
             .cache()
-            .get(&RenderKey::new("doc-1", 1, 1.0))
+            .get(&RenderKey::new("doc-1", 1, 1.0, true))
             .is_some());
 
         // Last page (2) has no next neighbour.
         let service = RenderService::new();
         let ticket = service.begin_pre_render();
-        let rendered = service.prerender_neighbours(ticket, "doc-1", &path, None, 2, 1.0);
+        let rendered = service.prerender_neighbours(ticket, "doc-1", &path, None, 2, 1.0, true);
         assert_eq!(rendered, 1);
         assert!(service
             .cache()
-            .get(&RenderKey::new("doc-1", 1, 1.0))
+            .get(&RenderKey::new("doc-1", 1, 1.0, true))
             .is_some());
     }
 
@@ -612,7 +657,7 @@ mod tests {
 
         let service = RenderService::new();
         let path = fixture_pdf();
-        service.render("doc-1", &path, None, 0, 1.0).unwrap();
+        service.render("doc-1", &path, None, 0, 1.0, true).unwrap();
         assert_eq!(service.open_documents(), 1);
 
         service.forget_document("doc-1", &path);
@@ -636,7 +681,7 @@ mod tests {
         // Open under one hash, then discard using a *different* hash, which is what a
         // file edited in place looks like on re-import. A hash-keyed drop would miss.
         service
-            .render("doc-1", &path, Some("old-hash"), 0, 1.0)
+            .render("doc-1", &path, Some("old-hash"), 0, 1.0, true)
             .unwrap();
         assert_eq!(service.open_documents(), 1);
 
@@ -686,7 +731,7 @@ mod tests {
 
         // A superseded pre-render stops before rendering anything: the two neighbours
         // of a page the user has already left are not worth the work.
-        let rendered = service.prerender_neighbours(stale, "doc-1", &path, None, 1, 1.0);
+        let rendered = service.prerender_neighbours(stale, "doc-1", &path, None, 1, 1.0, true);
         assert_eq!(rendered, 0);
         assert!(service.cache().is_empty());
     }

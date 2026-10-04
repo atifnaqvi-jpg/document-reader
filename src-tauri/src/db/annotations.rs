@@ -168,6 +168,21 @@ pub fn remove(connection: &mut Connection, annotation_id: &str) -> Result<(), Ap
     Ok(())
 }
 
+/// The document an annotation belongs to.
+///
+/// Lets the annotation-change event (P2-D11) name a document when the command that
+/// mutated the row only received an annotation id, and keeps the event's payload backed
+/// by the DB rather than by whatever the frontend happened to pass.
+pub fn document_id_for(connection: &Connection, annotation_id: &str) -> Result<String, AppError> {
+    connection
+        .query_row(
+            "SELECT document_id FROM Annotation WHERE id = ?1",
+            params![annotation_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| AppError::Other("annotation not found".to_string()))
+}
+
 /// Number of annotations for a document, used by the P2-D12 edit-store GC.
 pub fn count_for_document(connection: &Connection, document_id: &str) -> Result<u64, AppError> {
     let count: i64 = connection.query_row(

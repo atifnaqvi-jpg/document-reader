@@ -12,6 +12,7 @@ import {
   addAnnotation,
   getAppState,
   listAnnotations,
+  onAnnotationChanged,
   removeAnnotation,
   restoreAnnotation,
   setAppState,
@@ -152,6 +153,33 @@ export function EditorProvider({
     setSelectedId(null);
     setStacks(stacksRef.current.get(docKey) ?? { undo: [], redo: [] });
     void refresh();
+  }, [docKey, refresh]);
+
+  // Cross-surface sync (P2-D11). An annotation changed somewhere else -- an undo restored
+  // by another pane, a future multi-window edit -- and this pane re-reads the DB rather
+  // than trusting the event's payload, which only names the document.
+  //
+  // Skipped for other documents: the event is process-wide, so without this guard a change
+  // in document B would make the open document A re-query for nothing.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    onAnnotationChanged((change) => {
+      if (change.documentId === docKey) void refresh();
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        // No event bridge (e.g. a test renderer) must not break editing.
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [docKey, refresh]);
 
   // `canUndo`/`canRedo` read the map so they are correct even on the render immediately

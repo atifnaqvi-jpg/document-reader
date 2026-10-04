@@ -172,3 +172,17 @@ export interface IndexSummary {
 
 /** Event name emitted by the backend while indexing (P1-D6). */
 export const INDEX_PROGRESS_EVENT = "index://progress";
+
+/**
+ * Payload of the `annotation://changed` event (P2-D11).
+ *
+ * Carries a document id only, by design: the event says something changed, and listeners
+ * re-read the DB for the actual state. Treating it as a source of truth would let a
+ * dropped or coalesced event desynchronise a pane.
+ */
+export interface AnnotationChanged {
+  documentId: string;
+}
+
+/** Event name emitted, debounced 200ms, after a document's annotations change (P2-D11). */
+export const ANNOTATION_CHANGED_EVENT = "annotation://changed";

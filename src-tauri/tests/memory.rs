@@ -57,7 +57,7 @@ fn reading_a_large_document_keeps_the_render_cache_within_its_budget() {
     // is asserted about memory: a cache that never stored anything would trivially "stay
     // in budget".
     let first = service
-        .render("doc", &path, Some(&content_hash), 0, SCALE)
+        .render("doc", &path, Some(&content_hash), 0, SCALE, true)
         .expect("first page should render");
     assert!(
         first.width > 0 && first.height > 0,
@@ -71,7 +71,7 @@ fn reading_a_large_document_keeps_the_render_cache_within_its_budget() {
 
     for page in 0..PAGES {
         let rendered = service
-            .render("doc", &path, Some(&content_hash), page, SCALE)
+            .render("doc", &path, Some(&content_hash), page, SCALE, true)
             .unwrap_or_else(|e| panic!("page {page} failed to render: {e}"));
         assert!(!rendered.bytes.is_empty(), "page {page} produced no bytes");
 
@@ -134,7 +134,7 @@ fn resident_memory_does_not_grow_with_the_number_of_pages_read() {
     let service = Arc::new(RenderService::with_cache_budget(CACHE_BUDGET));
 
     service
-        .render("doc", &path, Some(&content_hash), 0, SCALE)
+        .render("doc", &path, Some(&content_hash), 0, SCALE, true)
         .unwrap();
 
     // Warm up, then measure the baseline only *after* the allocator has settled: the
@@ -142,14 +142,14 @@ fn resident_memory_does_not_grow_with_the_number_of_pages_read() {
     // that as growth would make the test meaningless.
     for page in 0..(RSS_PAGES / 5) {
         service
-            .render("doc", &path, Some(&content_hash), page, SCALE)
+            .render("doc", &path, Some(&content_hash), page, SCALE, true)
             .unwrap();
     }
     let baseline = support::resident_bytes().unwrap();
 
     for page in (RSS_PAGES / 5)..RSS_PAGES {
         service
-            .render("doc", &path, Some(&content_hash), page, SCALE)
+            .render("doc", &path, Some(&content_hash), page, SCALE, true)
             .unwrap();
     }
     let after = support::resident_bytes().unwrap();

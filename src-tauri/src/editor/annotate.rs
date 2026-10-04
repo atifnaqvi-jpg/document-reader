@@ -697,4 +697,78 @@ mod tests {
         assert_eq!(rect_of(first), 10.0);
         assert_eq!(rect_of(second), 20.0);
     }
+
+    #[test]
+    fn a_saved_document_reopens_in_pdfium_with_the_annotation_on_the_right_page() {
+        use crate::provider::PdfProvider;
+
+        if !PdfProvider::pdfium_available() {
+            eprintln!("skipping: PDFium not available on this machine");
+            return;
+        }
+
+        // P2 §7 item 4: annotate -> save -> re-open -> annotations present. Every test
+        // above reads the result back with *lopdf*, which is the same library that wrote
+        // it — so they cannot tell a correct annotation from one lopdf accepts and
+        // PDFium rejects. PDFium is what renders the file for the user, so it is the only
+        // reader that can confirm the round trip (and F1: PDFium reads annotations even
+        // though it cannot create them, so `len()` is a real check).
+        let rows = vec![
+            annotation(
+                0,
+                AnnotationKind::Highlight,
+                r##"{"v":1,"rects":[[20.0,600.0,70.0,620.0]]}"##,
+                None,
+            ),
+            annotation(
+                1,
+                AnnotationKind::Note,
+                r##"{"v":1,"point":[100.0,200.0],"text":"a note"}"##,
+                Some("a note"),
+            ),
+        ];
+
+        let bytes = apply_annotations(&two_page_pdf(2), &rows).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("docreader-edited-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("edited-round-trip.pdf");
+        crate::editor::save::write_atomically(&path, &bytes).unwrap();
+
+        assert_eq!(
+            PdfProvider::page_count(&path).unwrap(),
+            2,
+            "page tree survived"
+        );
+
+        let counts: Vec<usize> = PdfProvider::annotation_counts(&path, 2).unwrap();
+        assert_eq!(
+            counts,
+            vec![1, 1],
+            "each annotation must be present on its own page when PDFium reads the file"
+        );
+
+        // Rendered, not merely present: a raster that fails or comes back degenerate would
+        // leave the user staring at a blank page even with a valid /Annots array.
+        for page in 0..2 {
+            let raster = PdfProvider::render_page_at(&path, page, 1.0).unwrap();
+            assert_eq!(&raster.bytes[..8], b"\x89PNG\r\n\x1a\n");
+            assert!(raster.width > 0 && raster.height > 0);
+        }
+
+        // D9: the "original" view must produce *different pixels* from the annotated one,
+        // for a page that actually carries a mark. Asserting only that both render would
+        // pass even if the flag were ignored, so the bytes are compared directly.
+        let handles = crate::provider::DocumentHandles::new();
+        let annotated = PdfProvider::render_cached(&handles, &path, None, 0, 2.0, true).unwrap();
+        let original = PdfProvider::render_cached(&handles, &path, None, 0, 2.0, false).unwrap();
+
+        assert!(
+            annotated.bytes != original.bytes,
+            "suppressing the annotation layer changed nothing on a page with a highlight, \
+             so the render flag is not reaching PDFium"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

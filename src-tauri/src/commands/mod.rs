@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::db::{annotations, app_state, bookmarks, documents, search, Db};
 use crate::index::{IndexService, IndexStatus, IndexSummary};
@@ -179,7 +179,11 @@ pub async fn get_document_page_render(
     doc_id: String,
     page: u32,
     scale: f32,
+    annotations: Option<bool>,
 ) -> Result<Arc<RenderedPage>, AppError> {
+    // P2-D9: default is the annotated view; the "original" view passes `false`.
+    let annotations = annotations.unwrap_or(true);
+
     // Resolve what the worker needs while we still have the `State` borrow. Doing this
     // up front means the closure only owns plain data (`State` is not `'static`), and
     // the `Db` mutex is never held across the render itself.
@@ -203,6 +207,7 @@ pub async fn get_document_page_render(
             render_hash.as_deref(),
             page,
             scale,
+            annotations,
         )
     })
     .await
@@ -219,6 +224,7 @@ pub async fn get_document_page_render(
             content_hash.as_deref(),
             page,
             scale,
+            annotations,
         );
     });
 
@@ -319,6 +325,7 @@ pub async fn get_document_page_text(
 /// Creates an annotation and, in the same call, its FTS index row (P2-D5).
 #[tauri::command]
 pub fn add_annotation(
+    app: AppHandle,
     db: State<'_, Db>,
     document_id: String,
     page: u32,
@@ -328,19 +335,33 @@ pub fn add_annotation(
 ) -> Result<Annotation, AppError> {
     let kind = AnnotationKind::parse(&kind)
         .ok_or_else(|| AppError::Other(format!("unknown annotation kind: {kind}")))?;
-    db.with_mut(|connection| {
+    let annotation = db.with_mut(|connection| {
         annotations::add(connection, &document_id, page, kind, data, text, now())
-    })
+    })?;
+
+    announce_change(app, document_id);
+    Ok(annotation)
 }
 
 #[tauri::command]
 pub fn update_annotation(
+    app: AppHandle,
     db: State<'_, Db>,
     annotation_id: String,
     data: String,
     text: Option<String>,
 ) -> Result<Annotation, AppError> {
-    db.with_mut(|connection| annotations::update(connection, &annotation_id, data, text, now()))
+    // Resolve the owning document before mutating: the event needs it, and asking the DB
+    // (rather than trusting a frontend-supplied id) is what keeps the payload honest.
+    let document_id =
+        db.with(|connection| annotations::document_id_for(connection, &annotation_id))?;
+
+    let annotation = db.with_mut(|connection| {
+        annotations::update(connection, &annotation_id, data, text, now())
+    })?;
+
+    announce_change(app, document_id);
+    Ok(annotation)
 }
 
 #[tauri::command]
@@ -362,8 +383,19 @@ pub fn list_page_annotations(
 }
 
 #[tauri::command]
-pub fn remove_annotation(db: State<'_, Db>, annotation_id: String) -> Result<(), AppError> {
-    db.with_mut(|connection| annotations::remove(connection, &annotation_id))
+pub fn remove_annotation(
+    app: AppHandle,
+    db: State<'_, Db>,
+    annotation_id: String,
+) -> Result<(), AppError> {
+    // Same reason as `update_annotation`: the id is gone once the row is deleted.
+    let document_id =
+        db.with(|connection| annotations::document_id_for(connection, &annotation_id))?;
+
+    db.with_mut(|connection| annotations::remove(connection, &annotation_id))?;
+
+    announce_change(app, document_id);
+    Ok(())
 }
 
 /// Resolves a document id to its path on disk.
@@ -431,6 +463,25 @@ pub fn save_edits(db: State<'_, Db>, document_id: String) -> Result<String, AppE
 /// Takes the whole row rather than rebuilding it from the current DB state: the row is
 /// gone, so the caller's captured copy is the only record of its id and timestamps.
 #[tauri::command]
-pub fn restore_annotation(db: State<'_, Db>, annotation: Annotation) -> Result<(), AppError> {
-    db.with_mut(|connection| annotations::restore(connection, &annotation))
+pub fn restore_annotation(
+    app: AppHandle,
+    db: State<'_, Db>,
+    annotation: Annotation,
+) -> Result<(), AppError> {
+    let document_id = annotation.document_id.clone();
+    db.with_mut(|connection| annotations::restore(connection, &annotation))?;
+
+    announce_change(app, document_id);
+    Ok(())
+}
+
+/// Fires the debounced annotation-change event (P2-D11) off the command's critical path.
+///
+/// Detached on purpose: the debounce sleeps for 200ms, and making a user wait that long
+/// after every annotation would be a visible stall. The write has already committed, so
+/// nothing depends on the emission completing.
+fn announce_change(app: AppHandle, document_id: String) {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::editor::events::emit_after_debounce(app, document_id);
+    });
 }

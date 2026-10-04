@@ -32,6 +32,10 @@ function Workspace() {
   const { isFullscreen, chromeHidden, error: fullscreenError, toggleFullscreen, toggleChrome } =
     useReadingMode();
 
+  // P2-D9: annotated view is the default. Owned here because the View menu and the
+  // viewer both need it, and only one of them may be the source of truth.
+  const [annotationsVisible, setAnnotationsVisible] = useState(true);
+
   // The menu drives page/zoom through the viewer's own handle rather than by lifting
   // viewer state into App (P1.9 D6).
   const viewerRef = useRef<ViewerHandle | null>(null);
@@ -111,6 +115,8 @@ function Workspace() {
         chromeHidden={chromeHidden}
         onToggleFullscreen={toggleFullscreen}
         onToggleChrome={toggleChrome}
+        annotationsVisible={annotationsVisible}
+        onToggleAnnotations={() => setAnnotationsVisible((visible) => !visible)}
         onNavigate={handleNavigate}
         onOpenBookmark={handleOpenBookmark}
         getCurrentPage={getCurrentPage}
@@ -138,6 +144,7 @@ function Workspace() {
               ref={viewerRef}
               entry={selected}
               jump={jump}
+              annotationsVisible={annotationsVisible}
               onPageChange={setVisiblePage}
             />
           </EditorProvider>

@@ -20,8 +20,14 @@ interface Props {
   onOpen: () => void;
   isFullscreen: boolean;
   chromeHidden: boolean;
+  /**
+   * P2-D9: false while the viewer is showing the untouched original. Disabled without a
+   * document because "original" means nothing with nothing open.
+   */
+  annotationsVisible: boolean;
   onToggleFullscreen: () => void;
   onToggleChrome: () => void;
+  onToggleAnnotations: () => void;
   /** Move the viewer; resolved against the viewer handle by the caller. */
   onNavigate: (where: NavigationTarget) => void;
   onOpenBookmark: (page: number) => void;
@@ -37,8 +43,10 @@ export function Menu({
   onOpen,
   isFullscreen,
   chromeHidden,
+  annotationsVisible,
   onToggleFullscreen,
   onToggleChrome,
+  onToggleAnnotations,
   onNavigate,
   onOpenBookmark,
   getCurrentPage,
@@ -167,6 +175,18 @@ export function Menu({
             }}
           >
             {chromeHidden ? "Show side panels" : "Hide side panels"}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!entry}
+            aria-pressed={annotationsVisible}
+            onClick={() => {
+              setOpen(false);
+              onToggleAnnotations();
+            }}
+          >
+            {annotationsVisible ? "View original" : "View annotated"}
           </button>
 
           <p className="menu-group">Go</p>

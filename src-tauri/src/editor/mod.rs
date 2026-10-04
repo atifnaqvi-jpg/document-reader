@@ -2,6 +2,7 @@
 //! in the Tauri command layer.
 
 pub mod annotate;
+pub mod events;
 pub mod geometry;
 pub mod lopdf_write;
 pub mod pages;

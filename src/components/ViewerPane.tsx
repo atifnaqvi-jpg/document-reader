@@ -40,9 +40,14 @@ export interface ViewerHandle {
 export const ViewerPane = forwardRef<ViewerHandle, {
   entry: LibraryEntry | null;
   jump?: JumpRequest | null;
+  /**
+   * P2-D9: whether the annotation layer is composited into the raster. Owned by the
+   * caller because the View menu drives it and the two must not disagree.
+   */
+  annotationsVisible?: boolean;
   /** Reports the visible page up so the editor can scope its annotation list. */
   onPageChange?: (page: number) => void;
-}>(function ViewerPane({ entry, jump, onPageChange }, ref) {
+}>(function ViewerPane({ entry, jump, onPageChange, annotationsVisible = true }, ref) {
 
   const [page, setPage] = useState(0);
   const [pageCount, setPageCount] = useState<number | null>(null);
@@ -113,7 +118,7 @@ export const ViewerPane = forwardRef<ViewerHandle, {
     setRendering(true);
     setError(null);
 
-    getDocumentPageRender(docId, page, zoom)
+    getDocumentPageRender(docId, page, zoom, annotationsVisible)
       .then((result) => {
         if (request !== requestRef.current) return;
         setRendered(result);
@@ -125,7 +130,7 @@ export const ViewerPane = forwardRef<ViewerHandle, {
       .finally(() => {
         if (request === requestRef.current) setRendering(false);
       });
-  }, [docId, page, zoom]);
+  }, [docId, page, zoom, annotationsVisible]);
 
   const step = useCallback(
     (delta: number) => {
@@ -289,7 +294,15 @@ export const ViewerPane = forwardRef<ViewerHandle, {
               height={rendered.height}
               alt={`Page ${page + 1}`}
             />
-            <AnnotationOverlay metrics={pageMetrics(rendered, page, zoom)} annotations={annotations} />
+            {/* The overlay is hidden in the original view too: the raster no longer
+                contains the marks, so leaving the DOM marks would show annotations the
+                user just asked to hide. */}
+            {annotationsVisible ? (
+              <AnnotationOverlay
+                metrics={pageMetrics(rendered, page, zoom)}
+                annotations={annotations}
+              />
+            ) : null}
           </div>
         ) : null}
 

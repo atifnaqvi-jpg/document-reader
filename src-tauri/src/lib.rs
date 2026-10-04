@@ -34,6 +34,8 @@ pub fn run() {
             // single answer. Kept separate from `RenderService` because indexing outlives
             // a single render and must be cancellable per document (P1-D6).
             app.manage(std::sync::Arc::new(index::IndexService::new()));
+            // Debounce tickets for the annotation-change event (P2-D11).
+            app.manage(editor::events::ChangeTickets::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

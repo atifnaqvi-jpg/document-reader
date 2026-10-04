@@ -9,8 +9,11 @@ interface Props {
   entry: LibraryEntry | null;
   isFullscreen: boolean;
   chromeHidden: boolean;
+  /** P2-D9: forwarded to the View menu. */
+  annotationsVisible: boolean;
   onToggleFullscreen: () => void;
   onToggleChrome: () => void;
+  onToggleAnnotations: () => void;
   onNavigate: (where: NavigationTarget) => void;
   onOpenBookmark: (page: number) => void;
   getCurrentPage: () => number;
@@ -22,8 +25,10 @@ export function Toolbar({
   entry,
   isFullscreen,
   chromeHidden,
+  annotationsVisible,
   onToggleFullscreen,
   onToggleChrome,
+  onToggleAnnotations,
   onNavigate,
   onOpenBookmark,
   getCurrentPage,
@@ -40,8 +45,10 @@ export function Toolbar({
           onOpen={onOpen}
           isFullscreen={isFullscreen}
           chromeHidden={chromeHidden}
+          annotationsVisible={annotationsVisible}
           onToggleFullscreen={onToggleFullscreen}
           onToggleChrome={onToggleChrome}
+          onToggleAnnotations={onToggleAnnotations}
           onNavigate={onNavigate}
           onOpenBookmark={onOpenBookmark}
           getCurrentPage={getCurrentPage}

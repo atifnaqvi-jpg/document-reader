@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   Annotation,
+  AnnotationChanged,
   AnnotationKind,
   AppError,
   Bookmark,
@@ -12,6 +14,7 @@ import type {
   RenderedPage,
   SearchHit,
 } from "./types";
+import { ANNOTATION_CHANGED_EVENT } from "./types";
 
 export function isAppError(value: unknown): value is AppError {
   return (
@@ -76,8 +79,18 @@ export const indexDocument = (documentId: string) =>
  * blocking worker, so callers should treat concurrent calls as normal and rely on the
  * document handle cache + render cache rather than de-duplicating here.
  */
-export const getDocumentPageRender = (docId: string, page: number, scale: number) =>
-  invoke<RenderedPage>("get_document_page_render", { docId, page, scale });
+export const getDocumentPageRender = (
+  docId: string,
+  page: number,
+  scale: number,
+  /**
+   * P2-D9: `true` composites the annotation layer into the raster (the default view),
+   * `false` renders the untouched original. This is a render-time switch, not a DOM
+   * hide, so the pixels and the overlay must agree on which view is showing.
+   */
+  annotations = true,
+) =>
+  invoke<RenderedPage>("get_document_page_render", { docId, page, scale, annotations });
 
 /** Extracts one page's text layer (feeds indexing/search in P1.6/P1.7). */
 export const getDocumentPageText = (docId: string, page: number) =>
@@ -121,6 +134,15 @@ export const setWindowFullscreen = (value: boolean) =>
  */
 export const onWindowResized = (handler: () => void) =>
   getCurrentWindow().onResized(() => handler());
+
+/**
+ * Subscribes to debounced annotation changes (P2-D11). Resolves to an unlisten function.
+ *
+ * The handler receives the document id from the event; listeners must re-read the DB for
+ * state rather than inferring it from the payload.
+ */
+export const onAnnotationChanged = (handler: (change: AnnotationChanged) => void) =>
+  listen<AnnotationChanged>(ANNOTATION_CHANGED_EVENT, (event) => handler(event.payload));
 
 // --- P2: editing ---------------------------------------------------------------
 
