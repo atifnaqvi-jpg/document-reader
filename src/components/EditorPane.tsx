@@ -1,5 +1,16 @@
 import { useState } from "react";
-import { nextSavePath, saveEdits, toAppError } from "../api/invoke";
+import {
+  addWatermark,
+  deletePages,
+  exportFlattened,
+  extractPages,
+  nextSavePath,
+  overwriteEdits,
+  rotatePage,
+  saveEdits,
+  splitDocument,
+  toAppError,
+} from "../api/invoke";
 import type { AnnotationKind, AppError, LibraryEntry } from "../api/types";
 import { useEditor } from "../state/EditorProvider";
 
@@ -41,6 +52,14 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
   const [saving, setSaving] = useState(false);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  // D2: overwriting the original is its own confirmed flow, never the default and never
+  // reachable from "Save edits". The prompt names the file so the user confirms a specific
+  // document rather than an abstract "overwrite?".
+  const [pendingOverwrite, setPendingOverwrite] = useState(false);
+  // P2-F3/F5: page tools and export are "write a new file" operations, so they report
+  // their result through the same savedPath channel as a save and share its busy flag.
+  const [pageOneBased, setPageOneBased] = useState(1);
+  const [watermark, setWatermark] = useState("");
 
   if (!entry) return null;
 
@@ -58,6 +77,39 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
       setPendingPath(await nextSavePath(entry.id));
     } catch (e) {
       setSaveError(toAppError(e));
+    }
+  };
+
+  /**
+   * Runs a page/export operation, which always produces a new file rather than touching
+   * the original. `label` names the operation for the error message, so a failure
+   * identifies which tool the user was using.
+   */
+  const runDerived = async (label: string, operation: () => Promise<string | string[]>) => {
+    setSaving(true);
+    setSaveError(null);
+    setSavedPath(null);
+    try {
+      const result = await operation();
+      setSavedPath(Array.isArray(result) ? result.join("\n") : result);
+    } catch (e) {
+      setSaveError(toAppError(e));
+    } finally {
+      setSaving(false);
+    }
+    void label;
+  };
+
+  const confirmOverwrite = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      setSavedPath(await overwriteEdits(entry.id));
+      setPendingOverwrite(false);
+    } catch (e) {
+      setSaveError(toAppError(e));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -122,6 +174,85 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
         </div>
       ) : null}
 
+      <fieldset className="editor-pages">
+        <legend>Pages and export</legend>
+        <label>
+          Page
+          <input
+            type="number"
+            min={1}
+            value={pageOneBased}
+            onChange={(event) => setPageOneBased(Number(event.target.value))}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() =>
+            runDerived("rotate", async () => {
+              const result = await rotatePage(entry.id, pageOneBased, 90);
+              return `${result.path} (page now ${result.rotation}°)`;
+            })
+          }
+        >
+          Rotate 90°
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => runDerived("delete", () => deletePages(entry.id, [pageOneBased]))}
+        >
+          Delete page
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => runDerived("extract", () => extractPages(entry.id, [pageOneBased]))}
+        >
+          Extract page
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => runDerived("split", () => splitDocument(entry.id, pageOneBased))}
+        >
+          Split here
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => runDerived("flatten", () => exportFlattened(entry.id))}
+        >
+          Export flattened
+        </button>
+        <label>
+          Watermark
+          <input
+            type="text"
+            value={watermark}
+            placeholder="DRAFT"
+            onChange={(event) => setWatermark(event.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={saving || watermark.trim() === ""}
+          onClick={() =>
+            runDerived("flatten+watermark", () => exportFlattened(entry.id, watermark))
+          }
+        >
+          Export with watermark
+        </button>
+        <button
+          type="button"
+          disabled={saving || watermark.trim() === ""}
+          onClick={() => runDerived("watermark", () => addWatermark(entry.id, watermark))}
+        >
+          Watermark a copy
+        </button>
+        <p className="muted">These write a new file. The original is never changed.</p>
+      </fieldset>
+
       <div className="editor-actions">
         <button type="button" onClick={undo} disabled={!canUndo}>
           Undo
@@ -131,6 +262,17 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
         </button>
         <button type="button" onClick={beginSave} disabled={saving}>
           Save edits…
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setSaveError(null);
+            setSavedPath(null);
+            setPendingOverwrite(true);
+          }}
+          disabled={saving}
+        >
+          Overwrite original…
         </button>
       </div>
 
@@ -145,6 +287,29 @@ export function EditorPane({ entry }: { entry: LibraryEntry | null }) {
               {saving ? "Saving…" : "Save"}
             </button>
             <button type="button" onClick={() => setPendingPath(null)} disabled={saving}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {pendingOverwrite ? (
+        <div className="editor-confirm danger" role="dialog" aria-label="Confirm overwrite">
+          <p>
+            Overwrite <span className="path">{entry.path}</span> with your annotations?
+          </p>
+          <p className="muted">
+            This replaces the original file. It cannot be undone from here.
+          </p>
+          <div>
+            <button type="button" onClick={confirmOverwrite} disabled={saving}>
+              {saving ? "Overwriting…" : "Overwrite"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPendingOverwrite(false)}
+              disabled={saving}
+            >
               Cancel
             </button>
           </div>

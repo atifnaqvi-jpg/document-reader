@@ -187,8 +187,69 @@ export const saveEdits = (documentId: string) =>
   invoke<string>("save_edits", { documentId });
 
 /**
+ * Overwrites the original file in place with the document's annotations (P2-D2).
+ *
+ * A separate binding from `saveEdits` on purpose: the backend exposes it as a differently
+ * named command so no path meaning "save" can reach it. Callers must confirm with the user
+ * first, since this is the only action that can destroy the source document.
+ */
+export const overwriteEdits = (documentId: string) =>
+  invoke<string>("overwrite_edits", { documentId });
+
+/**
  * Re-inserts a deleted annotation under its original id (P2-D7). Undo needs the whole
  * row back — a fresh id would break anything already holding the old one.
  */
 export const restoreAnnotation = (annotation: Annotation) =>
   invoke<void>("restore_annotation", { annotation });
+
+// --- P2: page structure, export, watermark ------------------------------------
+
+/**
+ * Rotates a page clockwise and returns its resulting rotation (P2-F3).
+ *
+ * Returns the new value rather than echoing `degrees` because `/Rotate` accumulates: two
+ * 90-degree turns on one page give 180.
+ */
+export const rotatePage = (documentId: string, page: number, degrees: number) =>
+  invoke<RotateResult>("rotate_page", { documentId, page, degrees });
+
+export interface RotateResult {
+  /** Where the rotated copy was written; never the original. */
+  path: string;
+  /** The page's resulting angle, which accumulates across rotations. */
+  rotation: number;
+}
+
+/** Deletes pages, numbered from 1 as the UI shows them (P2-F3). */
+export const deletePages = (documentId: string, pages: number[]) =>
+  invoke<string>("delete_pages", { documentId, pages });
+
+/** Moves a page to a new 1-based position (P2-F3 reorder). */
+export const movePage = (documentId: string, from: number, to: number) =>
+  invoke<string>("move_page", { documentId, from, to });
+
+/** Writes just the selected pages to a new file (P2-F3 extract). */
+export const extractPages = (documentId: string, pages: number[]) =>
+  invoke<string>("extract_pages", { documentId, pages });
+
+/** Splits the document in two at a 1-based page number, returning both paths (P2-F3). */
+export const splitDocument = (documentId: string, at: number) =>
+  invoke<string[]>("split_document", { documentId, at });
+
+/**
+ * Flattens annotations into a new file, optionally watermarking it (P2-F2/F5).
+ *
+ * One-way: the result has the marks baked in and no annotation objects, which is the point
+ * — it renders correctly in viewers that ignore annotations.
+ */
+export const exportFlattened = (documentId: string, watermark?: string) =>
+  invoke<string>("export_flattened", { documentId, watermark: watermark ?? null });
+
+/** Stamps a watermark across every page, into a new file (P2-F5). */
+export const addWatermark = (documentId: string, text: string) =>
+  invoke<string>("add_watermark", { documentId, text });
+
+/** Renders one page to a base64 PNG for the clipboard (P2-F2). */
+export const exportPagePng = (documentId: string, page: number, scale = 1) =>
+  invoke<string>("export_page_png", { documentId, page, scale });

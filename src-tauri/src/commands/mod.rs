@@ -388,14 +388,77 @@ pub fn remove_annotation(
     db: State<'_, Db>,
     annotation_id: String,
 ) -> Result<(), AppError> {
-    // Same reason as `update_annotation`: the id is gone once the row is deleted.
-    let document_id =
-        db.with(|connection| annotations::document_id_for(connection, &annotation_id))?;
-
-    db.with_mut(|connection| annotations::remove(connection, &annotation_id))?;
-
+    let document_id = remove_annotation_and_gc(&db, &annotation_id)?;
     announce_change(app, document_id);
     Ok(())
+}
+
+/// Deletes an annotation and applies the P2-D12 edit-copy GC, returning the owning
+/// document id.
+///
+/// Split out of the command because the caller needs the id for the change event and it no
+/// longer exists once the row is gone -- and because this path deletes a user-visible file,
+/// so it has to be testable without a Tauri app.
+pub fn remove_annotation_and_gc(db: &Db, annotation_id: &str) -> Result<String, AppError> {
+    let document_id =
+        db.with(|connection| annotations::document_id_for(connection, annotation_id))?;
+
+    db.with_mut(|connection| annotations::remove(connection, annotation_id))?;
+
+    // P2-D12: the edit copy's reason to exist has just gone away.
+    collect_edit_copies_if_unannotated(db, &document_id);
+    Ok(document_id)
+}
+
+/// Resolves a document to its path and runs the P2-D12 edit-copy GC if it now has no
+/// annotations left.
+///
+/// Consulted after the delete commits, because "the last annotation is gone" describes the
+/// new state, not the old. Best-effort: failing to tidy a stale copy must never turn a
+/// successful delete into an error the user sees.
+pub fn collect_edit_copies_if_unannotated(db: &Db, document_id: &str) {
+    let Ok(remaining) =
+        db.with(|connection| annotations::count_for_document(connection, document_id))
+    else {
+        return;
+    };
+    if remaining > 0 {
+        return;
+    }
+    let Ok(Some(entry)) = db.with(|connection| documents::get(connection, document_id)) else {
+        return;
+    };
+    let _ = crate::editor::gc::collect_edit_copies(Path::new(&entry.path));
+}
+
+/// Overwrites the original file with the document's annotations, in place (P2-D2).
+///
+/// Deliberately a *separate* command from `save_edits`, and separately named, so it cannot
+/// be reached by anything that means "save": the ordinary save path must never be able to
+/// destroy the user's source document. The frontend confirms with the user first.
+///
+/// Returns the path written, which is always the original.
+#[tauri::command]
+pub fn overwrite_edits(db: State<'_, Db>, document_id: String) -> Result<String, AppError> {
+    let (original_path, rows) = db.with(|connection| {
+        let path = documents::get(connection, &document_id)?
+            .map(|entry| entry.path)
+            .ok_or_else(|| AppError::Other(format!("document not found: {document_id}")))?;
+        Ok((
+            path,
+            annotations::list_for_document(connection, &document_id)?,
+        ))
+    })?;
+
+    let source = std::fs::read(&original_path)
+        .map_err(|error| AppError::Other(format!("could not read {original_path}: {error}")))?;
+    let edited = crate::editor::annotate::apply_annotations(&source, &rows)?;
+
+    // Through the same atomic temp-file-and-rename path as a save: a half-written original
+    // is the one outcome worse than not overwriting at all.
+    crate::editor::save::write_atomically(Path::new(&original_path), &edited)?;
+
+    Ok(original_path)
 }
 
 /// Resolves a document id to its path on disk.
@@ -484,4 +547,236 @@ fn announce_change(app: AppHandle, document_id: String) {
     tauri::async_runtime::spawn_blocking(move || {
         crate::editor::events::emit_after_debounce(app, document_id);
     });
+}
+
+// --- P2: page structure, export, watermark ------------------------------------
+//
+// Every command here follows one shape: load the original with lopdf, transform a copy,
+// and write the result to a *new* file. None of them replace the original, for the same
+// reason `save_edits` does not -- the source document belongs to the user, and the only
+// command permitted to replace it is the separately-confirmed `overwrite_edits`.
+
+/// Rotates one page clockwise by a multiple of 90 degrees (P2-F5).
+///
+/// Returns the resulting rotation rather than echoing the request: `/Rotate` accumulates,
+/// so a second 90-degree turn gives 180, and the UI should show that.
+#[tauri::command]
+pub fn rotate_page(
+    db: State<'_, Db>,
+    document_id: String,
+    page: u32,
+    degrees: i64,
+) -> Result<RotateResult, AppError> {
+    let mut document = load_document(&db, &document_id)?;
+    let page_id = page_object_id(&document, page)?;
+
+    let rotation = crate::editor::pages::rotate_page(&mut document, page_id, degrees)?;
+    let path = write_derived(&db, &document_id, "rotated", &serialize(&document)?)?;
+    Ok(RotateResult { path, rotation })
+}
+
+/// A rotation's outcome: where it was written, and the page's resulting angle.
+///
+/// Both are needed. `/Rotate` accumulates, so the angle is not the one the caller asked
+/// for, and the file it landed in is not the original.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotateResult {
+    pub path: String,
+    pub rotation: i64,
+}
+
+/// Deletes pages, numbered as the UI shows them (1-based).
+#[tauri::command]
+pub fn delete_pages(
+    db: State<'_, Db>,
+    document_id: String,
+    pages: Vec<u32>,
+) -> Result<String, AppError> {
+    let mut document = load_document(&db, &document_id)?;
+
+    crate::editor::pages::delete_pages(&mut document, &pages)?;
+    write_derived(&db, &document_id, "pages removed", &serialize(&document)?)
+}
+
+/// Moves a page to a new 1-based position (P2-F3 reorder).
+#[tauri::command]
+pub fn move_page(
+    db: State<'_, Db>,
+    document_id: String,
+    from: u32,
+    to: u32,
+) -> Result<String, AppError> {
+    let mut document = load_document(&db, &document_id)?;
+
+    crate::editor::pages::move_page(&mut document, from, to)?;
+    write_derived(&db, &document_id, "reordered", &serialize(&document)?)
+}
+
+/// Writes just the selected pages to a new file (P2-F3 extract).
+#[tauri::command]
+pub fn extract_pages(
+    db: State<'_, Db>,
+    document_id: String,
+    pages: Vec<u32>,
+) -> Result<String, AppError> {
+    let document = load_document(&db, &document_id)?;
+
+    let extracted = crate::editor::pages::extract_pages(&document, &pages)?;
+    write_derived(&db, &document_id, "extracted", &serialize(&extracted)?)
+}
+
+/// Splits the document in two at `at` (1-based) and returns both written paths.
+#[tauri::command]
+pub fn split_document(
+    db: State<'_, Db>,
+    document_id: String,
+    at: u32,
+) -> Result<Vec<String>, AppError> {
+    let document = load_document(&db, &document_id)?;
+
+    let (first, second) = crate::editor::pages::split_at(&document, at)?;
+    let first_path = write_derived(&db, &document_id, "part 1", &serialize(&first)?)?;
+    let second_path = write_derived(&db, &document_id, "part 2", &serialize(&second)?)?;
+
+    Ok(vec![first_path, second_path])
+}
+
+/// Flattens annotations into a new file, optionally watermarking it (P2-F2/F5).
+///
+/// One-way by design: the annotation objects do not survive, which is what makes the result
+/// look right in viewers that ignore annotations. That is also why it is an export rather
+/// than a save.
+#[tauri::command]
+pub fn export_flattened(
+    db: State<'_, Db>,
+    document_id: String,
+    watermark: Option<String>,
+) -> Result<String, AppError> {
+    let source = load_original(&db, &document_id)?;
+    // The rows are the source of truth for what to bake: the writer stores geometry and
+    // colour but emits no appearance stream, so flattening has to redraw from here.
+    let rows = db.with(|connection| annotations::list_for_document(connection, &document_id))?;
+    let (bytes, _flattened) =
+        crate::editor::export::export_with_flatten(&source, &rows, watermark.as_deref())?;
+
+    write_derived(&db, &document_id, "flattened", &bytes)
+}
+
+/// Stamps a watermark across every page, into a new file (P2-F5).
+#[tauri::command]
+pub fn add_watermark(
+    db: State<'_, Db>,
+    document_id: String,
+    text: String,
+) -> Result<String, AppError> {
+    let mut document = load_document(&db, &document_id)?;
+
+    crate::editor::export::watermark(&mut document, &text)?;
+    write_derived(&db, &document_id, "watermarked", &serialize(&document)?)
+}
+
+/// Renders one page to a PNG, base64-encoded, for the clipboard (P2-F2).
+#[tauri::command]
+pub async fn export_page_png(
+    db: State<'_, Db>,
+    document_id: String,
+    page: u32,
+    scale: f32,
+) -> Result<String, AppError> {
+    let path = document_path(&db, &document_id)?;
+
+    // Off the async runtime: rasterizing blocks, and a large page would stall every other
+    // command sharing the thread.
+    let png = tauri::async_runtime::spawn_blocking(move || {
+        crate::editor::export::page_png(Path::new(&path), page, scale)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("render task failed: {error}")))??;
+
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png))
+}
+
+/// Reads the original document's bytes.
+fn load_original(db: &Db, document_id: &str) -> Result<Vec<u8>, AppError> {
+    let path = document_path(db, document_id)?;
+    std::fs::read(&path).map_err(|error| AppError::Other(format!("could not read {path}: {error}")))
+}
+
+/// Parses the original with lopdf, for the page-structure operations.
+fn load_document(db: &Db, document_id: &str) -> Result<lopdf::Document, AppError> {
+    let source = load_original(db, document_id)?;
+    lopdf::Document::load_mem(&source)
+        .map_err(|error| AppError::Other(format!("could not read PDF: {error}")))
+}
+
+/// Resolves a 1-based page number to its object id, as the UI counts pages.
+fn page_object_id(document: &lopdf::Document, page: u32) -> Result<lopdf::ObjectId, AppError> {
+    if page == 0 {
+        return Err(AppError::Other("pages are numbered from 1".to_string()));
+    }
+    document.get_pages().get(&page).copied().ok_or_else(|| {
+        AppError::Other(format!(
+            "page {page} is out of range (document has {} pages)",
+            document.get_pages().len()
+        ))
+    })
+}
+
+/// Serialises a transformed document, renumbering and compressing so the output is compact
+/// and free of the gaps the page operations leave behind.
+fn serialize(document: &lopdf::Document) -> Result<Vec<u8>, AppError> {
+    let mut copy = document.clone();
+    copy.renumber_objects();
+    copy.compress();
+
+    let mut bytes = Vec::new();
+    copy.save_to(&mut bytes)
+        .map_err(|error| AppError::Other(format!("could not write PDF: {error}")))?;
+    Ok(bytes)
+}
+
+/// Writes transformed bytes beside the original and returns the path written.
+fn write_derived(
+    db: &Db,
+    document_id: &str,
+    label: &str,
+    bytes: &[u8],
+) -> Result<String, AppError> {
+    let original_path = document_path(db, document_id)?;
+    let target = next_derived_path(Path::new(&original_path), label)?;
+    crate::editor::save::write_atomically(&target, bytes)?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// The next free `"{stem} ({label} {n}).{ext}"` path beside the original.
+///
+/// Shares `next_edited_path`'s never-clobber rule but deliberately not its `(edited N)`
+/// naming: a rotated or split file is not an *edit* of the original in the annotation sense,
+/// and borrowing that name would mislead both the user and the D12 GC, which treats
+/// `(edited N)` files as the ones it owns and may delete.
+pub fn next_derived_path(original: &Path, label: &str) -> Result<std::path::PathBuf, AppError> {
+    let parent = original
+        .parent()
+        .ok_or_else(|| AppError::Other("document has no parent directory".to_string()))?;
+    let stem = original
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| AppError::Other("document name is not valid utf-8".to_string()))?;
+    let extension = original
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("pdf");
+
+    for number in 1..=9_999_u32 {
+        let candidate = parent.join(format!("{stem} ({label} {number}).{extension}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(AppError::Other(
+        "reached the limit of derived copies for this document".to_string(),
+    ))
 }

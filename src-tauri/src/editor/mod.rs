@@ -3,6 +3,8 @@
 
 pub mod annotate;
 pub mod events;
+pub mod export;
+pub mod gc;
 pub mod geometry;
 pub mod lopdf_write;
 pub mod pages;

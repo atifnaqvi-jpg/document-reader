@@ -60,6 +60,15 @@ pub fn run() {
             commands::next_save_path,
             commands::restore_annotation,
             commands::save_edits,
+            commands::overwrite_edits,
+            commands::rotate_page,
+            commands::delete_pages,
+            commands::move_page,
+            commands::extract_pages,
+            commands::split_document,
+            commands::export_flattened,
+            commands::add_watermark,
+            commands::export_page_png,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

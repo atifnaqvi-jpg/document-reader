@@ -6,6 +6,10 @@
 //! from the same hand-rolled template as `tests/fixtures/sample.pdf`
 //! (see `scripts/make-fixture-pdf.py`, which this mirrors).
 
+// Compiled into every test binary that declares `mod support`, so most helpers are unused
+// in any given binary.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 /// Writes a text-layer PDF with `pages` pages to a unique path under the temp dir.

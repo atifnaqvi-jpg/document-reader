@@ -10,7 +10,7 @@
 //! Annotations the user made in *another* PDF application are left alone: they are
 //! not in our DB, and P2 has no business deleting someone else's work.
 
-use lopdf::Document;
+use lopdf::{Document, Object};
 
 use crate::editor::geometry::PdfRect;
 use crate::editor::lopdf_write;
@@ -23,6 +23,9 @@ const SUPPORTED_BLOB_VERSION: u32 = 1;
 /// A highlight with no stored opacity: matches the UI's default so a blob missing
 /// the field renders the same as one that has it.
 const DEFAULT_HIGHLIGHT_OPACITY: f32 = 0.4;
+
+/// The conventional sticky-note icon size, in points.
+pub const NOTE_ICON_POINTS: f32 = 20.0;
 
 #[derive(serde::Deserialize)]
 struct HighlightBlob {
@@ -67,9 +70,15 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
             // an unrelated page.
             continue;
         };
-        let Some(dictionary) = dictionary_for(annotation)? else {
+        let Some(mut dictionary) = dictionary_for(annotation)? else {
             continue;
         };
+        // `/NM` is the annotation's stable name in the file. Without it an annotation on
+        // disk is anonymous, which makes flattening unable to tell this app's marks from a
+        // document's own -- and the safe fallback there is to touch nothing, so flatten
+        // would silently export a blank file. It also gives the file itself an identity to
+        // match against the DB row.
+        dictionary.set("NM", Object::string_literal(annotation.id.clone()));
         lopdf_write::attach_annotation(&mut document, page_id, dictionary)?;
     }
 
@@ -78,6 +87,114 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
 
 /// Builds an annotation dictionary from a stored row, or `None` if the row's
 /// geometry is not writeable as a PDF annotation (e.g. a zero-area mark).
+/// What a stored annotation looks like when drawn: the geometry the file records, plus the
+/// fill the writer used.
+///
+/// Flattening needs this rather than reading `/AP` back off the written annotation, because
+/// `dictionary_for` deliberately writes no appearance stream -- it records the mark (rect,
+/// colour, opacity) and lets the viewer render it. Baking therefore has to redraw from the
+/// same data the viewer was given.
+pub struct Appearance {
+    pub kind: AnnotationKind,
+    pub rect: PdfRect,
+    pub color: (f32, f32, f32),
+    pub opacity: f32,
+}
+
+/// The drawable appearance of a stored annotation, or `None` if it draws nothing.
+///
+/// Shares `dictionary_for`'s parsing so a baked mark cannot drift from the annotation the
+/// user saw: both read the same blob through the same helpers.
+pub fn appearance_for(annotation: &Annotation) -> Result<Option<Appearance>, AppError> {
+    let blob: serde_json::Value = serde_json::from_str(&annotation.data).map_err(|error| {
+        AppError::Other(format!(
+            "annotation {} has malformed data: {error}",
+            annotation.id
+        ))
+    })?;
+
+    // A blob from a newer build cannot be interpreted safely, so it is skipped rather than
+    // baked in the wrong place.
+    let version = blob
+        .get("v")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if version > SUPPORTED_BLOB_VERSION as u64 {
+        return Ok(None);
+    }
+
+    match annotation.kind {
+        AnnotationKind::Highlight | AnnotationKind::Underline | AnnotationKind::Strikeout => {
+            let parsed: HighlightBlob = serde_json::from_value(blob).map_err(|error| {
+                AppError::Other(format!("annotation {}: {error}", annotation.id))
+            })?;
+            let Some(first) = parsed.rects.first() else {
+                return Ok(None);
+            };
+            // The union, matching what `dictionary_for` writes onto the page.
+            let rect = parsed
+                .rects
+                .iter()
+                .skip(1)
+                .fold(rect_from(first), |acc, next| union(acc, rect_from(next)));
+            Ok(Some(Appearance {
+                kind: annotation.kind,
+                rect: rect.normalised(),
+                color: parse_color(parsed.color.as_deref()),
+                opacity: parsed.opacity.unwrap_or(DEFAULT_HIGHLIGHT_OPACITY),
+            }))
+        }
+        AnnotationKind::Note => {
+            let point = blob
+                .get("point")
+                .and_then(|point| {
+                    let array = point.as_array()?;
+                    Some((
+                        array.first()?.as_f64()? as f32,
+                        array.get(1)?.as_f64()? as f32,
+                    ))
+                })
+                .or_else(|| {
+                    blob.get("rect").and_then(|rect| {
+                        let array = rect.as_array()?;
+                        Some((
+                            array.first()?.as_f64()? as f32,
+                            array.get(1)?.as_f64()? as f32,
+                        ))
+                    })
+                });
+            let Some((x, y)) = point else {
+                return Ok(None);
+            };
+            Ok(Some(Appearance {
+                kind: AnnotationKind::Note,
+                rect: PdfRect {
+                    x0: x,
+                    y0: y,
+                    x1: x + NOTE_ICON_POINTS,
+                    y1: y + NOTE_ICON_POINTS,
+                },
+                color: parse_color(blob.get("color").and_then(serde_json::Value::as_str)),
+                opacity: 1.0,
+            }))
+        }
+        AnnotationKind::Shape => {
+            let parsed: ShapeBlob = serde_json::from_value(blob).map_err(|error| {
+                AppError::Other(format!("annotation {}: {error}", annotation.id))
+            })?;
+            Ok(Some(Appearance {
+                kind: AnnotationKind::Shape,
+                rect: rect_from(&parsed.rect).normalised(),
+                color: parse_color(parsed.color.as_deref()),
+                opacity: 1.0,
+            }))
+        }
+        // Ink is flattened from its stroke paths by `export`, not from a bounding box: a
+        // filled rectangle over an ink annotation would be a different mark.
+        AnnotationKind::Ink => Ok(None),
+    }
+}
+
 fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, AppError> {
     let blob: serde_json::Value = serde_json::from_str(&annotation.data).map_err(|error| {
         AppError::Other(format!(
