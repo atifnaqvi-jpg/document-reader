@@ -7,12 +7,17 @@ import type {
   AnnotationKind,
   AppError,
   Bookmark,
+  ContentOperation,
+  DecryptOutcome,
   DocumentMeta,
   IndexStatus,
   IndexSummary,
   LibraryEntry,
+  PageTextRun,
   RenderedPage,
   SearchHit,
+  TextEditResult,
+  TextRunId,
 } from "./types";
 import { ANNOTATION_CHANGED_EVENT } from "./types";
 
@@ -253,3 +258,69 @@ export const addWatermark = (documentId: string, text: string) =>
 /** Renders one page to a base64 PNG for the clipboard (P2-F2). */
 export const exportPagePng = (documentId: string, page: number, scale = 1) =>
   invoke<string>("export_page_png", { documentId, page, scale });
+
+// --- P2.4: content-stream text editing -----------------------------------------
+
+/**
+ * The text runs on one page, with the Stage-1 verdict already computed (P2.4 §4).
+ *
+ * The backend pairs lopdf's run addresses with PDFium's geometry, so the caller can grey
+ * out runs the write path would refuse *before* the user types. A run whose
+ * `admissibility.editable` is false must not be offered as an edit target.
+ */
+export const getPageTextRuns = (documentId: string, page: number) =>
+  invoke<PageTextRun[]>("get_page_text_runs", { documentId, page });
+
+/**
+ * Applies one in-place text edit, writing a **new** file (P2.4 T2).
+ *
+ * `expected` is the text the user was shown; the backend re-validates it against the
+ * content stream and refuses with `TEXT_RUN_MISMATCH` if it changed. `oldWidth` is the
+ * run's measured advance width, which the width gate compares the replacement against.
+ */
+export const editPageText = (
+  documentId: string,
+  page: number,
+  runId: TextRunId,
+  expected: string,
+  replacement: string,
+  oldWidth: number,
+  fontName: string,
+  fontSize: number,
+) =>
+  invoke<TextEditResult>("edit_page_text", {
+    documentId,
+    page,
+    runId,
+    expected,
+    replacement,
+    oldWidth,
+    fontName,
+    fontSize,
+  });
+
+/**
+ * Reverses a text edit from its recorded inverse, writing another new file (P2.4 T5).
+ *
+ * `editedPath` is the file the edit wrote, because that is where the bytes the inverse
+ * describes currently live. Returns the path of the reverted copy.
+ */
+export const revertPageText = (
+  documentId: string,
+  editedPath: string,
+  operation: ContentOperation,
+) =>
+  invoke<string>("revert_page_text", { documentId, editedPath, operation });
+
+/**
+ * Decrypts a protected document to a new, unprotected copy (P2.4 T8).
+ *
+ * The original is never modified. The password is used for this call and kept in memory
+ * for the session only (T10) — never on disk, in SQLite, or in an event payload.
+ */
+export const decryptCopy = (documentId: string, password: string) =>
+  invoke<DecryptOutcome>("decrypt_copy", { documentId, password });
+
+/** Drops a document's remembered password when it closes (P2.4 T10). */
+export const forgetPassword = (path: string) =>
+  invoke<void>("forget_password", { path });

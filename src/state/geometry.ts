@@ -121,3 +121,53 @@ export function isDrawable(rect: UiRect, scale: number): boolean {
   const min = MIN_DIMENSION_POINTS * safeScale;
   return rect.width >= min && rect.height >= min;
 }
+
+/**
+ * The tools that sweep out a rectangle over text. Ink, notes and shapes carry their own
+ * geometry and are not covered by the two functions below.
+ */
+export type SweepKind = "highlight" | "underline" | "strikeout";
+
+/** Thickness of the rule underline and strikeout draw, in UI pixels. */
+export const MARK_RULE_THICKNESS = 2;
+
+/**
+ * How tall a sweep mark is drawn inside its rect, in UI pixels.
+ *
+ * A highlight fills the swept area; underline and strikeout are rules *within* it, so
+ * they stay a fixed thickness however tall the user's drag was.
+ */
+export function markHeight(kind: SweepKind, boxHeight: number): number {
+  return kind === "highlight" ? boxHeight : MARK_RULE_THICKNESS;
+}
+
+/**
+ * How far a sweep mark is pushed down inside its rect, in UI pixels.
+ *
+ * These three must agree with where the Rust writer puts the mark, so the drawn overlay
+ * and the exported PDF show the same thing.
+ *
+ * An underline sits at the bottom of the swept area, a strikeout across its middle, and a
+ * highlight is not offset at all. Letting the highlight share the rule tools' offset was a
+ * real defect: it inherited `height - thickness`, which moved the fill down by its own
+ * height so it landed below the text the user had swept.
+ *
+ * Kept here, away from the JSX, because a correct offset is arithmetic and can be checked
+ * without a browser -- jsdom has no layout engine, so a test that asserted on rendered CSS
+ * could not have caught that bug.
+ */
+export function markOffset(kind: SweepKind, boxHeight: number): number {
+  if (kind === "highlight") return 0;
+  if (kind === "strikeout") return Math.max(0, boxHeight / 2 - MARK_RULE_THICKNESS / 2);
+  return Math.max(0, boxHeight - MARK_RULE_THICKNESS);
+}
+
+/**
+ * Expands a note's stored anchor point into the square the writer builds. A note is one
+ * point on disk and a square on the page, so this is the only place that conversion lives.
+ */
+export function noteAnchorRect(point: [number, number] | undefined): PdfRect | null {
+  if (!point) return null;
+  const [x, y] = point;
+  return { x0: x, y0: y, x1: x + NOTE_ICON_POINTS, y1: y + NOTE_ICON_POINTS };
+}

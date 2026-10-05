@@ -33,7 +33,7 @@ file watching (`notify`), packaging installers/updater, OCR, EPUB, DOCX.
 
 ## 2. Backend Layout (`src-tauri/`)
 
-```
+`
 src-tauri/
   Cargo.toml
   tauri.conf.json
@@ -58,14 +58,14 @@ src-tauri/
       mod.rs         # the 8 tauri commands; thin wrappers over services
     library.rs       # import/open flow: hash, upsert, provider pick
   tests/             # integration tests (db, registry, providers)
-```
+`
 
 Rule: `commands/` never touches rusqlite directly — they call `db::` and
 `provider::` modules. Keeps the layering testable without Tauri.
 
 ### Dependencies (Cargo.toml)
 
-```toml
+`toml
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
@@ -80,7 +80,7 @@ pdfium-render = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
-```
+`
 
 `sha2`/`hex` are an **approved amendment** to the DECISIONS §7 crate list — the
 schema requires `content_hash` and nothing else in the list can compute it.
@@ -99,7 +99,7 @@ binding resolves at runtime); CI therefore works without it.
 
 ## 3. Core Types & Error Surface (`model/`)
 
-```rust
+`rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Format { Pdf, Txt, Md }
@@ -136,7 +136,7 @@ pub enum AppError {
     #[error("{0}")]                            Other(String),
 }
 // impl serde::Serialize for AppError => { "code": variant name, "message": Display }
-```
+`
 
 Frontend receives every error as `{ code, message }`; `code` is stable and
 matchable in TS.
@@ -147,7 +147,7 @@ matchable in TS.
 
 Exactly the DECISIONS §5 contract (only `Result` = `Result<_, AppError>`):
 
-```rust
+`rust
 pub trait ReaderProvider: Send + Sync {
     fn open(&self, path: &Path) -> Result<DocumentMeta, AppError>;
     fn render_page(&self, doc: &DocumentMeta, page: u32, scale: f32)
@@ -163,7 +163,7 @@ pub fn provider_for(path: &Path) -> Result<Arc<dyn ReaderProvider>, AppError> {
         None => Err(AppError::UnsupportedFormat("<none>".into())),
     }
 }
-```
+`
 
 P0 behavior:
 
@@ -242,7 +242,7 @@ provides the native open dialog; frontend picks file then invokes
 
 ## 7. Frontend (`src/`) — P0 shell
 
-```
+`
 src/
   main.tsx, App.tsx
   api/
@@ -256,7 +256,7 @@ src/
   theme/
     ThemeProvider.tsx # dark/light via CSS variables; persisted through set_app_state
     tokens.css
-```
+`
 
 Behavior:
 - On mount: `listLibrary()` renders the library pane.
@@ -283,6 +283,8 @@ Behavior:
 7. `library` — open flow inserts a row and returns meta with id; second open of same file returns same id.
 8. Frontend: no test framework in P0 (no logic worth testing yet); vitest arrives with P2 UI work.
 
+   **Updated (P2):** vitest + jsdom + React Testing Library is now in place — see §11.
+
 Fixtures: tiny sample `.txt` (valid + invalid UTF-8) under `src-tauri/tests/fixtures/`. PDF open path needs pdfium at runtime → covered by manual smoke test on Windows dev machine (documented in README), not CI.
 
 ---
@@ -300,6 +302,54 @@ Fixtures: tiny sample `.txt` (valid + invalid UTF-8) under `src-tauri/tests/fixt
 Rendering, text extraction, FTS5 population/indexer, `notify` file watching,
 installers/updater/code signing, OCR/EPUB/DOCX, bookmark/search **UI**,
 multi-window, settings UI beyond theme toggle, macOS/Linux targets.
+
+---
+
+## 11. Frontend tests (added in P2)
+
+`npm test` runs vitest + jsdom + React Testing Library. Wired into the `frontend` CI job
+between `npm ci` and `npm run build`, so a failing assertion is reported as a test failure
+rather than as a build error.
+
+**Why jsdom and not a browser.** jsdom has no layout engine: `getBoundingClientRect`
+returns zeroes. That is a constraint on *what* is worth testing here, and it shaped the
+structure rather than being worked around:
+
+- **Pure geometry is tested directly.** `src/state/geometry.ts` mirrors
+  `src-tauri/src/editor/geometry.rs`, and the two must agree -- the overlay draws from the
+  TS conversion while the writer places the mark from the Rust one, so divergence puts the
+  mark on screen somewhere other than the mark in the exported PDF. `geometry.test.ts`
+  mirrors the Rust tests case for case, plus the mark-offset rules.
+- **Mark offsets are arithmetic, so they live in `geometry.ts`.** They used to be inline in
+  `AnnotationOverlay`'s JSX. The reported highlight-offset defect was invisible to a DOM
+  test (jsdom reports no box), but is a plain function call once extracted --
+  `markOffset("highlight", height) === 0`. Do not move this back into JSX.
+- **No assertions on rendered CSS.** A test asserting a style string passes while the mark
+  is in the wrong place.
+- **Pixel-accurate alignment stays in Rust.** Marks drawn against a real page raster are
+  covered by the PDFium suite, not here.
+
+`src/test/tauri.ts` fakes the IPC boundary using Tauri's own `@tauri-apps/api/mocks`, so
+tests exercise the real `src/api/invoke.ts` (including its argument mapping) instead of
+replacing it. Rules learned the hard way, each after a test failed for a reason that had
+nothing to do with the product:
+
+1. **Nothing is shared by reference across the boundary.** Tauri serialises; a fake that
+   returns the object it stored lets a caller mutate a "persisted" row. That produced a
+   convincing false failure in the undo test — the fake looked like a product bug.
+2. **`cleanup()` must be registered explicitly in `src/test/setup.ts`.** RTL only
+   auto-registers it when a global `afterEach` exists, and this project uses
+   `globals: false`. Without it, DOM from one test leaks into the next and queries fail
+   with "found multiple elements".
+3. **The event plugin is handled in our own callback.** `mockIPC`'s `shouldMockEvents`
+   option intercepts `plugin:event|*` *inside* Tauri's wrapper, before our callback runs,
+   which would make subscriptions uncountable. Handling the two commands directly also gives
+   `emitEvent` somewhere to dispatch to.
+4. **Teardown must not call `clearMocks()`.** RTL unmounts in an `afterEach` that the setup
+   file registers after the test file's, so teardown runs while the tree is still mounted;
+   deleting `invoke` there makes every unmount throw "invoke is not a function" as an
+   unhandled rejection. `mockIPC` reinstalls the internals at the start of each test, so
+   there is nothing to undo eagerly.
 
 ---
 

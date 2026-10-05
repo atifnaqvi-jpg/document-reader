@@ -42,7 +42,7 @@ jobs:
         run: cargo test
 
   frontend:
-    name: Frontend (typecheck, build)
+    name: Frontend (typecheck, test, build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +53,13 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      # Runs before the build so a failing test is reported as itself rather than as a
+      # build failure. `npm ci` fails outright if package-lock and package.json disagree,
+      # which is the check that keeps the lockfile honest here.
+      - name: Unit tests
+        run: npm test
+
       - run: npm run build
 
   windows-check:

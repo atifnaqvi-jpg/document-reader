@@ -1,5 +1,7 @@
 // Mirrors src-tauri/src/model/mod.rs. Keep in sync manually — see docs/P0-DESIGN.md §7.
 
+import type { PdfRect } from "../state/geometry";
+
 export type Format = "pdf" | "txt" | "md";
 
 export interface DocumentMeta {
@@ -8,6 +10,12 @@ export interface DocumentMeta {
   author: string | null;
   pages: number | null;
   format: Format;
+  /**
+   * The file declares `/Encrypt` (P2.4 T7). A protected document still opens and reads;
+   * every edit refuses with `ENCRYPTED_READ_ONLY` until the user makes a copy with
+   * "Decrypt a copy".
+   */
+  encrypted: boolean;
 }
 
 export interface LibraryEntry extends DocumentMeta {
@@ -186,3 +194,70 @@ export interface AnnotationChanged {
 
 /** Event name emitted, debounced 200ms, after a document's annotations change (P2-D11). */
 export const ANNOTATION_CHANGED_EVENT = "annotation://changed";
+
+// --- P2.4: content-stream text editing -----------------------------------------
+
+/**
+ * Address of one string operand inside a page's decoded content stream (P2.4 T4).
+ *
+ * This — not the visible text — is what identifies a run. The visible text is
+ * re-validated against it at write time, and a disagreement refuses with
+ * `TEXT_RUN_MISMATCH` rather than editing the wrong bytes.
+ */
+export interface TextRunId {
+  opIndex: number;
+  operandPath: number[];
+}
+
+/** The Stage-1 verdict for one run, precomputed by the backend (P2.4 §4/T3). */
+export interface TextAdmissibility {
+  editable: boolean;
+  /** Name of the first violated gate, e.g. `fits-width`; `null` when editable. */
+  gate: string | null;
+  /**
+   * A calm sentence naming the gate. For the width gate it quotes both measured widths,
+   * so a refusal is actionable rather than mysterious.
+   */
+  message: string | null;
+}
+
+/** One text run as the picker sees it (mirrors `editor::textedit::PageTextRun`). */
+export interface PageTextRun {
+  runId: TextRunId;
+  text: string;
+  operator: string;
+  fontKey: string;
+  fontName: string;
+  fontSize: number;
+  /** Box in PDF points (bottom-left origin); `null` when PDFium could not match it. */
+  rect: PdfRect | null;
+  /** Advance width in points, the `oldWidth` the width gate compares against. */
+  width: number | null;
+  admissibility: TextAdmissibility;
+}
+
+/** The inverse of a text edit, for the session undo stack (P2.4 T5). */
+export interface ContentOperation {
+  page: number;
+  opIndex: number;
+  operandPath: number[];
+  oldBytes: number[];
+  newBytes: number[];
+}
+
+export interface TextEditResult {
+  /** The new file the edit was written to. Never the original (D2). */
+  path: string;
+  inverse: ContentOperation;
+  text: string;
+}
+
+export interface DecryptOutcome {
+  path: string;
+  pages: number;
+}
+
+/** Error code a protected document returns from every edit command (P2.4 T7). */
+export const ENCRYPTED_READ_ONLY = "ENCRYPTED_READ_ONLY";
+/** Error code when a supplied password does not unlock the document (P2.4 T8). */
+export const WRONG_PASSWORD = "WRONG_PASSWORD";
