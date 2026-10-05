@@ -668,9 +668,9 @@ button:disabled {
 }
 
 .encrypted-banner {
-  display: flex;
-  gap: 0.5rem;
-  align-items: baseline;
+  /* Plain block layout. This sits inside `.viewer-canvas`, which scrolls; centring it is
+     `margin: 0 auto` on a max-width box, never flex alignment on the scrolling parent
+     (P1.9.1). The label and the sentence are inline and wrap on their own. */
   margin: 0 auto 0.5rem;
   max-width: 40rem;
   padding: 0.5rem 0.75rem;
@@ -678,4 +678,8 @@ button:disabled {
   border-radius: 4px;
   background: var(--accent-soft, #ddf4ff);
   text-align: left;
+}
+
+.encrypted-banner strong {
+  margin-right: 0.4rem;
 }
