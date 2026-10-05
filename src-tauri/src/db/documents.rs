@@ -33,7 +33,8 @@ pub fn upsert(
                 connection.execute(
                     "UPDATE Document
                         SET path = ?2, title = ?3, author = ?4, format = ?5, size = ?6,
-                            pages = ?7, content_hash = ?8, missing = 0, last_opened_at = ?9
+                            pages = ?7, content_hash = ?8, missing = 0, last_opened_at = ?9,
+                            encrypted = ?10
                       WHERE id = ?1",
                     params![
                         id,
@@ -44,7 +45,8 @@ pub fn upsert(
                         import.size,
                         import.meta.pages,
                         import.content_hash,
-                        now
+                        now,
+                        i64::from(import.meta.encrypted)
                     ],
                 )?;
             } else {
@@ -59,8 +61,8 @@ pub fn upsert(
             let id = uuid::Uuid::new_v4().to_string();
             connection.execute(
                 "INSERT INTO Document
-                    (id, path, title, author, format, size, pages, added_at, last_opened_at, content_hash, missing)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, 0)",
+                    (id, path, title, author, format, size, pages, added_at, last_opened_at, content_hash, missing, encrypted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, 0, ?10)",
                 params![
                     id,
                     import.path,
@@ -70,7 +72,8 @@ pub fn upsert(
                     import.size,
                     import.meta.pages,
                     now,
-                    import.content_hash
+                    import.content_hash,
+                    i64::from(import.meta.encrypted)
                 ],
             )?;
             id
@@ -84,7 +87,7 @@ pub fn upsert(
 pub fn get(connection: &Connection, id: &str) -> Result<Option<LibraryEntry>, AppError> {
     let entry = connection
         .query_row(
-            "SELECT id, path, title, author, format, pages, added_at, last_opened_at, missing
+            "SELECT id, path, title, author, format, pages, added_at, last_opened_at, missing, encrypted
                FROM Document WHERE id = ?1",
             params![id],
             |row| {
@@ -95,6 +98,7 @@ pub fn get(connection: &Connection, id: &str) -> Result<Option<LibraryEntry>, Ap
                         author: row.get(3)?,
                         pages: row.get(5)?,
                         format: parse_format(row.get::<_, String>(4)?),
+                        encrypted: row.get::<_, i64>(9)? != 0,
                     },
                     path: row.get(1)?,
                     added_at: row.get(6)?,
@@ -123,7 +127,7 @@ pub fn content_hash(connection: &Connection, id: &str) -> Result<Option<String>,
 
 pub fn list(connection: &Connection) -> Result<Vec<LibraryEntry>, AppError> {
     let mut statement = connection.prepare(
-        "SELECT id, path, title, author, format, pages, added_at, last_opened_at, missing
+        "SELECT id, path, title, author, format, pages, added_at, last_opened_at, missing, encrypted
            FROM Document
           ORDER BY COALESCE(last_opened_at, added_at) DESC",
     )?;
@@ -136,6 +140,7 @@ pub fn list(connection: &Connection) -> Result<Vec<LibraryEntry>, AppError> {
                     author: row.get(3)?,
                     pages: row.get(5)?,
                     format: parse_format(row.get::<_, String>(4)?),
+                    encrypted: row.get::<_, i64>(9)? != 0,
                 },
                 path: row.get(1)?,
                 added_at: row.get(6)?,
@@ -188,6 +193,7 @@ mod tests {
             author: Some("Author".into()),
             pages: Some(10),
             format,
+            encrypted: false,
         }
     }
 

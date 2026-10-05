@@ -8,5 +8,12 @@ pub mod gc;
 pub mod geometry;
 pub mod lopdf_write;
 pub mod pages;
+pub mod protect;
+pub mod runmetrics;
 pub mod save;
+pub mod session;
+pub mod textedit;
+pub mod textlocate;
+#[cfg(any(test, feature = "testfixtures"))]
+pub mod testpdf;
 pub mod undo;

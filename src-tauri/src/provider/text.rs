@@ -39,6 +39,9 @@ impl ReaderProvider for TextProvider {
                 Some(format) => format,
                 None => Format::Txt,
             },
+            // Text files carry no PDF encryption (P2.4 T7); the flag stays false so the
+            // read-only guard never fires for them.
+            encrypted: false,
         })
     }
 
@@ -124,6 +127,7 @@ mod tests {
                 author: None,
                 pages: None,
                 format: Format::Txt,
+                encrypted: false,
             },
             path: path.display().to_string(),
             missing: false,
@@ -178,6 +182,7 @@ mod tests {
                 author: None,
                 pages: None,
                 format: Format::Txt,
+                encrypted: false,
             },
             path: "definitely/not/here.txt".into(),
             missing: true,

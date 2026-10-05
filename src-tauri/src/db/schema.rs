@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS Document (
   added_at       INTEGER NOT NULL,
   last_opened_at INTEGER,
   content_hash   TEXT,
-  missing        INTEGER DEFAULT 0
+  missing        INTEGER DEFAULT 0,
+  encrypted      INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_path ON Document(path);
@@ -73,7 +74,40 @@ CREATE TABLE IF NOT EXISTS AppState (
 
 pub fn apply(connection: &Connection) -> Result<(), AppError> {
     connection.execute_batch(SCHEMA)?;
+    // Additive migrations for databases created before the column existed. `ALTER TABLE
+    // ADD COLUMN` has no `IF NOT EXISTS`, so a duplicate-column error is the expected case
+    // and must not fail setup; anything else is a real problem and is surfaced.
+    add_column_if_missing(connection, "Document", "encrypted", "INTEGER DEFAULT 0")?;
     Ok(())
+}
+
+/// Adds `column` to `table` unless it is already there.
+fn add_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), AppError> {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    match connection.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, message)) => {
+            // SQLite reports a re-add as "duplicate column name" (or the older
+            // "duplicate column name: X"); both mean the migration already ran.
+            let already = message
+                .as_deref()
+                .is_some_and(|text| text.contains("duplicate column name"));
+            if already {
+                Ok(())
+            } else {
+                Err(AppError::Db(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    message,
+                )))
+            }
+        }
+        Err(error) => Err(AppError::Db(error)),
+    }
 }
 
 #[cfg(test)]

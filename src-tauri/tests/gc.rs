@@ -36,6 +36,7 @@ fn register(db: &Db, path: &Path) -> String {
         author: None,
         pages: Some(1),
         format: Format::Pdf,
+        encrypted: false,
     };
     let path = path.to_string_lossy().to_string();
     db.with_mut(|connection| {

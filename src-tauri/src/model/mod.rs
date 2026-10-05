@@ -35,6 +35,14 @@ pub struct DocumentMeta {
     pub author: Option<String>,
     pub pages: Option<u32>,
     pub format: Format,
+    /// The file declares `/Encrypt` (P2.4 T7).
+    ///
+    /// Read from the file itself at import (lopdf's metadata loader reports it without
+    /// needing the password), because a PDF with an empty user password still *opens* —
+    /// what makes it read-only is the trailer, not whether a prompt was survived. Kept on
+    /// the meta so it flattens into [`LibraryEntry`] and the frontend gets the banner from
+    /// the ordinary library list, with no extra round trip.
+    pub encrypted: bool,
 }
 
 /// A library row: `DocumentMeta` plus the bookkeeping the UI needs to show
@@ -177,6 +185,28 @@ pub enum AppError {
     RenderUnavailable,
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
+    /// The document is password-protected and was opened read-only (P2.4 T7). Every
+    /// editing command refuses with this while the document stays as it is; the only
+    /// way to an editable file is the explicit "Decrypt a copy" action (T8).
+    #[error(
+        "this document is password-protected and was opened read-only; use \"Decrypt a copy\" to edit a copy"
+    )]
+    EncryptedReadOnly,
+    /// The password supplied for a protected PDF was not accepted (P2.4 F7/F8).
+    #[error("the password did not unlock this document")]
+    WrongPassword,
+    /// A Stage-1 admissibility gate refused the run (P2.4 T3). The string *names the
+    /// violated gate* and, for the width gate, quotes both measured widths — a refusal
+    /// that does not say why is indistinguishable from a bug.
+    #[error("{0}")]
+    TextRunNotEditable(String),
+    /// The lopdf run no longer matches the run the user picked (P2.4 T4): the file
+    /// changed under the editor, so writing would land the text in the wrong place.
+    #[error("this text changed since it was selected; reopen the page and try again")]
+    TextRunMismatch,
+    /// A page's decoded content exceeded the processing cap (P2.4 T3e / F3).
+    #[error("this page's content is too large to edit safely")]
+    ContentTooLarge,
     #[error("{0}")]
     Other(String),
 }
@@ -191,6 +221,11 @@ impl AppError {
             AppError::PdfiumUnavailable(_) => "PDFIUM_UNAVAILABLE",
             AppError::RenderUnavailable => "RENDER_UNAVAILABLE",
             AppError::Db(_) => "DB_ERROR",
+            AppError::EncryptedReadOnly => "ENCRYPTED_READ_ONLY",
+            AppError::WrongPassword => "WRONG_PASSWORD",
+            AppError::TextRunNotEditable(_) => "TEXT_RUN_NOT_EDITABLE",
+            AppError::TextRunMismatch => "TEXT_RUN_MISMATCH",
+            AppError::ContentTooLarge => "CONTENT_TOO_LARGE",
             AppError::Other(_) => "OTHER",
         }
     }
@@ -244,6 +279,7 @@ mod tests {
                 author: None,
                 pages: Some(3),
                 format: Format::Pdf,
+                encrypted: false,
             },
             path: "C:/docs/t.pdf".into(),
             missing: false,

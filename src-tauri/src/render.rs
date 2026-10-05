@@ -393,6 +393,40 @@ impl RenderService {
         PdfProvider::extract_cached(&self.handles, path, content_hash, page)
     }
 
+    /// The page's text runs as PDFium sees them, for the P2.4 picker (T4).
+    ///
+    /// Read-only and routed through the shared handle cache, so it cannot race a render
+    /// of the same document.
+    pub fn page_runs(
+        &self,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+    ) -> Result<Vec<crate::editor::runmetrics::PdfiumRun>, AppError> {
+        PdfProvider::page_runs(&self.handles, path, content_hash, page)
+    }
+
+    /// Measures a candidate replacement through PDFium's own metrics (P2.4 T3d).
+    pub fn measure_text(
+        &self,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+        font_name: &str,
+        font_size: f32,
+        text: &str,
+    ) -> Result<f32, AppError> {
+        PdfProvider::measure_text(
+            &self.handles,
+            path,
+            content_hash,
+            page,
+            font_name,
+            font_size,
+            text,
+        )
+    }
+
     /// Drops all cached state for a document: rasters and the open handle. Called when
     /// a document is (re-)imported, so a file changed on disk can never be served from
     /// either cache.

@@ -7,7 +7,7 @@
 //! conversion goes through this module and nothing else is allowed to flip a y.
 
 /// A rectangle in PDF points, origin bottom-left.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PdfRect {
     pub x0: f32,
     pub y0: f32,

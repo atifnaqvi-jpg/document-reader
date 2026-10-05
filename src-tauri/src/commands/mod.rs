@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 
 use crate::db::{annotations, app_state, bookmarks, documents, search, Db};
+use crate::editor::session::{PasswordStore, SessionPassword};
 use crate::index::{IndexService, IndexStatus, IndexSummary};
 use crate::library;
 use crate::model::{
@@ -303,6 +304,7 @@ pub async fn get_document_page_text(
                     author: None,
                     pages: None,
                     format,
+                    encrypted: false,
                 },
                 path,
                 missing: false,
@@ -779,4 +781,298 @@ pub fn next_derived_path(original: &Path, label: &str) -> Result<std::path::Path
     Err(AppError::Other(
         "reached the limit of derived copies for this document".to_string(),
     ))
+}
+
+// --- P2.4: content-stream text editing ----------------------------------------
+//
+// Three commands, each a thin seam over `crate::editor` (P2-D1): find the runs the
+// picker can offer, apply one edit, and produce an unprotected copy. The editing rules
+// (gates, run addressing, encryption policy) all live in the editor modules, so this
+// file only resolves paths, measures with PDFium where the design says PDFium measures,
+// and persists through the D2 save discipline.
+
+/// A page's text runs, with the Stage-1 verdict precomputed (P2.4 §4/T3/T4).
+///
+/// The run **addresses** and the admissibility gates come from lopdf; the geometry and
+/// width come from PDFium, read-only. Both parses happen here so the picker never has to
+/// reconcile them itself, and so "can this run be edited" is answered before the user
+/// types rather than discovered on commit.
+#[tauri::command]
+pub async fn get_page_text_runs(
+    db: State<'_, Db>,
+    service: State<'_, Arc<RenderService>>,
+    document_id: String,
+    page: u32,
+) -> Result<Vec<crate::editor::textedit::PageTextRun>, AppError> {
+    let (path, content_hash) = db.with(|connection| {
+        let entry = documents::get(connection, &document_id)?
+            .ok_or_else(|| AppError::Other(format!("document not found: {document_id}")))?;
+        let hash = documents::content_hash(connection, &document_id)?;
+        Ok::<_, AppError>((entry.path, hash))
+    })?;
+
+    // A protected document still opens for reading, so the picker is allowed to *show*
+    // its runs; the edit command is where the read-only refusal belongs (T7). Asking for
+    // runs here therefore does not prompt for a password.
+
+    // PDFium work (runs + measurement) is CPU-bound; run it off the IPC thread, like
+    // every other extraction.
+    let service = Arc::clone(&service);
+    let pdfium_path = path.clone();
+    let pdfium_hash = content_hash.clone();
+    let pdfium_runs = tauri::async_runtime::spawn_blocking(move || {
+        service.page_runs(Path::new(&pdfium_path), pdfium_hash.as_deref(), page)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("run extraction task failed: {error}")))??;
+
+    // lopdf parse and gate evaluation are cheap by comparison (bounded by the T3e cap)
+    // but still not IPC-thread work.
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path)
+            .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
+        let document = lopdf::Document::load_mem(&bytes)
+            .map_err(|error| AppError::Other(format!("could not read PDF: {error}")))?;
+        crate::editor::textedit::describe_runs(&document, page, &pdfium_runs)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("run description task failed: {error}")))?
+}
+
+/// The result of a successful text edit.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextEditResult {
+    /// Where the edited copy was written. Never the original (D2).
+    pub path: String,
+    /// The inverse operation, for the session undo stack (T5).
+    pub inverse: crate::editor::textlocate::ContentOperation,
+    /// The replacement as it was actually written (through the font's own encoding).
+    pub text: String,
+}
+
+/// Applies a Stage-1 in-place text edit and saves it to a **new** file (P2.4 T2/T3/T5/T6).
+///
+/// The original is opened read-only and never a write target; the result goes through
+/// [`crate::editor::save::next_edited_path`] like every other save (D2), so a text edit
+/// cannot clobber the user's source document.
+#[tauri::command]
+// The run's font name and size travel with the request so the width gate measures with
+// the same metrics the picker showed the user (T3d); folding them into a struct would
+// only move the argument count, not reduce it.
+#[allow(clippy::too_many_arguments)]
+pub async fn edit_page_text(
+    app: AppHandle,
+    db: State<'_, Db>,
+    service: State<'_, Arc<RenderService>>,
+    document_id: String,
+    page: u32,
+    run_id: crate::editor::textlocate::RunId,
+    expected: String,
+    replacement: String,
+    old_width: f32,
+    font_name: String,
+    font_size: f32,
+) -> Result<TextEditResult, AppError> {
+    let path = document_path(&db, &document_id)?;
+
+    // T7: the single read-only gate. A protected document refuses every edit here, before
+    // any other work, and never prompts for a password.
+    crate::editor::protect::read_only_guard(Path::new(&path))?;
+
+    let content_hash = db.with(|connection| documents::content_hash(connection, &document_id))?;
+
+    let service = Arc::clone(&service);
+    let measure_path = path.clone();
+    let target_path = path.clone();
+    let target_page = page;
+    let written = replacement.clone();
+
+    let (inverse, bytes) = tauri::async_runtime::spawn_blocking(move || {
+        // PDFium measures through the shared handle cache, read-only (T1/T3d).
+        let measure = |text: &str| -> Result<f32, AppError> {
+            service.measure_text(
+                Path::new(&measure_path),
+                content_hash.as_deref(),
+                target_page,
+                &font_name,
+                font_size,
+                text,
+            )
+        };
+
+        let source = std::fs::read(&target_path)
+            .map_err(|error| AppError::Other(format!("could not read {target_path}: {error}")))?;
+        let mut document = lopdf::Document::load_mem(&source)
+            .map_err(|error| AppError::Other(format!("could not read PDF: {error}")))?;
+
+        let request = crate::editor::textedit::EditRequest {
+            page: target_page,
+            run_id,
+            expected,
+            replacement: written,
+            old_width,
+            measure: &measure,
+        };
+        let inverse = crate::editor::textedit::edit(&mut document, &request)?;
+
+        // Same serialisation discipline as every other lopdf write: renumber and compress
+        // so the result is compact for a PDF reader (not a debugging aid).
+        document.renumber_objects();
+        document.compress();
+        let mut bytes = Vec::new();
+        document
+            .save_to(&mut bytes)
+            .map_err(|error| AppError::Other(format!("could not write PDF: {error}")))?;
+        Ok::<_, AppError>((inverse, bytes))
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("text edit task failed: {error}")))??;
+
+    let target =
+        crate::editor::save::next_edited_path(Path::new(&path), |candidate| candidate.exists())?;
+    crate::editor::save::write_atomically(&target, &bytes)?;
+
+    // T6: the edit invalidated derived state. The write went to a *new* path, so the
+    // original's rasters and index are still correct; the copy is the document whose
+    // derived state must be built, and it is imported through the ordinary library route
+    // so it gets its own id, rasters and FTS5 rows exactly like a freshly opened file.
+    let edited_path = target.to_string_lossy().to_string();
+    announce_change(app.clone(), document_id.clone());
+    spawn_import_and_index(&app, edited_path.clone());
+
+    Ok(TextEditResult {
+        path: edited_path,
+        inverse,
+        text: replacement,
+    })
+}
+
+/// Imports an edited copy and indexes it, off the command's critical path (T6).
+///
+/// Re-importing through `library::open_and_import` rather than hand-writing FTS5 rows is
+/// what keeps the copy's index and metadata consistent with every other document: the
+/// dedupe rule, the render-cache invalidation by path, and the index service's single
+/// writer per document are all the existing behaviours, not a second implementation.
+///
+/// Detached because a 500-page re-extract must not make the edit feel slow, exactly like
+/// indexing on open. The change event already told every pane to re-read, so nothing waits
+/// on this.
+fn spawn_import_and_index(app: &AppHandle, path: String) {
+    use tauri::Manager;
+
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app.state::<Db>();
+        let render = app.state::<Arc<RenderService>>();
+        let index_service = app.state::<Arc<IndexService>>();
+
+        let Ok(entry) = db.with(|connection| {
+            let entry = crate::library::open_and_import(connection, Path::new(&path), now())?;
+            Ok::<_, AppError>(entry)
+        }) else {
+            // A failure here is a derived-state problem, never a data problem: the edited
+            // file is already written and correct. The change event has fired, and the
+            // next open of the copy will retry the import through the same route.
+            return;
+        };
+
+        // The new copy's path cannot be in either cache under its id yet, but the *path*
+        // may be if the user re-edits an already-open copy; dropping it here is cheap and
+        // guarantees the first render of the copy reads its new bytes.
+        render.forget_document(&entry.meta.id, Path::new(&path));
+
+        if crate::index::app::indexable(&entry) {
+            index_service.invalidate(&entry.meta.id);
+            let _ = crate::index::app::index_document(
+                Some(&app),
+                &db,
+                &render,
+                &index_service,
+                &entry.meta.id,
+            );
+        }
+    });
+}
+
+/// Reverses one text edit, writing another new file (P2.4 T5).
+///
+/// The inverse records the stream address and both byte strings, so the undo is exact
+/// rather than a re-render from the original: an edit made after this one is not lost.
+/// `edited_path` is the file the edit wrote, because that is where the bytes the inverse
+/// describes currently live.
+#[tauri::command]
+pub async fn revert_page_text(
+    app: AppHandle,
+    document_id: String,
+    edited_path: String,
+    operation: crate::editor::textlocate::ContentOperation,
+) -> Result<String, AppError> {
+    let path = edited_path.clone();
+
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        let source = std::fs::read(&path)
+            .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
+        let mut document = lopdf::Document::load_mem(&source)
+            .map_err(|error| AppError::Other(format!("could not read PDF: {error}")))?;
+
+        crate::editor::textedit::revert(&mut document, &operation)?;
+
+        document.renumber_objects();
+        document.compress();
+        let mut bytes = Vec::new();
+        document
+            .save_to(&mut bytes)
+            .map_err(|error| AppError::Other(format!("could not write PDF: {error}")))?;
+        Ok::<_, AppError>(bytes)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("revert task failed: {error}")))??;
+
+    let target = crate::editor::save::next_edited_path(Path::new(&edited_path), |candidate| {
+        candidate.exists()
+    })?;
+    crate::editor::save::write_atomically(&target, &bytes)?;
+
+    let undo_target = target.to_string_lossy().to_string();
+    announce_change(app.clone(), document_id);
+    spawn_import_and_index(&app, undo_target.clone());
+    Ok(undo_target)
+}
+
+/// Produces an unprotected copy of a password-protected document (P2.4 T8).
+///
+/// The original is opened read-only and never written. The password is used for this call
+/// and, on success, retained for the session only (T10) so a subsequent edit of the copy
+/// can reuse it without a second prompt; it is never stored on disk, in SQLite, in a log,
+/// or in an event payload. On any failure the partial copy is deleted and the command
+/// refuses.
+#[tauri::command]
+pub async fn decrypt_copy(
+    db: State<'_, Db>,
+    passwords: State<'_, PasswordStore>,
+    document_id: String,
+    password: String,
+) -> Result<crate::editor::protect::DecryptOutcome, AppError> {
+    let path = document_path(&db, &document_id)?;
+
+    let outcome_path = path.clone();
+    let supplied = password.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        crate::editor::protect::decrypt_copy(Path::new(&outcome_path), &supplied)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("decrypt task failed: {error}")))??;
+
+    // T10: remembered for the session, keyed by the *copy's* path. The original's
+    // protection is untouched, and no password ever leaves memory.
+    passwords.remember(&outcome.path, SessionPassword::new(password));
+    Ok(outcome)
+}
+
+/// Drops a document's remembered password (P2.4 T10), called when the document closes.
+#[tauri::command]
+pub fn forget_password(passwords: State<'_, PasswordStore>, path: String) -> Result<(), AppError> {
+    passwords.forget(&path);
+    Ok(())
 }

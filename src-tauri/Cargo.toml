@@ -9,6 +9,16 @@ rust-version = "1.77"
 name = "document_reader_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Enables the P2.4 fixture builder's `Document::encrypt` path, used ONLY by
+# `examples/make_p24_fixtures.rs` to generate `encrypted-aes.pdf`. The product never calls
+# `Document::encrypt` (P2.4 T9), and without this feature that code is not compiled at all.
+testfixtures = []
+
+[[example]]
+name = "make_p24_fixtures"
+required-features = ["testfixtures"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

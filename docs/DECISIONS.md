@@ -194,6 +194,12 @@ README.md         Scope, privacy statement, build instructions
 OCR; DOCX layout rendering; EPUB rendering; cloud sync; accounts;
 multi-tenant anything; macOS/Linux builds; highlights/annotations.
 
+> **SUPERSEDED (2026-10-04, user instruction) — by `docs/P2.4-DESIGN.md`:**
+> text editing within a page's content stream is now an ACTIVE requirement
+> (staged: constrained edit → font embedding/subsetting → reflow; see T11 and
+> §0 stage gate). The annotations prohibition above was already amended by
+> P2-DESIGN (real PDF annotations shipped in P2). All other non-goals STAND.
+
 ---
 
 *Frozen 2026-09-27. The Section 7 questions are CLOSED. Scaffold against this

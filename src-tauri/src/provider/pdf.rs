@@ -497,6 +497,42 @@ impl PdfProvider {
             .collect()
     }
 
+    /// The text objects PDFium sees on one page, for the P2.4 picker (T4).
+    ///
+    /// Read-only, and deliberately **not** the run's identity: the authoritative address
+    /// the write path uses is the lopdf `(op_index, operand_path)`; this only supplies
+    /// the displayed text, position and font the UI needs to present a target. Routed
+    /// through the shared handle cache so it cannot race a render (P2-D8/F8).
+    pub fn page_runs(
+        handles: &DocumentHandles,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+    ) -> Result<Vec<crate::editor::runmetrics::PdfiumRun>, AppError> {
+        handles.with_document(path, content_hash, |document| {
+            crate::editor::runmetrics::page_runs(document, page, path)
+        })
+    }
+
+    /// Measures a candidate replacement string through PDFium's own text metrics (T3d).
+    ///
+    /// Read-only: the text object built to measure is never inserted into the document and
+    /// no save is ever performed (T1). `font_name` and `font_size` come from the run the
+    /// user picked, so the number is comparable with the run's `old_width`.
+    pub fn measure_text(
+        handles: &DocumentHandles,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+        font_name: &str,
+        font_size: f32,
+        text: &str,
+    ) -> Result<f32, AppError> {
+        handles.with_document(path, content_hash, |document| {
+            crate::editor::runmetrics::measure(document, page, font_name, font_size, text)
+        })
+    }
+
     /// Resolves once per process. Deliberately lazy: `current_exe()` only reflects
     /// the real install path once Tauri has run `set_current_dir` during setup.
     fn library_path() -> Result<&'static PathBuf, AppError> {
@@ -540,6 +576,12 @@ impl ReaderProvider for PdfProvider {
                 .filter(|value| !value.is_empty())
         };
 
+        // P2.4 T7: the trailer decides, not whether a password was needed. Read through
+        // lopdf rather than PDFium because PDFium's `metadata()` does not expose the
+        // `/Encrypt` declaration, and a PDF with an empty user password opens fine while
+        // still being protected.
+        let encrypted = crate::editor::protect::is_encrypted(path).unwrap_or(false);
+
         Ok(DocumentMeta {
             id: String::new(), // assigned by the library layer on import
             title: tag(PdfDocumentMetadataTagType::Title).or_else(|| {
@@ -550,6 +592,7 @@ impl ReaderProvider for PdfProvider {
             author: tag(PdfDocumentMetadataTagType::Author),
             pages: Some(document.pages().len() as u32),
             format: Format::Pdf,
+            encrypted,
         })
     }
 
@@ -606,6 +649,7 @@ mod tests {
                 author: None,
                 pages: Some(3),
                 format: Format::Pdf,
+                encrypted: false,
             },
             path: fixture_pdf().display().to_string(),
             missing: false,

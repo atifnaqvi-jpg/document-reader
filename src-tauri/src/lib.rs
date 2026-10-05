@@ -36,6 +36,9 @@ pub fn run() {
             app.manage(std::sync::Arc::new(index::IndexService::new()));
             // Debounce tickets for the annotation-change event (P2-D11).
             app.manage(editor::events::ChangeTickets::new());
+            // Session-scoped document passwords (P2.4 T10): in memory only, zeroised on
+            // clear, and never written to SQLite or an event.
+            app.manage(editor::session::PasswordStore::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -69,6 +72,11 @@ pub fn run() {
             commands::export_flattened,
             commands::add_watermark,
             commands::export_page_png,
+            commands::get_page_text_runs,
+            commands::edit_page_text,
+            commands::revert_page_text,
+            commands::decrypt_copy,
+            commands::forget_password,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");
