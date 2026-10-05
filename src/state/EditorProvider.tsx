@@ -10,11 +10,15 @@ import {
 import type { ReactNode } from "react";
 import {
   addAnnotation,
+  decryptCopy,
+  editPageText,
   getAppState,
+  getPageTextRuns,
   listAnnotations,
   onAnnotationChanged,
   removeAnnotation,
   restoreAnnotation,
+  revertPageText,
   setAppState,
   updateAnnotation,
 } from "../api/invoke";
@@ -23,6 +27,8 @@ import type {
   AnnotationData,
   AnnotationKind,
   AppError,
+  DecryptOutcome,
+  PageTextRun,
   ToolStyle,
 } from "../api/types";
 import { ANNOTATION_KINDS } from "../api/types";
@@ -75,6 +81,30 @@ interface EditorContextValue {
   remove: (annotation: Annotation) => Promise<void>;
   /** Replaces one annotation's text, recording it for undo. */
   updateText: (annotation: Annotation, text: string) => Promise<void>;
+  /**
+   * Applies an in-place content-stream text edit (P2.4/T2) and records the inverse for
+   * undo (T5). Returns the path of the new file the edit was written to, or `null` when
+   * the backend refused (the refusal is on `error`).
+   */
+  editText: (
+    page: number,
+    run: PageTextRun,
+    replacement: string,
+  ) => Promise<string | null>;
+  /** Decrypts a protected document to a new copy (P2.4/T8). */
+  decryptCopyToFile: (password: string) => Promise<DecryptOutcome | null>;
+  /**
+   * The text runs on the current page, with their Stage-1 verdicts (P2.4 §4). Fetched
+   * once per (document, page) while text-edit mode is on.
+   */
+  pageRuns: PageTextRun[];
+  runsLoading: boolean;
+  /** Whether the in-viewer text picker is active. */
+  textEditMode: boolean;
+  setTextEditMode: (on: boolean) => void;
+  /** The run the user picked, by reference identity within `pageRuns`. */
+  selectedRun: PageTextRun | null;
+  selectRun: (run: PageTextRun | null) => void;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   clearError: () => void;
@@ -128,6 +158,13 @@ export function EditorProvider({
     undo: [],
     redo: [],
   });
+  // P2.4: the in-viewer text picker. `pageRuns` is the current page's run list with its
+  // Stage-1 verdicts; it is fetched rather than derived, because the run addresses come
+  // from lopdf and the geometry from PDFium.
+  const [pageRuns, setPageRuns] = useState<PageTextRun[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [textEditMode, setTextEditMode] = useState(false);
+  const [selectedRun, setSelectedRun] = useState<PageTextRun | null>(null);
 
   // Per-document stacks (D7). Kept in one map keyed by document rather than one stack
   // reset on switch, so moving between documents does not destroy either one's history.
@@ -157,6 +194,47 @@ export function EditorProvider({
     setStacks(stacksRef.current.get(docKey) ?? { undo: [], redo: [] });
     void refresh();
   }, [docKey, refresh]);
+
+  // Leaving text-edit mode, switching page or document drops the run selection: the run
+  // addresses belong to one page of one document, and carrying one across would offer an
+  // edit whose target no longer exists.
+  useEffect(() => {
+    setSelectedRun(null);
+  }, [docKey, page, textEditMode]);
+
+  // Text runs for the current page (P2.4 §4). Fetched only while the picker is on: the
+  // extraction walks the content stream and measures every run against PDFium, which is
+  // real work the reader should not pay for while merely reading.
+  //
+  // A refused run list is not an error banner: the picker is still useful (it shows what
+  // is there and why it cannot be edited), so the failure clears the list instead of
+  // raising. The backend's refusal messages reach the user through the edit path.
+  useEffect(() => {
+    if (!textEditMode || !documentId) {
+      setPageRuns([]);
+      setRunsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setRunsLoading(true);
+    setError(null);
+    getPageTextRuns(documentId, page)
+      .then((runs) => {
+        if (!cancelled) setPageRuns(runs);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setPageRuns([]);
+          setError(e as AppError);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRunsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [textEditMode, documentId, page]);
 
   // Cross-surface sync (P2-D11). An annotation changed somewhere else -- an undo restored
   // by another pane, a future multi-window edit -- and this pane re-reads the DB rather
@@ -337,6 +415,69 @@ export function EditorProvider({
     [docKey, refresh, push],
   );
 
+  const editText = useCallback(
+    async (
+      targetPage: number,
+      run: PageTextRun,
+      replacement: string,
+    ): Promise<string | null> => {
+      if (!documentId) return null;
+      try {
+        const result = await editPageText(
+          documentId,
+          targetPage,
+          run.runId,
+          run.text,
+          replacement,
+          run.width ?? 0,
+          run.fontName,
+          run.fontSize,
+        );
+        // T5: the inverse is a ContentOperation, so undo re-applies the previous bytes to
+        // the file this edit wrote. Redo replays the edit on *that* file, so each entry
+        // tracks the path its own inverse describes: an edit made after this one would
+        // otherwise be reverted from the wrong bytes and refused as a mismatch.
+        let currentPath = result.path;
+        push(docKey, {
+          label: "Edit text",
+          undo: async () => {
+            currentPath = await revertPageText(documentId, currentPath, result.inverse);
+          },
+          redo: async () => {
+            currentPath = await editPageText(
+              documentId,
+              targetPage,
+              run.runId,
+              run.text,
+              replacement,
+              run.width ?? 0,
+              run.fontName,
+              run.fontSize,
+            ).then((again) => again.path);
+          },
+        });
+        return result.path;
+      } catch (e) {
+        setError(e as AppError);
+        return null;
+      }
+    },
+    [documentId, docKey, push],
+  );
+
+  const decryptCopyToFile = useCallback(
+    async (password: string): Promise<DecryptOutcome | null> => {
+      if (!documentId) return null;
+      try {
+        return await decryptCopy(documentId, password);
+      } catch (e) {
+        setError(e as AppError);
+        return null;
+      }
+    },
+    [documentId],
+  );
+
   const undo = useCallback(async () => {
     const current = stacksRef.current.get(docKey) ?? { undo: [], redo: [] };
     const entry = current.undo[current.undo.length - 1];
@@ -373,6 +514,16 @@ export function EditorProvider({
 
   const clearError = useCallback(() => setError(null), []);
 
+  /**
+   * Picking a run replaces any pending refusal (P2.4 T3/Q2): the previous gate message
+   * referred to a different run, and showing it against the new selection would name the
+   * wrong reason.
+   */
+  const selectRun = useCallback((run: PageTextRun | null) => {
+    setSelectedRun(run);
+    setError(null);
+  }, []);
+
   const value = useMemo<EditorContextValue>(
     () => ({
       // Only the open page's annotations are drawn; the DB row for another page is not
@@ -390,6 +541,14 @@ export function EditorProvider({
       create,
       remove,
       updateText,
+      editText,
+      decryptCopyToFile,
+      pageRuns,
+      runsLoading,
+      textEditMode,
+      setTextEditMode,
+      selectedRun,
+      selectRun,
       undo,
       redo,
       clearError,
@@ -407,6 +566,13 @@ export function EditorProvider({
       create,
       remove,
       updateText,
+      editText,
+      decryptCopyToFile,
+      pageRuns,
+      runsLoading,
+      textEditMode,
+      selectedRun,
+      selectRun,
       undo,
       redo,
       clearError,
