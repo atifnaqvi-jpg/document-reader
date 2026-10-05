@@ -8,6 +8,7 @@ import {
 import type { AppError, LibraryEntry, RenderedPage } from "../api/types";
 import { AnnotationOverlay } from "./AnnotationOverlay";
 import type { PageMetrics } from "./AnnotationOverlay";
+import { TextRunOverlay, EncryptedBanner } from "./TextEdit";
 import { useEditor } from "../state/EditorProvider";
 
 /** Zoom levels offered by the viewer. Scale multiplies the PDF's nominal 96 DPI. */
@@ -55,7 +56,7 @@ export const ViewerPane = forwardRef<ViewerHandle, {
   const [rendered, setRendered] = useState<RenderedPage | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [rendering, setRendering] = useState(false);
-  const { annotations } = useEditor();
+  const { annotations, textEditMode, setTextEditMode, pageRuns } = useEditor();
 
   // Renders are async and can be superseded by a newer page/zoom request. Tracking the
   // in-flight request lets a stale response be dropped instead of flashing over the
@@ -209,6 +210,20 @@ export const ViewerPane = forwardRef<ViewerHandle, {
     return () => window.removeEventListener("keydown", onKey);
   }, [docId, pageCount, step]);
 
+  // Escape leaves the text picker (P2.4). It claims the key in the capture phase, before
+  // ReadingModeProvider sees it, so one Escape cannot both leave the picker and drop out
+  // of fullscreen -- the same rule the menu follows for its own panel.
+  useEffect(() => {
+    if (!textEditMode) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setTextEditMode(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [textEditMode, setTextEditMode]);
+
   if (!entry) {
     return (
       <div className="pane-empty">
@@ -272,6 +287,11 @@ export const ViewerPane = forwardRef<ViewerHandle, {
       </header>
 
       <div className="viewer-canvas">
+        {/* P2.4 T7: a protected document opened and reads normally; only in-place editing
+            is unavailable. The notice says that much and names the explicit way forward,
+            so nothing here is modal or alarming. */}
+        <EncryptedBanner entry={entry} />
+
         {error ? (
           <div className="render-error" role="alert">
             <p>
@@ -294,10 +314,12 @@ export const ViewerPane = forwardRef<ViewerHandle, {
               height={rendered.height}
               alt={`Page ${page + 1}`}
             />
-            {/* The overlay is hidden in the original view too: the raster no longer
-                contains the marks, so leaving the DOM marks would show annotations the
-                user just asked to hide. */}
-            {annotationsVisible ? (
+            {/* The text picker replaces the annotation overlay rather than stacking on it:
+                both are full-surface pointer targets, and two live layers would make what a
+                click means depend on z-order. Leaving edit mode restores the overlay. */}
+            {textEditMode ? (
+              <TextRunOverlay metrics={pageMetrics(rendered, page, zoom)} runs={pageRuns} />
+            ) : annotationsVisible ? (
               <AnnotationOverlay
                 metrics={pageMetrics(rendered, page, zoom)}
                 annotations={annotations}

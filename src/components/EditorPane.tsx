@@ -13,6 +13,7 @@ import {
 } from "../api/invoke";
 import type { AnnotationKind, AppError, LibraryEntry } from "../api/types";
 import { useEditor } from "../state/EditorProvider";
+import { TextEditPanel } from "./TextEdit";
 
 /**
  * Editing tools (docs/P2-DESIGN.md D9/D10).
@@ -57,6 +58,7 @@ export function EditorPane({
     selectedId,
     setSelectedId,
     remove,
+    decryptCopyToFile,
   } = useEditor();
 
   const selected = annotations.find((row) => row.id === selectedId) ?? null;
@@ -69,6 +71,12 @@ export function EditorPane({
   // reachable from "Save edits". The prompt names the file so the user confirms a specific
   // document rather than an abstract "overwrite?".
   const [pendingOverwrite, setPendingOverwrite] = useState(false);
+  // P2.4 T8: removing protection is deliberate, so it is a three-step flow -- open the form,
+  // read what it will do, then confirm with the password. `pendingDecrypt` holds the typed
+  // password only long enough to submit it (T10 keeps it out of persistence and events).
+  const [decryptOpen, setDecryptOpen] = useState(false);
+  const [decryptPassword, setDecryptPassword] = useState("");
+  const [decrypting, setDecrypting] = useState(false);
   // P2-F3/F5: page tools and export are "write a new file" operations, so they report
   // their result through the same savedPath channel as a save and share its busy flag.
   // Follows the visible page by default -- the page the user is looking at is almost
@@ -140,6 +148,28 @@ export function EditorPane({
       setSaveError(toAppError(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  /**
+   * Removes protection from a copy (P2.4 T8).
+   *
+   * Only reached after the confirmation has been read, and the password is cleared from
+   * component state as soon as the call returns, whether it worked or not: a rejected
+   * password must not linger in a field for the next attempt to submit by accident.
+   */
+  const confirmDecrypt = async () => {
+    setDecrypting(true);
+    setSaveError(null);
+    try {
+      const outcome = await decryptCopyToFile(decryptPassword);
+      if (outcome) {
+        setSavedPath(outcome.path);
+        setDecryptOpen(false);
+      }
+    } finally {
+      setDecryptPassword("");
+      setDecrypting(false);
     }
   };
 
@@ -308,7 +338,25 @@ export function EditorPane({
         >
           Overwrite original…
         </button>
+        {/* T8: the only path from a protected document to an editable one. Offered whether
+            or not the open document is protected, because the user may be about to open one;
+            the confirmation states plainly that protection is dropped on the new copy only. */}
+        <button
+          type="button"
+          title="Save an unprotected copy of a password-protected document"
+          onClick={() => {
+            setSaveError(null);
+            setSavedPath(null);
+            setDecryptPassword("");
+            setDecryptOpen(true);
+          }}
+          disabled={decrypting}
+        >
+          Decrypt a copy…
+        </button>
       </div>
+
+      <TextEditPanel entry={entry} page={currentPage} />
 
       {pendingPath ? (
         <div className="editor-confirm" role="dialog" aria-label="Confirm save">
@@ -354,6 +402,48 @@ export function EditorPane({
         <p className="editor-saved" role="status">
           Saved to <span className="path">{savedPath}</span>
         </p>
+      ) : null}
+
+      {decryptOpen ? (
+        <div className="editor-confirm danger" role="dialog" aria-label="Confirm decrypt">
+          <p>
+            Save an unprotected copy of <span className="path">{entry.path}</span>?
+          </p>
+          <p className="muted">
+            Protection will be removed on the new copy only. The original file is not
+            changed and stays protected. Nothing is re-encrypted.
+          </p>
+          <label>
+            Password
+            <input
+              type="password"
+              value={decryptPassword}
+              // Autofocus because the dialog exists to take one value; the field is not
+              // persisted anywhere and is cleared as soon as the call returns (T10).
+              autoFocus
+              onChange={(event) => setDecryptPassword(event.target.value)}
+            />
+          </label>
+          <div>
+            <button
+              type="button"
+              onClick={() => void confirmDecrypt()}
+              disabled={decrypting || decryptPassword === ""}
+            >
+              {decrypting ? "Decrypting…" : "Decrypt a copy"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDecryptPassword("");
+                setDecryptOpen(false);
+              }}
+              disabled={decrypting}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       ) : null}
 
       {saveError ?? error ? (

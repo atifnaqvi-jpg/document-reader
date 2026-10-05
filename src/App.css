@@ -587,3 +587,95 @@ button:disabled {
   font-size: 0.75rem;
   text-transform: uppercase;
 }
+
+/* P2.4: text picker, refusal surfaces and the encrypted read-only notice. */
+
+.textrun-overlay {
+  position: absolute;
+  inset: 0;
+  /* The picker is the only live layer while it is on, so it takes the pointer; the boxes
+     themselves are what a click targets. */
+  pointer-events: auto;
+}
+
+.textrun-box {
+  position: absolute;
+  padding: 0;
+  background: rgba(31, 111, 235, 0.08);
+  /* A dashed outline says "editable target". Refused runs keep a box rather than being
+     hidden, because a word the user can read with no visible target reads as a bug. */
+  border: 1px dashed rgba(31, 111, 235, 0.7);
+  border-radius: 2px;
+  color: transparent;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.textrun-box.selected {
+  background: rgba(31, 111, 235, 0.22);
+  border-style: solid;
+}
+
+.textrun-box.refused {
+  background: rgba(209, 36, 47, 0.06);
+  border-color: rgba(209, 36, 47, 0.6);
+}
+
+.textrun-box-label {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.editor-textedit {
+  flex-basis: 100%;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+}
+
+.textrun-list {
+  list-style: none;
+  margin: 0.4rem 0;
+  padding: 0;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.textrun-list button {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+}
+
+.textrun-list button.refused {
+  color: var(--muted, #57606a);
+}
+
+.textrun-gate {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--danger, #d1242f);
+}
+
+.textedit-refusal,
+.textedit-error {
+  color: var(--danger, #d1242f);
+}
+
+.encrypted-banner {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin: 0 auto 0.5rem;
+  max-width: 40rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 4px;
+  background: var(--accent-soft, #ddf4ff);
+  text-align: left;
+}

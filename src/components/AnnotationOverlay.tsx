@@ -11,9 +11,17 @@ import type {
 } from "../api/types";
 import { parseAnnotationData } from "../api/types";
 import { useEditor } from "../state/EditorProvider";
-import { dragToRect, isDrawable, pageToPdf, pdfToPage, pointToPdf } from "../state/geometry";
-import type { UiRect } from "../state/geometry";
-import { NOTE_ICON_POINTS } from "../state/geometry";
+import {
+  dragToRect,
+  isDrawable,
+  markHeight,
+  markOffset,
+  noteAnchorRect as noteAnchorRectPoints,
+  pageToPdf,
+  pdfToPage,
+  pointToPdf,
+} from "../state/geometry";
+import type { SweepKind, UiRect } from "../state/geometry";
 
 /**
  * Draws saved annotations over the rendered page and captures new ones (P2-D8).
@@ -310,6 +318,7 @@ function AnnotationMark({
             metrics.scale,
             metrics.pageHeightPoints,
           );
+          const kind = annotation.kind as SweepKind;
           return (
             <span
               key={index}
@@ -318,19 +327,10 @@ function AnnotationMark({
                 left: box.x,
                 top: box.y,
                 width: box.width,
-                // Underline and strikeout render as a rule, not a fill: a filled box
-                // over the text would hide it, which is not what those tools mean.
-                height: annotation.kind === "highlight" ? box.height : 2,
-                // Only the two rule tools offset their line within the box -- underline at
-                // the bottom, strikeout at mid-height. A highlight used to offset itself
-                // by `height - 2`, moving the fill down by its own height so it landed
-                // well below the text the user had swept.
-                marginTop:
-                  annotation.kind === "highlight"
-                    ? 0
-                    : annotation.kind === "strikeout"
-                      ? Math.max(0, box.height / 2 - 1)
-                      : Math.max(0, box.height - 2),
+                // Rule tools draw a rule within the box; a highlight fills it. The offset
+                // and height rules live in `geometry.ts` so they are unit-testable.
+                height: markHeight(kind, box.height),
+                marginTop: markOffset(kind, box.height),
                 background: colour,
                 opacity,
               }}
@@ -504,9 +504,8 @@ function NoteEditor({
 function noteAnchorRect(
   data: { point?: [number, number] },
 ): [number, number, number, number] | null {
-  if (!data.point) return null;
-  const [x, y] = data.point;
-  return [x, y, x + NOTE_ICON_POINTS, y + NOTE_ICON_POINTS];
+  const rect = noteAnchorRectPoints(data.point);
+  return rect ? [rect.x0, rect.y0, rect.x1, rect.y1] : null;
 }
 
 /** Rect in UI pixels (top-left origin) -> PDF points, via the shared conversion. */
