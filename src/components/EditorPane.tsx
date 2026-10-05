@@ -13,7 +13,7 @@ import {
 } from "../api/invoke";
 import type { AnnotationKind, AppError, LibraryEntry } from "../api/types";
 import { useEditor } from "../state/EditorProvider";
-import { TextEditPanel } from "./TextEdit";
+import { TEXT_EDIT_ERROR_CODES, TextEditPanel } from "./TextEdit";
 
 /**
  * Editing tools (docs/P2-DESIGN.md D9/D10).
@@ -446,7 +446,7 @@ export function EditorPane({
         </div>
       ) : null}
 
-      {saveError ?? error ? (
+      {saveError ?? (error && !TEXT_EDIT_ERROR_CODES.includes(error.code) ? error : null) ? (
         <div className="editor-error" role="alert">
           <p>{(saveError ?? error)!.message}</p>
           <button

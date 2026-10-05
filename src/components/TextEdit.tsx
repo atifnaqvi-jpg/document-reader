@@ -54,13 +54,28 @@ function runBox(run: PageTextRun, metrics: OverlayMetrics) {
 
 /** Whether two run addresses are the same run. Reference equality is not reliable: the
  * provider re-fetches the list, so the selected object and the listed object differ. */
-export function sameRun(a: PageTextRun | null, b: PageTextRun): boolean {
+export function sameRun(a: PageTextRun | null, b: PageTextRun | null): boolean {
   return (
     a !== null &&
+    b !== null &&
     a.runId.opIndex === b.runId.opIndex &&
     a.runId.operandPath.join(",") === b.runId.operandPath.join(",")
   );
 }
+
+/**
+ * The error codes the text-edit path can produce (P2.4 §5).
+ *
+ * They are listed here because the *panel* is where a text-edit refusal belongs: the user
+ * is looking at the run they picked, so the numbers in a width refusal have somewhere to
+ * land. Every other failure still falls through to the editing pane's own error region,
+ * and the two sets are disjoint so the message is never shown twice.
+ */
+export const TEXT_EDIT_ERROR_CODES = [
+  "TEXT_RUN_NOT_EDITABLE",
+  "TEXT_RUN_MISMATCH",
+  "CONTENT_TOO_LARGE",
+];
 
 /**
  * The clickable run boxes drawn over the rendered page.
@@ -197,7 +212,7 @@ export function TextEditPanel({
           ) : null}
 
           {pageRuns.length > 0 ? (
-            <ul className="textrun-list">
+            <ul className="textrun-list" aria-label="Text runs on this page">
               {pageRuns.map((run, index) => (
                 <li key={`${run.runId.opIndex}:${run.runId.operandPath.join(".")}:${index}`}>
                   <button
