@@ -179,8 +179,9 @@ export function TextEditPanel({
       <fieldset className="editor-textedit">
         <legend>Edit text</legend>
         <p className="muted">
-          This document is password-protected. Use <em>Menu &rsaquo; Decrypt a copy…</em> to
-          edit a copy; the original stays protected and read-only.
+          This document is password-protected. Use{" "}
+          <em>Decrypt a copy&hellip;</em> in the editing pane; the original stays protected
+          and read-only.
         </p>
       </fieldset>
     );
@@ -313,8 +314,8 @@ export function EncryptedBanner({ entry }: { entry: LibraryEntry | null }) {
     <div className="encrypted-banner" role="status">
       <strong>Password-protected</strong>
       <span>
-        Opened read-only. Use <em>Menu &rsaquo; Decrypt a copy…</em> to make an editable
-        copy; the original stays protected.
+        Opened read-only. Use <em>Decrypt a copy…</em> in the editing pane to make an
+        editable copy; the original stays protected.
       </span>
     </div>
   );
