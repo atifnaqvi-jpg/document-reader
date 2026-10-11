@@ -28,13 +28,15 @@ use crate::model::AppError;
 /// One text object as PDFium sees it, for the picker's display and hit-testing.
 ///
 /// This is **not** the run's identity (T4). The address the write path uses is the lopdf
-/// `(op_index, operand_path)` in [`crate::editor::textlocate`]; this struct only carries
-/// what the UI needs to show a target and what the caller needs to match it to that
-/// address (the displayed text, and its position on the page).
+/// `(op_index, operand_path)` in [`crate::editor::textlocate`]; this struct only carries what
+/// the UI needs to show a target and what pairing needs to match it to that address. Since
+/// P2.4.1 T17 that match is made **by geometry** — the box that contains the lopdf run's
+/// text-space origin — because PDFium reconstructs text at a different granularity (it joins
+/// a per-glyph `TJ` array into one run) and string equality therefore pairs the wrong things.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PdfiumRun {
-    /// The text PDFium reconstructed, for display and for matching to a lopdf run.
+    /// The text PDFium reconstructed, for display only.
     pub text: String,
     /// Font family name as PDFium reports it (`Helvetica`), for the refusal message.
     pub font_name: String,
@@ -49,18 +51,6 @@ pub struct PdfiumRun {
     /// Total advance width of the run in points, from the bounding box. This is the
     /// `old_width` gate (d) measures against.
     pub width: f32,
-}
-
-impl PdfiumRun {
-    /// Matches a PDFium run to a lopdf run by displayed text.
-    ///
-    /// Deliberately text equality, not position: PDFium joins adjacent objects and
-    /// applies `/ToUnicode`, so a byte-for-byte position match is not available. Text is
-    /// what the user saw and what T4 re-validates at write time, so it is the honest
-    /// join key. When two runs share text, the caller disambiguates by ordering.
-    pub fn matches_text(&self, text: &str) -> bool {
-        self.text == text
-    }
 }
 
 /// Reads every text object on one page of a PDF, in PDFium's order.
@@ -89,10 +79,12 @@ pub fn page_runs(
     page: u32,
     path: &Path,
 ) -> Result<Vec<PdfiumRun>, AppError> {
-    let page = document
-        .pages()
-        .get(page as u16)
-        .map_err(|e| AppError::Other(format!("page {page} unavailable on {}: {e}", path.display())))?;
+    let page = document.pages().get(page as u16).map_err(|e| {
+        AppError::Other(format!(
+            "page {page} unavailable on {}: {e}",
+            path.display()
+        ))
+    })?;
 
     let mut runs = Vec::new();
     for object in page.objects().iter() {

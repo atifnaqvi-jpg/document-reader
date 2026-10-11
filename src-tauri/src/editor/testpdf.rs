@@ -369,6 +369,132 @@ pub fn bytes(document: &Document) -> Vec<u8> {
     out
 }
 
+// --- P2.4.1: fragmented-run fixtures (§5) --------------------------------------
+
+/// Appends the operations for one per-glyph `TJ` run to `operations`, starting at `x`.
+fn push_per_glyph_run(operations: &mut Vec<Operation>, text: &str, size: i64, x: i64, y: i64) {
+    operations.push(Operation::new("BT", vec![]));
+    operations.push(Operation::new("Tf", vec!["F1".into(), size.into()]));
+    operations.push(Operation::new("Td", vec![x.into(), y.into()]));
+
+    // One string per glyph, each followed by a kerning number, exactly as Word and
+    // PowerPoint emit a kerned word: `[(H) -12 (e) -8 (l) 0 (l) 6 (o)] TJ`.
+    let mut array = Vec::new();
+    for (index, ch) in text.chars().enumerate() {
+        array.push(Object::string_literal(ch.to_string()));
+        if index + 1 < text.chars().count() {
+            // A small negative kern keeps the glyphs adjacent without overlapping.
+            array.push(Object::Integer(-4));
+        }
+    }
+    operations.push(Operation::new("TJ", vec![Object::Array(array)]));
+    operations.push(Operation::new("ET", vec![]));
+}
+
+/// §5 `fragmented-tj.pdf`: a per-glyph `TJ` array, WinAnsi subset.
+///
+/// This is the exact shape the 0.4.0 pairing bug could not handle: `TextEditPanel` offers one
+/// picker entry per *content-stream operand*, so this word is five operands, while PDFium
+/// reports it as one run. The gate the fixture must provoke is that pairing still succeeds and
+/// every fragment is editable — not the `run-mismatch` flood 0.4.0 produced.
+pub fn fragmented_tj() -> Document {
+    let mut operations = Vec::new();
+    push_per_glyph_run(&mut operations, "Hello", 12, 72, 700);
+    document_with_pages(winansi_helvetica(), vec![operations])
+}
+
+/// §5 `fragmented-mixed-fonts.pdf`: two per-glyph runs in different fonts on one baseline.
+///
+/// T19: fragments may only merge when they share a font **and** a size. Here "AB" is 12pt
+/// Helvetica and "CD" is 10pt Times with only a small gap between them, so a merger that
+/// ignored font or size would join them into one unencodable run. Nothing here may merge
+/// across the seam; per-fragment picking still works on both sides.
+pub fn fragmented_mixed_fonts() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let regular = document.add_object(winansi_helvetica());
+    let other = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Times-Roman",
+        "Encoding" => "WinAnsiEncoding",
+    });
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => regular, "F2" => other },
+    });
+
+    let mut operations = Vec::new();
+    push_per_glyph_run(&mut operations, "AB", 12, 72, 700);
+    // One point to the right: within a 12pt gap tolerance, so only the font/size difference
+    // can prevent a merge. `Td` is relative to the previous line matrix.
+    operations.push(Operation::new("BT", vec![]));
+    operations.push(Operation::new("Tf", vec!["F2".into(), 10.into()]));
+    operations.push(Operation::new("Td", vec![14.into(), 700.into()]));
+    let mut array = Vec::new();
+    for ch in "CD".chars() {
+        array.push(Object::string_literal(ch.to_string()));
+        array.push(Object::Integer(-4));
+    }
+    array.pop();
+    operations.push(Operation::new("TJ", vec![Object::Array(array)]));
+    operations.push(Operation::new("ET", vec![]));
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// §5 `fragmented-unpairable.pdf`: a real `Tj` run with **no** rendered box.
+///
+/// The unpaired run is drawn at font size 0. lopdf reads its operand and gates it as ordinary
+/// text, but PDFium renders nothing at size 0 and reports no box at all — there is genuinely
+/// nothing to pair with. T21: the refusal must *name* that no rendered box was found, rather
+/// than the generic run-mismatch sentence. A normal per-glyph run on the same page pairs
+/// correctly, so the fixture proves the refusal is specific to the unpaired run.
+pub fn fragmented_unpairable() -> Document {
+    let mut operations = Vec::new();
+    push_per_glyph_run(&mut operations, "GHOST", 12, 72, 700);
+    operations.push(Operation::new("BT", vec![]));
+    operations.push(Operation::new("Tf", vec!["F1".into(), 0.into()]));
+    operations.push(Operation::new("Td", vec![72.into(), 650.into()]));
+    operations.push(Operation::new(
+        "Tj",
+        vec![Object::string_literal("ZEROSIZE")],
+    ));
+    operations.push(Operation::new("ET", vec![]));
+    document_with_pages(winansi_helvetica(), vec![operations])
+}
+
+/// §5 `fragmented-wider-merged.pdf`: a merged run whose replacement is wider than its box.
+///
+/// The merged rect is the union of the fragments' boxes; a plausibly longer replacement
+/// overflows it and must refuse per O1 quoting the **merged** measured width.
+pub fn fragmented_wider_merged() -> Document {
+    let mut operations = Vec::new();
+    push_per_glyph_run(&mut operations, "Hi", 12, 72, 700);
+    document_with_pages(winansi_helvetica(), vec![operations])
+}
+
 // --- Stage 2: embedded-subset fixtures (T11) ----------------------------------
 
 /// A minimal, valid TrueType program whose `cmap` maps exactly `glyphs`.

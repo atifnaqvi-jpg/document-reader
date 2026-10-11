@@ -79,6 +79,23 @@ fn main() {
             "style-match-cases.pdf",
             testpdf::bytes(&testpdf::style_match_cases()),
         ),
+        // P2.4.1 §5: the fragmented-run matrix.
+        (
+            "fragmented-tj.pdf",
+            testpdf::bytes(&testpdf::fragmented_tj()),
+        ),
+        (
+            "fragmented-mixed-fonts.pdf",
+            testpdf::bytes(&testpdf::fragmented_mixed_fonts()),
+        ),
+        (
+            "fragmented-unpairable.pdf",
+            testpdf::bytes(&testpdf::fragmented_unpairable()),
+        ),
+        (
+            "fragmented-wider-merged.pdf",
+            testpdf::bytes(&testpdf::fragmented_wider_merged()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

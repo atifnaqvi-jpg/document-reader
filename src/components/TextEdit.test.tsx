@@ -54,6 +54,8 @@ function makeRun(overrides: Partial<PageTextRun> = {}): PageTextRun {
     rect: { x0: 72, y0: 600, x1: 200, y1: 612 },
     width: 120,
     admissibility: { editable: true, gate: null, message: null },
+    pairConfidence: "strong",
+    fragmentCount: 1,
     ...overrides,
   };
 }

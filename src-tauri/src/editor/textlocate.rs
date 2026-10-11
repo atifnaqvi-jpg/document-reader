@@ -15,6 +15,7 @@
 
 use lopdf::{content::Operation, Document, Object, ObjectId};
 
+use crate::editor::afm;
 use crate::model::AppError;
 
 /// Bounds a page's decompressed content (P2.4 T3e / F3).
@@ -56,6 +57,18 @@ pub struct RawRun {
     pub font_key: Vec<u8>,
     /// The operator that showed the text (`Tj`, `TJ`, `'`, `"`).
     pub operator: String,
+    /// Text-space origin `(x, y)` of this operand: the text matrix's translation when the
+    /// string showed (P2.4.1 T17). This is the key run pairing uses, because it is
+    /// segmentation-independent — two sides may split a line differently and still agree
+    /// on where the ink starts. It is **not** a rendered box: only PDFium has those.
+    pub origin: (f32, f32),
+    /// The `Tf` size in force, in points. The merge tolerances are relative to this
+    /// (T19) precisely because one page carries both 9pt body text and 24pt headings.
+    pub font_size: f32,
+    /// The advance this operand occupies, in points. For a standard-14 font it is the AFM
+    /// width; otherwise an approximation (see [`fragment_advance`]). Merging uses it to
+    /// measure the gap to the next fragment; the width gate uses PDFium's rect instead.
+    pub advance: f32,
 }
 
 impl RawRun {
@@ -165,22 +178,47 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
         .map_err(|error| AppError::Other(format!("could not read page fonts: {error}")))?;
 
     let mut runs = Vec::new();
+    // P2.4.1 T17: follow the text object through the whole page so each operand gets the
+    // origin it was shown at. Only translation and size are tracked -- enough to pair a run
+    // with the box that contains it; skew/rotation stay out of scope (Stage 3).
+    let mut walker = TextMatrixWalk::new();
 
     for (op_index, operation) in content.operations.iter().enumerate() {
-        for path in text_operand_paths(operation) {
-            let Some(bytes) = string_at(operation, &path) else {
-                continue;
-            };
+        walker.step(operation);
 
-            // The font in force is the last `/Fx Tf` before this operation. A run with
-            // no font cannot be decoded, and its encoding gates are unknowable.
-            let Some(font_key) = font_in_force(&content.operations, op_index) else {
-                continue;
-            };
-            let Some(font) = fonts.get(&font_key).copied() else {
-                continue;
-            };
-            let Ok(encoding) = font.get_font_encoding(document) else {
+        let paths = text_operand_paths(operation);
+        if paths.is_empty() {
+            continue;
+        }
+
+        // The font in force is the last `/Fx Tf` before this operation. A run with
+        // no font cannot be decoded, and its encoding gates are unknowable.
+        let Some(font_key) = font_in_force(&content.operations, op_index) else {
+            continue;
+        };
+        let Some(font) = fonts.get(&font_key).copied() else {
+            continue;
+        };
+        let Ok(encoding) = font.get_font_encoding(document) else {
+            continue;
+        };
+        let base_font = font_info(document, page_id, &font_key).and_then(|info| info.base_font);
+
+        // Where each operand showed: an ordinary `Tj` shows at the current matrix origin,
+        // but fragments inside one `TJ` array advance along the line as their kerning
+        // numbers and glyph widths dictate (T17). Both are needed for merging: a per-glyph
+        // `TJ` array is a sequence of adjacent fragments, and only the advancing pen tells
+        // them apart from a word break.
+        let per_path = tj_fragment_origins(
+            operation,
+            walker.origin(),
+            walker.size,
+            base_font.as_deref(),
+            &encoding,
+        );
+
+        for path in paths {
+            let Some(bytes) = string_at(operation, &path) else {
                 continue;
             };
             let Ok(text) = encoding.bytes_to_string(bytes) else {
@@ -190,20 +228,227 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                 continue;
             }
 
+            let origin = per_path
+                .iter()
+                .find(|(candidate, _)| **candidate == path)
+                .map(|(_, origin)| *origin)
+                .unwrap_or_else(|| walker.origin());
+
             runs.push(RawRun {
                 id: RunId {
                     op_index,
                     operand_path: path,
                 },
                 bytes: bytes.to_vec(),
-                text,
+                text: text.clone(),
                 font_key: font_key.clone(),
                 operator: operation.operator.clone(),
+                origin,
+                font_size: walker.size,
+                advance: fragment_advance(base_font.as_deref(), &text, walker.size),
             });
         }
     }
 
     Ok(runs)
+}
+
+/// The origin of every string operand of one operation, advancing the pen across a `TJ`
+/// array (P2.4.1 T17).
+///
+/// A `TJ` array is `[ (string) number (string) ... ]`: each number shifts the pen by
+/// `-number/1000 x Tf` before the next string shows, and each string advances it by its own
+/// width. Recovering that walk is what lets a per-glyph array be recognised as *adjacent*
+/// fragments. For any other operator there is nothing to advance and the caller's matrix
+/// origin is the answer.
+fn tj_fragment_origins(
+    operation: &Operation,
+    start: (f32, f32),
+    font_size: f32,
+    base_font: Option<&str>,
+    encoding: &lopdf::Encoding,
+) -> Vec<(Vec<usize>, (f32, f32))> {
+    if operation.operator != "TJ" {
+        return Vec::new();
+    }
+
+    let mut origins = Vec::new();
+    let mut pen_x = start.0;
+    for (index, operand) in operation.operands.iter().enumerate() {
+        let Object::Array(items) = operand else {
+            continue;
+        };
+        for (inner, item) in items.iter().enumerate() {
+            match item {
+                Object::String(bytes, _) => {
+                    origins.push((vec![index, inner], (pen_x, start.1)));
+                    let width = encoding
+                        .bytes_to_string(bytes)
+                        .map(|text| fragment_advance(base_font, &text, font_size))
+                        .unwrap_or(0.0);
+                    pen_x += width;
+                }
+                // A kerning number is in thousandths of an em, subtracted from the pen.
+                other => {
+                    if let Ok(number) = other.as_float() {
+                        pen_x -= number / 1000.0 * font_size;
+                    }
+                }
+            }
+        }
+    }
+    origins
+}
+
+/// The width a fragment occupies, used to walk *within* a `TJ` array and to measure the gap
+/// between two fragments.
+///
+/// A standard-14 font answers exactly from the AFM tables. Any other font falls back to a
+/// per-character approximation: this number only ever decides whether two fragments sit
+/// shoulder to shoulder on one line, and the width gate -- the thing correctness depends on --
+/// uses PDFium's measured rect instead.
+pub fn fragment_advance(base_font: Option<&str>, text: &str, font_size: f32) -> f32 {
+    if let Some(base) = base_font {
+        let stripped = crate::editor::substitute::strip_subset_prefix(base);
+        if let Some(width) = afm::text_width(stripped, text, font_size) {
+            return width;
+        }
+    }
+    text.chars().count() as f32 * 0.5 * font_size
+}
+
+/// The identity text matrix `[a b c d e f]`.
+const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+/// Multiplies two text matrices, `m x n`, in the PDF convention (ISO 32000-1 9.4.2).
+///
+/// The only components this walker needs downstream are the translation terms (`e`, `f`),
+/// but a full multiply keeps `Td`/`T*` correct even when a preceding `Tm` scaled or rotated
+/// the frame: `e' = tx.a + ty.c + e`, not merely `tx + e`.
+fn matrix_mul(m: [f32; 6], n: [f32; 6]) -> [f32; 6] {
+    [
+        m[0] * n[0] + m[1] * n[2],
+        m[0] * n[1] + m[1] * n[3],
+        m[2] * n[0] + m[3] * n[2],
+        m[2] * n[1] + m[3] * n[3],
+        m[4] * n[0] + m[5] * n[2] + n[4],
+        m[4] * n[1] + m[5] * n[3] + n[5],
+    ]
+}
+
+/// A translation `[1 0 0 1 tx ty]`, the matrix `Td`/`TD`/`T*` prepend.
+fn translation(tx: f32, ty: f32) -> [f32; 6] {
+    [1.0, 0.0, 0.0, 1.0, tx, ty]
+}
+
+/// Reads the six numbers of a `Tm` operand list, if it has them.
+fn matrix_operands(operands: &[Object]) -> Option<[f32; 6]> {
+    if operands.len() < 6 {
+        return None;
+    }
+    let mut m = [0.0_f32; 6];
+    for (slot, operand) in m.iter_mut().zip(operands) {
+        *slot = operand.as_float().ok()?;
+    }
+    Some(m)
+}
+
+/// Reads a `Td`/`TD` operand pair.
+fn translate_operands(operands: &[Object]) -> Option<(f32, f32)> {
+    if operands.len() < 2 {
+        return None;
+    }
+    Some((operands[0].as_float().ok()?, operands[1].as_float().ok()?))
+}
+
+/// The text state a run's origin is read from (P2.4.1 #3 step 1).
+///
+/// A deliberately *partial* implementation of the PDF text machinery: `BT`, `Tm`, `Td`,
+/// `TD`, `T*`, `TL` and `Tf` size. It tracks the text matrix's translation and the font
+/// size, which is everything pairing and the font-size-relative merge tolerances need.
+/// `q`/`Q` graphics-state save/restore and CTM concatenation are **not** modelled -- the
+/// same honest boundary Stage 1 drew for `font_in_force`.
+#[derive(Debug, Clone)]
+struct TextMatrixWalk {
+    tm: [f32; 6],
+    tlm: [f32; 6],
+    leading: f32,
+    size: f32,
+}
+
+impl TextMatrixWalk {
+    fn new() -> Self {
+        TextMatrixWalk {
+            tm: IDENTITY,
+            tlm: IDENTITY,
+            leading: 0.0,
+            size: 0.0,
+        }
+    }
+
+    /// Advances the state by one operation, before that operation's own text is read.
+    ///
+    /// A text-showing operator is a no-op here on purpose: `Tj` does not move the origin the
+    /// *next* operand shows at, because the next operand re-sets it with `Td`/`Tm` (or the
+    /// previous line's leading with `T*`). Advancing on the shown glyph widths would be an
+    /// advance-width computation this walker does not own.
+    fn step(&mut self, operation: &Operation) {
+        match operation.operator.as_str() {
+            "BT" => {
+                self.tm = IDENTITY;
+                self.tlm = IDENTITY;
+            }
+            "Tm" => {
+                if let Some(matrix) = matrix_operands(&operation.operands) {
+                    self.tm = matrix;
+                    self.tlm = matrix;
+                }
+            }
+            "Td" => {
+                if let Some((tx, ty)) = translate_operands(&operation.operands) {
+                    self.tlm = matrix_mul(translation(tx, ty), self.tlm);
+                    self.tm = self.tlm;
+                }
+            }
+            "TD" => {
+                if let Some((tx, ty)) = translate_operands(&operation.operands) {
+                    // `TD` sets the leading to `-ty` as well as translating (9.4.3).
+                    self.leading = -ty;
+                    self.tlm = matrix_mul(translation(tx, ty), self.tlm);
+                    self.tm = self.tlm;
+                }
+            }
+            "T*" => {
+                self.tlm = matrix_mul(translation(0.0, -self.leading), self.tlm);
+                self.tm = self.tlm;
+            }
+            "TL" => {
+                if let Some(operand) = operation.operands.first() {
+                    if let Ok(value) = operand.as_float() {
+                        self.leading = value;
+                    }
+                }
+            }
+            "Tf" => {
+                if let Some(operand) = operation.operands.get(1) {
+                    if let Ok(value) = operand.as_float() {
+                        self.size = value;
+                    }
+                }
+            }
+            // `'` and `"` both perform a `T*` (move to the next line) before showing.
+            "'" | "\"" => {
+                self.tlm = matrix_mul(translation(0.0, -self.leading), self.tlm);
+                self.tm = self.tlm;
+            }
+            _ => {}
+        }
+    }
+
+    /// The translation component of the current text matrix.
+    fn origin(&self) -> (f32, f32) {
+        (self.tm[4], self.tm[5])
+    }
 }
 
 /// The font resource name in force at `op_index`, i.e. the last `Tf` at or before it.
@@ -752,5 +997,98 @@ mod tests {
         let runs = locate_runs(&document, page).unwrap();
         let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
         assert_eq!(texts, vec!["FIRST", "SECOND"]);
+    }
+
+    // --- P2.4.1 T17: the text-matrix walker --------------------------------------
+
+    /// The walker follows `Td` cumulatively, and `Tm` resets the frame absolutely.
+    #[test]
+    fn the_walker_tracks_td_cumulatively_and_tm_absolutely() {
+        let mut document = testpdf::blank_page();
+        let page = page_id(&document, 0).unwrap();
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 10.into()]),
+                Operation::new("Td", vec![100.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal("one")]),
+                // A second `Td` moves *relative to the line matrix*: 100+20, 700-12.
+                Operation::new("Td", vec![20.into(), (-12).into()]),
+                Operation::new("Tj", vec![Object::string_literal("two")]),
+                // `Tm` replaces the frame outright.
+                Operation::new(
+                    "Tm",
+                    vec![
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        1.into(),
+                        50.into(),
+                        100.into(),
+                    ],
+                ),
+                Operation::new("Tj", vec![Object::string_literal("three")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        document
+            .change_page_content(page, content.encode().unwrap())
+            .unwrap();
+
+        let runs = locate_runs(&document, page).unwrap();
+        assert_eq!(runs[0].origin, (100.0, 700.0));
+        assert_eq!(runs[1].origin, (120.0, 688.0));
+        assert_eq!(runs[2].origin, (50.0, 100.0));
+        assert_eq!(runs[0].font_size, 10.0);
+    }
+
+    /// A `TJ` array advances the pen per fragment, so a per-glyph array's operands land at
+    /// successive x positions rather than all on the array's origin.
+    #[test]
+    fn tj_fragments_get_successive_origins() {
+        let document = testpdf::fragmented_tj();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+        assert_eq!(runs.len(), 5);
+
+        // The first glyph sits exactly at the `Td`; each later glyph is to its right.
+        assert_eq!(runs[0].origin, (72.0, 700.0));
+        for pair in runs.windows(2) {
+            assert!(
+                pair[1].origin.0 > pair[0].origin.0,
+                "each fragment must start to the right of the previous: {:?}",
+                runs.iter().map(|r| r.origin.0).collect::<Vec<_>>()
+            );
+            assert_eq!(pair[1].origin.1, pair[0].origin.1, "same baseline");
+        }
+        // The advance is the AFM width, not zero: that is what makes the gap computable.
+        assert!(runs[0].advance > 0.0);
+    }
+
+    /// `T*` and `TL` move to the next line by the leading, which is how a real document
+    /// lays out successive lines without an absolute `Tm` each time.
+    #[test]
+    fn the_walker_follows_leading_with_t_star() {
+        let mut document = testpdf::blank_page();
+        let page = page_id(&document, 0).unwrap();
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("TL", vec![14.into()]),
+                Operation::new("Td", vec![0.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal("first")]),
+                Operation::new("T*", vec![]),
+                Operation::new("Tj", vec![Object::string_literal("second")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        document
+            .change_page_content(page, content.encode().unwrap())
+            .unwrap();
+
+        let runs = locate_runs(&document, page).unwrap();
+        assert_eq!(runs[0].origin, (0.0, 700.0));
+        assert_eq!(runs[1].origin, (0.0, 686.0));
     }
 }

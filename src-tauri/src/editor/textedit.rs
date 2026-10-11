@@ -111,6 +111,19 @@ impl Admissibility {
             message: Some(gate.message().to_string()),
         }
     }
+
+    /// A refusal whose prose is the caller's rather than the gate's stock sentence.
+    ///
+    /// T21 needs this: an unpaired run is refused `run-mismatch`, but the *reason* the user
+    /// must see is that no rendered box was found — an unpaired run and a changed run share a
+    /// gate while needing different explanations.
+    fn refused_with(gate: Gate, message: &str) -> Self {
+        Admissibility {
+            editable: false,
+            gate: Some(gate.name().to_string()),
+            message: Some(message.to_string()),
+        }
+    }
 }
 
 /// The font facts that gate (a), (b) and (c) depend on, resolved for one run.
@@ -215,9 +228,11 @@ pub fn width_refusal(old_width: f32, new_width: f32) -> Option<AppError> {
 #[serde(rename_all = "camelCase")]
 pub struct PageTextRun {
     pub run_id: RunId,
-    /// The decoded text, shown to the user and re-validated at write time.
+    /// The decoded text, shown to the user and re-validated at write time. For a merged run
+    /// this is the **joined** fragment text; the per-fragment text lives in `fragments`.
     pub text: String,
-    /// The showing operator (`Tj`, `TJ`, `'`, `"`), for diagnostics.
+    /// The showing operator (`Tj`, `TJ`, `'`, `"`), for diagnostics. For a merged run, the
+    /// head fragment's operator.
     pub operator: String,
     /// Resource name of the font (`F1`).
     pub font_key: String,
@@ -232,15 +247,137 @@ pub struct PageTextRun {
     /// The precomputed Stage-1 verdict. `editable` is false for a gate refusal *or* for a
     /// run with no PDFium geometry (nothing to click, nothing to measure).
     pub admissibility: Admissibility,
+    /// How the run paired with a rendered box (P2.4.1 T17/T21). `None` means no plausible
+    /// box: the run was refused `run-mismatch` naming that reason.
+    pub pair_confidence: Option<PairConfidence>,
+    /// How many content-stream fragments this run joins (P2.4.1 T18). `1` for an ordinary
+    /// single-operand run, `> 1` for a merged run.
+    pub fragment_count: usize,
+    /// The individual fragments of a merged run, head first, each described exactly as a
+    /// single run (P2.4.1 O-Pair-3: the picker expands to this second level). Empty for an
+    /// ordinary run, whose own fields already describe its single operand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fragments: Vec<PageTextRun>,
 }
 
-/// Builds the picker's run list for a page, pairing lopdf addresses with PDFium geometry.
+impl PageTextRun {
+    /// True for a run the picker may offer as an edit target.
+    pub fn editable(&self) -> bool {
+        self.admissibility.editable
+    }
+}
+
+/// How confidently a lopdf run was matched to a rendered box (P2.4.1 §3.3).
 ///
-/// `pdfium_runs` is matched to lopdf runs by **decoded text, in order**, consuming each
-/// PDFium run once so two runs reading the same string pair up correctly. A lopdf run with
-/// no PDFium counterpart keeps its address and gates but gets no rect and is reported as
-/// not editable: without geometry the user cannot see what they are picking, and without a
-/// measured width the write path cannot evaluate gate (d).
+/// * **Strong** — the origin lies inside the box (within a font-size-relative tolerance) and
+///   the box's baseline agrees within 0.5pt.
+/// * **Weak** — nearest-only geometry: either the box does not contain the origin or its
+///   baseline disagrees. The pair is still offered (geometry is the point), but flagged so
+///   the write path knows it is a lower-confidence match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PairConfidence {
+    Strong,
+    Weak,
+}
+
+/// The tolerance for the "origin lies inside the box" test, in points.
+///
+/// **Relative to the font size**, never an absolute constant (P2.4.1 T19's rule, applied to
+/// pairing too): one page carries 9pt body text and 24pt headings, and a fixed half-point
+/// would be far too tight for one and too loose for the other. 0.25em also covers the left
+/// side bearing that puts a box's ink to the *right* of the pen origin (measured ~0.08em).
+fn origin_tolerance(font_size: f32) -> f32 {
+    (0.25 * font_size).max(0.5)
+}
+
+/// The baseline agreement required to call a pair strong, in points (P2.4.1 T19/§3.3).
+const BASELINE_TOLERANCE: f32 = 0.5;
+
+/// One lopdf run's match to a rendered box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pair {
+    rect: usize,
+    confidence: PairConfidence,
+}
+
+/// Matches one lopdf run to a PDFium box by **geometry** (P2.4.1 T17).
+///
+/// Text equality is demoted to a tiebreaker (P2.4.1 T17): the two libraries segment text
+/// differently — PDFium joins a per-glyph `TJ` array into one run, lopdf splits it into one
+/// run per operand — so matching on the reconstructed string fails for exactly the documents
+/// this hotfix exists for. Position on the page does not care how either side split the line.
+fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Option<Pair> {
+    let tol = origin_tolerance(run.font_size);
+
+    let mut best: Option<Pair> = None;
+    let mut best_key: Option<(bool, f32, f32)> = None;
+    for (index, rect) in rects.iter().enumerate() {
+        // `contains` uses the box grown by the tolerance, which absorbs the ink offset and a
+        // small metric disagreement without reaching a neighbouring line.
+        let contains = run.origin.0 >= rect.x0 - tol
+            && run.origin.0 <= rect.x1 + tol
+            && run.origin.1 >= rect.y0 - tol
+            && run.origin.1 <= rect.y1 + tol;
+        if !contains {
+            continue;
+        }
+        let baseline_delta = (run.origin.1 - rect.y0).abs();
+        let strong = baseline_delta <= BASELINE_TOLERANCE;
+        // Prefer strong over weak, then the smallest baseline delta, then the leftmost box.
+        let key = (!strong, baseline_delta, rect.x0);
+        if best_key.map_or(true, |current| key < current) {
+            best_key = Some(key);
+            best = Some(Pair {
+                rect: index,
+                confidence: if strong {
+                    PairConfidence::Strong
+                } else {
+                    PairConfidence::Weak
+                },
+            });
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+
+    // Nothing contains the origin. Fall back to the nearest box, but only when it is
+    // *plausibly* the one this run belongs to — a run with no box anywhere near it is the
+    // unpaired case T21 names, and guessing would put the run's text on the wrong line.
+    let mut nearest: Option<(f32, usize, f32)> = None;
+    for (index, rect) in rects.iter().enumerate() {
+        let dx = (rect.x0 - run.origin.0)
+            .max(run.origin.0 - rect.x1)
+            .max(0.0);
+        let dy = (rect.y0 - run.origin.1)
+            .max(run.origin.1 - rect.y1)
+            .max(0.0);
+        let distance = dx + dy;
+        if nearest.map_or(true, |(best, _, _)| distance < best) {
+            nearest = Some((distance, index, rect.x0));
+        }
+    }
+    nearest
+        .filter(|(distance, _, _)| *distance <= 2.0 * tol)
+        .map(|(_, rect, _)| Pair {
+            rect,
+            confidence: PairConfidence::Weak,
+        })
+}
+
+/// Builds the picker's run list for a page, pairing lopdf addresses with PDFium geometry
+/// **by position** (P2.4.1 T17).
+///
+/// The 0.4.0 defect was pairing by decoded-text equality: Word/PowerPoint emit a `Tj` per
+/// kerning group or a `TJ` per glyph, so a lopdf "run" is a fragment while a PDFium run is a
+/// whole word or line. The texts virtually never matched, and every run was refused. Pairing
+/// by the text-space origin the run was shown at is segmentation-independent (T17), and the
+/// merge phase (P2.4.1 T18) uses the same pairing to fold fragments back into word-ish runs.
+///
+/// A run with no plausible rendered box keeps its address and gates but cannot be offered:
+/// without geometry the user cannot see what they are picking, and without a measured width
+/// the write path cannot evaluate gate (d). It is refused **naming that reason** (T21).
 pub fn describe_runs(
     document: &Document,
     page: u32,
@@ -248,48 +385,73 @@ pub fn describe_runs(
 ) -> Result<Vec<PageTextRun>, AppError> {
     let page_id = page_id(document, page)?;
     let runs = textlocate::locate_runs(document, page_id)?;
-    let mut used = vec![false; pdfium_runs.len()];
+
+    // Pair every run independently: several lopdf fragments may legitimately sit inside one
+    // PDFium box, which is precisely the fragmentation this phase exists for. Nothing is
+    // consumed, so a shared box is not a conflict.
+    let pairs: Vec<Option<Pair>> = runs.iter().map(|run| pair_run(run, pdfium_runs)).collect();
 
     let mut described = Vec::with_capacity(runs.len());
-    for run in &runs {
-        let gates = resolve_gates(document, page, run)?;
-        let mut verdict = font_admissibility(&gates);
-
-        let matched = pdfium_runs
-            .iter()
-            .enumerate()
-            .find(|(index, candidate)| !used[*index] && candidate.matches_text(&run.text))
-            .map(|(index, candidate)| {
-                used[index] = true;
-                candidate
-            });
-
-        if matched.is_none() && verdict.editable {
-            // The font gates passed, but the picker has no box for this run — the address
-            // is real while its geometry is not, so it stays uneditable rather than
-            // becoming a target the user cannot see or that gate (d) cannot measure.
-            verdict = Admissibility::refused(Gate::RunMismatch);
-        }
-
-        described.push(PageTextRun {
-            run_id: run.id.clone(),
-            text: run.text.clone(),
-            operator: run.operator.clone(),
-            font_key: String::from_utf8_lossy(&run.font_key).into_owned(),
-            font_name: matched.map(|run| run.font_name.clone()).unwrap_or_default(),
-            font_size: matched.map(|run| run.font_size).unwrap_or_default(),
-            rect: matched.map(|run| crate::editor::geometry::PdfRect {
-                x0: run.x0,
-                y0: run.y0,
-                x1: run.x1,
-                y1: run.y1,
-            }),
-            width: matched.map(|run| run.width),
-            admissibility: verdict,
-        });
+    for (index, run) in runs.iter().enumerate() {
+        described.push(describe_single(
+            document,
+            page,
+            run,
+            pairs[index],
+            pdfium_runs,
+        )?);
     }
 
     Ok(described)
+}
+
+/// The T21 refusal message for an editable run with no rendered box to pair with.
+pub const UNPAIRED_MESSAGE: &str = "no matching rendered box on the page; \
+     add a text annotation instead (gate: run-mismatch)";
+fn describe_single(
+    document: &Document,
+    page: u32,
+    run: &RawRun,
+    pair: Option<Pair>,
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+) -> Result<PageTextRun, AppError> {
+    let gates = resolve_gates(document, page, run)?;
+    let mut verdict = font_admissibility(&gates);
+
+    let matched = pair.and_then(|pair| rects.get(pair.rect).map(|rect| (pair, rect)));
+    if matched.is_none() && verdict.editable {
+        // The font gates passed, but there is no box for this run: the address is real while
+        // its geometry is not. T21 requires the refusal to *name* that, not merely refuse.
+        verdict = Admissibility::refused_with(Gate::RunMismatch, UNPAIRED_MESSAGE);
+    }
+
+    Ok(PageTextRun {
+        run_id: run.id.clone(),
+        text: run.text.clone(),
+        operator: run.operator.clone(),
+        font_key: String::from_utf8_lossy(&run.font_key).into_owned(),
+        font_name: matched
+            .map(|(_, rect)| rect.font_name.clone())
+            .unwrap_or_default(),
+        font_size: matched
+            .map(|(_, rect)| rect.font_size)
+            .unwrap_or(run.font_size),
+        rect: pair.and_then(|pair| rects.get(pair.rect)).map(|rect| {
+            crate::editor::geometry::PdfRect {
+                x0: rect.x0,
+                y0: rect.y0,
+                x1: rect.x1,
+                y1: rect.y1,
+            }
+        }),
+        width: pair
+            .and_then(|pair| rects.get(pair.rect))
+            .map(|rect| rect.width),
+        admissibility: verdict,
+        pair_confidence: pair.map(|pair| pair.confidence),
+        fragment_count: 1,
+        fragments: Vec::new(),
+    })
 }
 
 /// The request to edit one run.

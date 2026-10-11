@@ -221,6 +221,14 @@ export interface TextAdmissibility {
   message: string | null;
 }
 
+/**
+ * How confidently a run was matched to a rendered box (P2.4.1 T17/§3.3).
+ *
+ * `strong` — the run's origin lies inside the box and its baseline agrees; `weak` —
+ * nearest-only geometry. `null` means no plausible box, and the run was refused.
+ */
+export type PairConfidence = "strong" | "weak";
+
 /** One text run as the picker sees it (mirrors `editor::textedit::PageTextRun`). */
 export interface PageTextRun {
   runId: TextRunId;
@@ -234,6 +242,12 @@ export interface PageTextRun {
   /** Advance width in points, the `oldWidth` the width gate compares against. */
   width: number | null;
   admissibility: TextAdmissibility;
+  /** How the run paired with a box (P2.4.1 T17/T21); `null` when unpaired. */
+  pairConfidence: PairConfidence | null;
+  /** How many content-stream fragments the run joins (P2.4.1 T18); `1` for an ordinary run. */
+  fragmentCount: number;
+  /** The fragments of a merged run, head first (P2.4.1 O-Pair-3). Absent for a single run. */
+  fragments?: PageTextRun[];
 }
 
 /** The inverse of a text edit, for the session undo stack (P2.4 T5). */

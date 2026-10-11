@@ -607,7 +607,101 @@ fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
     );
 }
 
-// --- T3d geometry conversion ---------------------------------------------------
+// --- P2.4.1 T17: geometric pairing on fragmented runs --------------------------
+
+/// §5 `fragmented-tj.pdf`: a per-glyph `TJ` array must pair by **position**, not text.
+///
+/// This is the 0.4.0 defect in one assertion. lopdf addresses five operands; PDFium reports
+/// one box ("Hello"). Under text-equality pairing, none of the five matched and every one was
+/// refused `run-mismatch` — the "only occasional runs editable" report. Under geometric
+/// pairing each fragment's origin falls inside that box, so all five are editable and share it.
+#[test]
+fn fragmented_tj_fragments_pair_by_origin_not_text() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("fragmented-tj.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+
+    // Five content-stream operands, all paired.
+    assert_eq!(runs.len(), 5, "one picker entry per operand");
+    let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
+    assert_eq!(texts, vec!["H", "e", "l", "l", "o"]);
+    for run in &runs {
+        assert!(
+            run.admissibility.editable,
+            "every fragment must pair and be editable: {run:?}"
+        );
+        assert_eq!(
+            run.pair_confidence,
+            Some(textedit::PairConfidence::Strong),
+            "each fragment's origin is inside the box on its baseline"
+        );
+        assert!(run.rect.is_some(), "a paired fragment has a box");
+    }
+    // All five fragments resolved to the *same* PDFium box: that shared box is what the
+    // merge phase (T18) folds them into one run through.
+    let rects: Vec<(f32, f32)> = runs
+        .iter()
+        .map(|r| {
+            let r = r.rect.unwrap();
+            (r.x0, r.x1)
+        })
+        .collect();
+    assert!(
+        rects.windows(2).all(|pair| pair[0] == pair[1]),
+        "one shared box: {rects:?}"
+    );
+
+    // And the word edits end-to-end through a fragment's address (T4 unchanged).
+    let mut document = load(&path);
+    let head = runs[0].run_id.clone();
+    let outcome = edit_with(&mut document, 0, head, "H", "J", 26.0, 5.0).unwrap();
+    assert_eq!(outcome.inverse.old_bytes, b"H");
+    assert_eq!(outcome.inverse.new_bytes, b"J");
+}
+
+/// §5 `fragmented-unpairable.pdf`: T21 — the refusal names the missing box.
+#[test]
+fn an_unpaired_run_refuses_naming_the_missing_box() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("fragmented-unpairable.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+
+    // The normal run paired; the size-0 run did not.
+    let paired = runs
+        .iter()
+        .find(|run| run.text == "G")
+        .expect("the GHOST fragments");
+    assert!(paired.admissibility.editable);
+    assert_eq!(
+        paired.pair_confidence,
+        Some(textedit::PairConfidence::Strong)
+    );
+
+    let unpaired = runs
+        .iter()
+        .find(|run| run.text == "ZEROSIZE")
+        .expect("the size-0 run");
+    assert!(!unpaired.admissibility.editable);
+    assert!(unpaired.rect.is_none());
+    assert_eq!(unpaired.admissibility.gate.as_deref(), Some("run-mismatch"));
+    // T21: the message names the *reason*, not merely the gate.
+    let message = unpaired
+        .admissibility
+        .message
+        .as_deref()
+        .unwrap_or_default();
+    assert!(
+        message.contains("no matching rendered box on the page"),
+        "the refusal must name the reason: {message}"
+    );
+    assert!(message.contains("add a text annotation"), "{message}");
+}
 
 /// The picker's rect is in the same PDF-point space as annotations, so the overlay can
 /// reuse the geometry converter rather than inventing a second coordinate path.
