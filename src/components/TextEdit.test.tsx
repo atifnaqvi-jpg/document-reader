@@ -136,6 +136,8 @@ describe("P2.4 picker: runs are listed and a chosen run edits", () => {
     expect(call.oldWidth).toBe(120);
     expect(call.fontName).toBe("Helvetica");
     expect(call.fontSize).toBe(12);
+    // O-ST2-4: the toggle defaults on, so the backend is free to substitute.
+    expect(call.allowSubstitution).toBe(true);
     await screen.findByText(/a \(edited 1\)\.pdf/);
   });
 });
@@ -213,6 +215,99 @@ describe("P2.4 refusal: an overflow is refused with both measured widths", () =>
     expect(screen.getByLabelText(/Replace hello with/)).toBeDisabled();
     expect(screen.getByRole("button", { name: "Apply text edit" })).toBeDisabled();
     expect(mounted.backend.callsTo("edit_page_text")).toHaveLength(0);
+  });
+});
+
+describe("P2.4 Stage 2: font substitution is disclosed and toggleable", () => {
+  it("shows the substitution note verbatim and can dismiss it (T10)", async () => {
+    const run = makeRun();
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [run]);
+
+    const note = "edited with Helvetica substituting ABCDEF+FixtureSubset";
+    mounted.backend.on("edit_page_text", () => ({
+      path: "/books/a (edited 1).pdf",
+      inverse: { page: 0, opIndex: 7, operandPath: [1], oldBytes: [104], newBytes: [106] },
+      text: "jello",
+      substitution: "Helvetica",
+      note,
+    }));
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    await userEvent.click(within(list).getByRole("button", { name: /hello/ }));
+    const field = await screen.findByLabelText(/Replace hello with/);
+    await userEvent.clear(field);
+    await userEvent.type(field, "jello");
+    await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
+
+    // The disclosure is shown verbatim, so the user learns the typeface changed.
+    await screen.findByText(note);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss font substitution notice" }),
+    );
+    await waitFor(() => expect(screen.queryByText(note)).toBeNull());
+  });
+
+  it("sends allowSubstitution=false once the toggle is turned off (O-ST2-4)", async () => {
+    const run = makeRun();
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [run]);
+    mounted.backend.on("edit_page_text", () => ({
+      path: "/books/a (edited 1).pdf",
+      inverse: { page: 0, opIndex: 7, operandPath: [1], oldBytes: [104], newBytes: [106] },
+      text: "jello",
+      substitution: null,
+      note: null,
+    }));
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    await userEvent.click(within(list).getByRole("button", { name: /hello/ }));
+    const field = await screen.findByLabelText(/Replace hello with/);
+    await userEvent.clear(field);
+    await userEvent.type(field, "jello");
+
+    const toggle = screen.getByRole("checkbox", {
+      name: /Substitute a standard font/,
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    await userEvent.click(toggle);
+
+    await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
+
+    await waitFor(() => expect(mounted.backend.callsTo("edit_page_text")).toHaveLength(1));
+    expect(mounted.backend.callsTo("edit_page_text")[0]!.allowSubstitution).toBe(false);
+  });
+
+  it("surfaces a SUBSTITUTE_REFUSED refusal on the panel", async () => {
+    const run = makeRun();
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [run]);
+    mounted.backend.on("edit_page_text", () => {
+      throw {
+        code: "SUBSTITUTE_REFUSED",
+        message:
+          "this run's font does not contain the glyphs the replacement needs, and " +
+          "substitution is turned off; add a text annotation instead",
+      };
+    });
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    await userEvent.click(within(list).getByRole("button", { name: /hello/ }));
+    const field = await screen.findByLabelText(/Replace hello with/);
+    await userEvent.clear(field);
+    await userEvent.type(field, "jello");
+    await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/add a text annotation instead/);
+    // It belongs to the panel, not the pane: the pane does not duplicate it.
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 });
 

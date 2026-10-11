@@ -849,13 +849,25 @@ pub struct TextEditResult {
     pub inverse: crate::editor::textlocate::ContentOperation,
     /// The replacement as it was actually written (through the font's own encoding).
     pub text: String,
+    /// The standard-14 `/BaseFont` MECH-A substituted, when it fired (T10). `None` for an
+    /// edit that kept the run's own font.
+    pub substitution: Option<String>,
+    /// The disclosure sentence shown to the user when MECH-A fired (T10). Substitution is
+    /// never silent; when this is `Some`, the edit changed the document's typeface.
+    pub note: Option<String>,
 }
 
-/// Applies a Stage-1 in-place text edit and saves it to a **new** file (P2.4 T2/T3/T5/T6).
+/// Applies a Stage-2 in-place text edit and saves it to a **new** file
+/// (P2.4 T2/T3/T5/T6/T10/T11/T12/T13).
 ///
 /// The original is opened read-only and never a write target; the result goes through
 /// [`crate::editor::save::next_edited_path`] like every other save (D2), so a text edit
 /// cannot clobber the user's source document.
+///
+/// `allow_substitution` is the O-ST2-4 toggle. When it is false, a run whose font cannot
+/// set the replacement refuses (`SUBSTITUTE_REFUSED`) instead of being switched to a
+/// standard-14 font. It defaults to `true` at the UI, and is explicit on the wire so the
+/// backend never has to guess the user's intent.
 #[tauri::command]
 // The run's font name and size travel with the request so the width gate measures with
 // the same metrics the picker showed the user (T3d); folding them into a struct would
@@ -873,6 +885,7 @@ pub async fn edit_page_text(
     old_width: f32,
     font_name: String,
     font_size: f32,
+    allow_substitution: bool,
 ) -> Result<TextEditResult, AppError> {
     let path = document_path(&db, &document_id)?;
 
@@ -888,8 +901,11 @@ pub async fn edit_page_text(
     let target_page = page;
     let written = replacement.clone();
 
-    let (inverse, bytes) = tauri::async_runtime::spawn_blocking(move || {
-        // PDFium measures through the shared handle cache, read-only (T1/T3d).
+    let (outcome, bytes) = tauri::async_runtime::spawn_blocking(move || {
+        // PDFium measures through the shared handle cache, read-only (T1/T3d). Used only
+        // for the keep-original path: when MECH-A substitutes, the width gate measures the
+        // substitute's AFM metrics instead (T13), so PDFium is never asked about a font it
+        // does not have.
         let measure = |text: &str| -> Result<f32, AppError> {
             service.measure_text(
                 Path::new(&measure_path),
@@ -912,9 +928,11 @@ pub async fn edit_page_text(
             expected,
             replacement: written,
             old_width,
+            font_size,
+            allow_substitution,
             measure: &measure,
         };
-        let inverse = crate::editor::textedit::edit(&mut document, &request)?;
+        let outcome = crate::editor::textedit::edit(&mut document, &request)?;
 
         // Same serialisation discipline as every other lopdf write: renumber and compress
         // so the result is compact for a PDF reader (not a debugging aid).
@@ -924,7 +942,7 @@ pub async fn edit_page_text(
         document
             .save_to(&mut bytes)
             .map_err(|error| AppError::Other(format!("could not write PDF: {error}")))?;
-        Ok::<_, AppError>((inverse, bytes))
+        Ok::<_, AppError>((outcome, bytes))
     })
     .await
     .map_err(|error| AppError::Other(format!("text edit task failed: {error}")))??;
@@ -933,18 +951,24 @@ pub async fn edit_page_text(
         crate::editor::save::next_edited_path(Path::new(&path), |candidate| candidate.exists())?;
     crate::editor::save::write_atomically(&target, &bytes)?;
 
-    // T6: the edit invalidated derived state. The write went to a *new* path, so the
+    // T6 / R5: the edit invalidated derived state. The write went to a *new* path, so the
     // original's rasters and index are still correct; the copy is the document whose
     // derived state must be built, and it is imported through the ordinary library route
     // so it gets its own id, rasters and FTS5 rows exactly like a freshly opened file.
+    // The import re-extracts the page text and replaces the copy's stored rows with it,
+    // which is why a search must find the *new* text and not the pre-edit text: the FTS5
+    // rows come from a fresh PDFium extraction of the bytes just written, never from the
+    // old rows and never from the editor's own string.
     let edited_path = target.to_string_lossy().to_string();
     announce_change(app.clone(), document_id.clone());
     spawn_import_and_index(&app, edited_path.clone());
 
     Ok(TextEditResult {
         path: edited_path,
-        inverse,
+        inverse: outcome.inverse,
         text: replacement,
+        substitution: outcome.substitution,
+        note: outcome.note,
     })
 }
 

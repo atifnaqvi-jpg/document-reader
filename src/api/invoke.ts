@@ -287,6 +287,7 @@ export const editPageText = (
   oldWidth: number,
   fontName: string,
   fontSize: number,
+  allowSubstitution: boolean,
 ) =>
   invoke<TextEditResult>("edit_page_text", {
     documentId,
@@ -297,6 +298,9 @@ export const editPageText = (
     oldWidth,
     fontName,
     fontSize,
+    // O-ST2-4: the toggle travels explicitly so the backend never guesses the user's
+    // intent; the UI defaults it on.
+    allowSubstitution,
   });
 
 /**

@@ -75,6 +75,10 @@ export const TEXT_EDIT_ERROR_CODES = [
   "TEXT_RUN_NOT_EDITABLE",
   "TEXT_RUN_MISMATCH",
   "CONTENT_TOO_LARGE",
+  // Stage 2 (T3/R4): a replacement no available font can set, or one refused because the
+  // user turned substitution off. Both belong on the panel, next to the run they concern.
+  "GLYPHS_NOT_COVERABLE",
+  "SUBSTITUTE_REFUSED",
 ];
 
 /**
@@ -154,6 +158,10 @@ export function TextEditPanel({
     runsLoading,
     selectedRun,
     selectRun,
+    substitution,
+    clearSubstitution,
+    allowSubstitution,
+    setAllowSubstitution,
   } = useEditor();
   const [replacement, setReplacement] = useState("");
   const [savedPath, setSavedPath] = useState<string | null>(null);
@@ -168,9 +176,10 @@ export function TextEditPanel({
   const apply = useCallback(async () => {
     if (!selectedRun) return;
     setSavedPath(null);
+    clearSubstitution();
     const path = await editText(page, selectedRun, replacement);
     if (path) setSavedPath(path);
-  }, [editText, page, selectedRun, replacement]);
+  }, [editText, page, selectedRun, replacement, clearSubstitution]);
 
   // A protected document refuses every edit (P2.4 T7), so the picker is not offered at
   // all: turning it on would promise an edit the backend will always reject.
@@ -278,6 +287,14 @@ export function TextEditPanel({
               >
                 Apply text edit
               </button>
+              <label className="textedit-substitute-toggle">
+                <input
+                  type="checkbox"
+                  checked={allowSubstitution}
+                  onChange={(event) => setAllowSubstitution(event.target.checked)}
+                />
+                Substitute a standard font when this run&rsquo;s font cannot set the text
+              </label>
               <p className="muted">Writes a new file. The original is never changed.</p>
             </div>
           ) : null}
@@ -288,6 +305,21 @@ export function TextEditPanel({
         <p className="editor-saved" role="status">
           Saved to <span className="path">{savedPath}</span>
         </p>
+      ) : null}
+
+      {/* T10: the typeface changed, so say so. The backend's disclosure sentence is shown
+          verbatim — a toast that paraphrased it could hide which font the run now uses. */}
+      {substitution ? (
+        <div className="textedit-substitution" role="status">
+          <span>{substitution.message}</span>
+          <button
+            type="button"
+            aria-label="Dismiss font substitution notice"
+            onClick={clearSubstitution}
+          >
+            Dismiss
+          </button>
+        </div>
       ) : null}
 
       {/* The refusal quotes the backend's message verbatim: it names the violated gate and,

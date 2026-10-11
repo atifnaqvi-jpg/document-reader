@@ -250,6 +250,10 @@ export interface TextEditResult {
   path: string;
   inverse: ContentOperation;
   text: string;
+  /** The standard-14 `/BaseFont` MECH-A substituted, when it fired (T10). */
+  substitution?: string | null;
+  /** The disclosure sentence shown when MECH-A fired (T10). `null`/absent otherwise. */
+  note?: string | null;
 }
 
 export interface DecryptOutcome {

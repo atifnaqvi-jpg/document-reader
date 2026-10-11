@@ -91,6 +91,20 @@ interface EditorContextValue {
     run: PageTextRun,
     replacement: string,
   ) => Promise<string | null>;
+  /**
+   * The substitution disclosure from the most recent successful edit (T10), or `null`.
+   * Set when MECH-A switched the run's font; the panel surfaces it as a toast so a
+   * changed typeface is never silent.
+   */
+  substitution: SubstitutionNote | null;
+  /** Clears the substitution toast after the user has acknowledged it. */
+  clearSubstitution: () => void;
+  /**
+   * The O-ST2-4 toggle. When off, a run whose font cannot set the replacement refuses
+   * (`SUBSTITUTE_REFUSED`) instead of being switched to a standard-14 font. Defaults on.
+   */
+  allowSubstitution: boolean;
+  setAllowSubstitution: (on: boolean) => void;
   /** Decrypts a protected document to a new copy (P2.4/T8). */
   decryptCopyToFile: (password: string) => Promise<DecryptOutcome | null>;
   /**
@@ -111,6 +125,17 @@ interface EditorContextValue {
 }
 
 const EditorContext = createContext<EditorContextValue | null>(null);
+
+/**
+ * The disclosure produced when MECH-A swapped a run's font (T10). Held as data rather
+ * than only a string so the panel can render the substitute and the original distinctly.
+ */
+export interface SubstitutionNote {
+  /** The standard-14 `/BaseFont` the run was switched to. */
+  baseFont: string;
+  /** The backend's disclosure sentence, shown verbatim. */
+  message: string;
+}
 
 /** Style key per tool (D10), matching the `annotation.style.<tool>` scheme. */
 export const styleKey = (tool: AnnotationKind) => `annotation.style.${tool}`;
@@ -165,6 +190,9 @@ export function EditorProvider({
   const [runsLoading, setRunsLoading] = useState(false);
   const [textEditMode, setTextEditMode] = useState(false);
   const [selectedRun, setSelectedRun] = useState<PageTextRun | null>(null);
+  // Stage 2: the O-ST2-4 toggle (default on) and the T10 disclosure from the last edit.
+  const [allowSubstitution, setAllowSubstitution] = useState(true);
+  const [substitution, setSubstitution] = useState<SubstitutionNote | null>(null);
 
   // Per-document stacks (D7). Kept in one map keyed by document rather than one stack
   // reset on switch, so moving between documents does not destroy either one's history.
@@ -432,6 +460,14 @@ export function EditorProvider({
           run.width ?? 0,
           run.fontName,
           run.fontSize,
+          allowSubstitution,
+        );
+        // T10: a substitution is never silent. Carry the backend's disclosure into the
+        // toast, and clear it again on any edit that keeps the original font.
+        setSubstitution(
+          result.substitution
+            ? { baseFont: result.substitution, message: result.note ?? "" }
+            : null,
         );
         // T5: the inverse is a ContentOperation, so undo re-applies the previous bytes to
         // the file this edit wrote. Redo replays the edit on *that* file, so each entry
@@ -453,6 +489,7 @@ export function EditorProvider({
               run.width ?? 0,
               run.fontName,
               run.fontSize,
+              allowSubstitution,
             ).then((again) => again.path);
           },
         });
@@ -462,8 +499,10 @@ export function EditorProvider({
         return null;
       }
     },
-    [documentId, docKey, push],
+    [documentId, docKey, push, allowSubstitution],
   );
+
+  const clearSubstitution = useCallback(() => setSubstitution(null), []);
 
   const decryptCopyToFile = useCallback(
     async (password: string): Promise<DecryptOutcome | null> => {
@@ -542,6 +581,10 @@ export function EditorProvider({
       remove,
       updateText,
       editText,
+      substitution,
+      clearSubstitution,
+      allowSubstitution,
+      setAllowSubstitution,
       decryptCopyToFile,
       pageRuns,
       runsLoading,
@@ -567,6 +610,9 @@ export function EditorProvider({
       remove,
       updateText,
       editText,
+      substitution,
+      clearSubstitution,
+      allowSubstitution,
       decryptCopyToFile,
       pageRuns,
       runsLoading,
