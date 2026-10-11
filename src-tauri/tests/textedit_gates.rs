@@ -12,12 +12,27 @@
 //! | happy path | `simple-winansi.pdf` | `simple_winansi_edits_and_saves_a_new_file` |
 //! | (a) simple font | `cid-identity.pdf` | `cid_identity_is_refused_by_gate_a` |
 //! | (b) round-trip | `roundtrip-fail.pdf` | `roundtrip_fail_is_refused_by_gate_b` |
-//! | (c) not subset | `simple-embedded-subset.pdf` | `subset_font_is_refused_by_gate_c` |
 //! | (d) width | `too-wide.pdf` | `too_wide_is_refused_by_gate_d_with_both_widths` |
 //! | (e) / F3 cap | `bomb.pdf` | `bomb_is_refused_as_content_too_large` |
 //! | F2 collapse | `multi-stream-page.pdf` | `a_multi_stream_page_edits_and_stays_renderable` |
 //! | T7 read-only | `encrypted-aes.pdf` | `encrypted_documents_refuse_every_edit` |
 //! | T8 decrypt copy | `encrypted-aes.pdf` | `decrypt_copy_writes_an_unprotected_file` |
+//!
+//! Stage 2 (§3 turns `font-subset` into MECH-A substitution, T10–T13):
+//!
+//! | Invariant | Fixture | Test |
+//! |-----------|---------|------|
+//! | T11 keep-original | `subset-winansi.pdf` | `subset_winansi_keeps_the_original_font_when_it_covers` |
+//! | MECH-A fires | `subset-winansi-escape.pdf` | `subset_winansi_escape_substitutes_when_the_glyph_is_missing` |
+//! | MECH-A + gate d | `subset-wider-after-substitute.pdf` | `wider_after_substitute_refuses_with_substitute_metrics` |
+//! | T13 substitute metrics | `subset-winansi-escape.pdf` | `subset_font_is_substituted_by_stage_two` |
+//! | O-ST2-4 off | `subset-winansi-escape.pdf` | `subset_font_is_refused_when_substitution_is_off` |
+//! | GLYPHS_NOT_COVERABLE | `non-winansi-replacement.pdf` | `non_winansi_replacement_is_not_coverable` |
+//! | O-ST2-6 style-match | `style-match-cases.pdf` | `style_match_cases_map_to_the_documented_fonts` |
+//! | R5/T16 re-index | `subset-winansi-escape.pdf` | `a_substitution_edit_re_indexes_the_copy_so_search_finds_the_new_text` |
+//!
+//! (The Stage-1 `simple-embedded-subset.pdf` gate-(c) refusal became
+//! `subset_font_is_substituted_by_stage_two` once §3 replaced that gate with MECH-A.)
 
 use std::path::{Path, PathBuf};
 
