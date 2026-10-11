@@ -1,7 +1,8 @@
 # Document Reader — UX Specification (v1.0)
 
-> **Status:** DERIVED — reverse-documented from the implementation at `0.3.0`
-> (`p2-windows-test`, `1560b09`). Authoritative for the surfaces it describes; it
+> **Status:** DERIVED — reverse-documented from the implementation; re-verified against the
+> working tree at **0.4.0** (`p2-windows-test`, `21b03de`, Stage 2 included) by the review in
+> `.openhands/memory/2026-10-10.md`. Authoritative for the surfaces it describes; it
 > describes what **ships**, not what was hoped for.
 > **Feeds the design pipeline:** every requirement carries a stable `UX-###` id, a
 > surface, its states, and acceptance criteria, so a `docs/P<n>-DESIGN.md` can cite a
@@ -421,10 +422,15 @@ Unifying them under `tokens.css` is a mechanical cleanup, not a behaviour change
 
 ## 11. Requirement index (pipeline feed)
 
+> **Mark convention:** `unit` names the acceptance *type* (assertable in the jsdom/unit
+> harness), **not** coverage status — only the test files under `src/` prove coverage today;
+> where a requirement is actually covered, the citing test is named inline. `manual` (10),
+> `deferred` (4), `debt` (2) are statuses.
+
 | Id | Requirement | Surface | Acceptance |
 |----|-------------|---------|------------|
 | UX-201 | Native open dialog, pdf/txt/md, busy label | Toolbar | *manual* |
-| UX-202 | Open starts at page 1; pending jump dropped | Viewer | unit (`App.tsx` open flow) |
+| UX-202 | Open starts at page 1; pending jump dropped | Viewer | *manual* (App-level open flow; no `App.test` yet — candidate `debt`) |
 | UX-204 | Arrow/PageUp/Down/Home/End navigate | Viewer | unit |
 | UX-205 | Reserved page size, no layout jump | Viewer | *manual* (jsdom has no layout) |
 | UX-206 | Zoomed page scrolls, never shrinks | Canvas | *manual* (P1.9.1 regression) |
