@@ -514,6 +514,21 @@ impl PdfProvider {
         })
     }
 
+    /// PDFium's whole-page character grid, the span oracle (P2.4.3 T23a).
+    ///
+    /// Same read-only discipline as [`Self::page_runs`]: routed through the shared handle
+    /// cache, no mutation, no save.
+    pub fn char_grid(
+        handles: &DocumentHandles,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+    ) -> Result<crate::editor::runmetrics::PdfiumCharGrid, AppError> {
+        handles.with_document(path, content_hash, |document| {
+            crate::editor::runmetrics::char_grid(document, page, path)
+        })
+    }
+
     /// Measures a candidate replacement string through PDFium's own text metrics (T3d).
     ///
     /// Read-only: the text object built to measure is never inserted into the document and

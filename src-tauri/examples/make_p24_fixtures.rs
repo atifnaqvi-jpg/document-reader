@@ -109,6 +109,11 @@ fn main() {
             "wider-replacement-orphan.pdf",
             testpdf::bytes(&testpdf::wider_replacement_orphan()),
         ),
+        // P2.4.3 §3: a font with no in-file metrics, measured from the char grid (T23a).
+        (
+            "unmeasurable-font.pdf",
+            testpdf::bytes(&testpdf::unmeasurable_font_page()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

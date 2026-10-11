@@ -21,6 +21,7 @@
 
 use lopdf::Document;
 
+use crate::editor::runmetrics::{CharSpan, PdfiumCharGrid};
 use crate::editor::textlocate::{
     self, is_cid_font, is_simple_font, page_id, ContentOperation, FontInfo, RawRun, RunId,
 };
@@ -389,15 +390,74 @@ fn gap_tolerance(font_size: f32, space_at_boundary: bool) -> f32 {
 struct Pair {
     rect: usize,
     confidence: PairConfidence,
+    /// The run's own text as found in PDFium's **character grid**, and the span its characters
+    /// occupy (P2.4.3 T23a). `None` when the text could not be located on the paired baseline —
+    /// the walk is then unavailable and the quota falls through to the font metrics (T23d).
+    ///
+    /// This is the measurement the P2.4.3 field report needed: it works for a font whose program
+    /// carries no readable metrics, because it is read from the *rendered* page.
+    span: Option<CharSpan>,
 }
 
-/// Matches one lopdf run to a PDFium box by **geometry** (P2.4.1 T17).
+/// The tolerance with which a grid character's pen origin may precede the run's text-space
+/// origin and still be taken as that run's first character (P2.4.3 T23a).
+///
+/// Deliberately far tighter than [`origin_tolerance`], which exists to absorb a *box's* ink
+/// offset. Here the two numbers are the same quantity measured twice — the text-space origin
+/// lopdf computes from `Tm` and the pen origin PDFium reports — so only float rounding
+/// separates them. Loosening this to the pairing tolerance would let a narrow glyph re-anchor
+/// its neighbour's character as its own (an `l` advances only 2.66pt at 12pt, while the pairing
+/// tolerance is 3pt), which reads as a large *overlap* at the seam and breaks a chain that is
+/// genuinely whole. When the two origins disagree by more than this, the walk simply finds
+/// nothing and the span falls back to the font metrics — the safe direction.
+const ANCHOR_TOLERANCE: f32 = 0.1;
+
+/// The baseline band a run's characters must sit in to count as that run's (P2.4.3 T23a).
+///
+/// Centred on the paired box's baseline and widened by the same font-size-relative tolerance
+/// pairing uses, so the walk stays on one line: half a point would be too tight for a large
+/// face and too loose for a small one, exactly as [`origin_tolerance`] argues for pairing.
+fn grid_band(rect: &crate::editor::runmetrics::PdfiumRun, font_size: f32) -> (f32, f32) {
+    let tol = origin_tolerance(font_size);
+    (rect.y0 - tol, rect.y0 + tol)
+}
+
+/// Finds a run's text in PDFium's character grid, anchored at the run's own text-space origin
+/// on the paired box's baseline (P2.4.3 T23a).
+///
+/// The anchor is what keeps a repeated word from measuring the *other* occurrence: the walk
+/// starts at the first grid character at or after the run's origin, and every matched character
+/// must also lie inside the paired box's x-window and the baseline band. Both anchors are
+/// needed — the box window alone cannot separate `l` from the `l` beside it in one word, and the
+/// origin alone cannot tell a run's line from the one above it.
+fn locate_span(
+    run: &RawRun,
+    rect: &crate::editor::runmetrics::PdfiumRun,
+    grid: &PdfiumCharGrid,
+) -> Option<CharSpan> {
+    let band = grid_band(rect, run.font_size);
+    let window_left = rect.x0 - origin_tolerance(run.font_size);
+    let anchor = window_left.max(run.origin.0 - ANCHOR_TOLERANCE);
+    let from = grid
+        .chars
+        .iter()
+        .position(|ch| (band.0..=band.1).contains(&ch.origin_y) && ch.origin_x >= anchor)
+        .unwrap_or(0);
+    grid.locate(&run.text, from, band, window_left)
+}
+
+/// Matches one lopdf run to a PDFium box by **geometry** (P2.4.1 T17), and walks its text in
+/// the character grid for its own measured span (P2.4.3 T23a).
 ///
 /// Text equality is demoted to a tiebreaker (P2.4.1 T17): the two libraries segment text
 /// differently — PDFium joins a per-glyph `TJ` array into one run, lopdf splits it into one
 /// run per operand — so matching on the reconstructed string fails for exactly the documents
 /// this hotfix exists for. Position on the page does not care how either side split the line.
-fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Option<Pair> {
+fn pair_run(
+    run: &RawRun,
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+    grid: &PdfiumCharGrid,
+) -> Option<Pair> {
     let tol = origin_tolerance(run.font_size);
 
     let mut best: Option<Pair> = None;
@@ -428,6 +488,7 @@ fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Opt
                 } else {
                     PairConfidence::Weak
                 },
+                span: locate_span(run, rect, grid),
             });
         }
     }
@@ -456,6 +517,9 @@ fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Opt
         .map(|(_, rect, _)| Pair {
             rect,
             confidence: PairConfidence::Weak,
+            span: rects
+                .get(rect)
+                .and_then(|box_| locate_span(run, box_, grid)),
         })
 }
 
@@ -484,7 +548,32 @@ fn space_at_boundary(
         .is_some_and(|rect| rect.text.contains(' '))
 }
 
-/// Whether two consecutive fragments may be merged into one run (P2.4.1 T19 / P2.4.2).
+/// The gap between two consecutive fragments in points, measured the most exact way available
+/// (P2.4.3 T23b).
+///
+/// * **Char-grid** — when both fragments were located in PDFium's character grid on this page,
+///   the gap is `next.x0 − head.x1`, read off the rendered page. This is exact for *every* font
+///   class, including the PowerPoint subsets whose program carries no metrics, and it replaces
+///   the approximation wherever it is available.
+/// * **In-file metrics** — otherwise the head's own exact advance (`advance_exact`, P2.4.2
+///   Phase A) when the font has one.
+/// * **Approximation** — last resort, exactly as P2.4.2 left it.
+fn measured_gap(
+    head: &RawRun,
+    next: &RawRun,
+    head_span: Option<CharSpan>,
+    next_span: Option<CharSpan>,
+) -> f32 {
+    match (head_span, next_span) {
+        (Some(head_span), Some(next_span)) => next_span.x0 - head_span.x1,
+        _ => {
+            let advance = head.advance_exact.unwrap_or(head.advance);
+            next.origin.0 - (head.origin.0 + advance)
+        }
+    }
+}
+
+/// Whether two consecutive fragments may be merged into one run (P2.4.1 T19 / P2.4.2 / P2.4.3).
 ///
 /// All conditions are required: same font, a size that agrees within the *relative* tolerance
 /// ([`sizes_match`]), the same baseline (0.5pt), and a horizontal gap that is
@@ -494,17 +583,23 @@ fn space_at_boundary(
 /// * no more overlapping than `-0.05em` ([`MERGE_OVERLAP_EM`]) — a larger overlap is a
 ///   mis-measure, and joining across it would let two fragments' bytes collide.
 ///
-/// The gap is measured from the fragments' own **exact in-file advances** (`advance_exact`,
-/// P2.4.2 Phase A) when both have them, falling back to the approximation only when a font
-/// offers no metric at all. That is the chain-break fix: the 0.4.1 approximation inflated the
-/// head's advance and pushed the seam negative.
-fn mergeable(head: &RawRun, next: &RawRun, space: bool) -> bool {
+/// The gap itself comes from [`measured_gap`]: char-grid first (P2.4.3 T23b), then the exact
+/// in-file advance, then the approximation. This is the chain-break fix in both senses: the
+/// 0.4.1 approximation inflated the head's advance and pushed the seam negative, and the
+/// approximation was the *only* source for a font with no metrics — which is why the Maastricht
+/// line could not remerge even after P2.4.2.
+fn mergeable(
+    head: &RawRun,
+    next: &RawRun,
+    space: bool,
+    head_span: Option<CharSpan>,
+    next_span: Option<CharSpan>,
+) -> bool {
     head.font_key == next.font_key
         && sizes_match(head.font_size, next.font_size)
         && (head.origin.1 - next.origin.1).abs() <= BASELINE_TOLERANCE
         && {
-            let advance = head.advance_exact.unwrap_or(head.advance);
-            let gap = next.origin.0 - (head.origin.0 + advance);
+            let gap = measured_gap(head, next, head_span, next_span);
             gap <= gap_tolerance(head.font_size, space) && gap >= -MERGE_OVERLAP_EM * head.font_size
         }
 }
@@ -546,7 +641,16 @@ fn group_runs(
                 // O-Chain-2: the widened gap is allowed only when PDFium's reconstructed text
                 // has a real space at this seam. A space can only hide inside a *shared* box.
                 let space = space_at_boundary(index + len - 1, index + len, pairs, rects);
-                if !mergeable(&runs[index + len - 1], &runs[index + len], space) {
+                // P2.4.3 T23b: the gap is char-grid measured when both spans are available.
+                let head_span = pairs[index + len - 1].and_then(|pair| pair.span);
+                let next_span = next.and_then(|pair| pair.span);
+                if !mergeable(
+                    &runs[index + len - 1],
+                    &runs[index + len],
+                    space,
+                    head_span,
+                    next_span,
+                ) {
                     break;
                 }
                 len += 1;
@@ -572,16 +676,36 @@ fn measured_span(document: &Document, page: u32, run: &RawRun) -> Option<f32> {
 }
 
 /// The group's own measured span in points, or `None` when no fragment's span is measurable
-/// (P2.4.2 T22).
+/// (P2.4.2 T22 / P2.4.3 T23a).
 ///
 /// A group is a set of fragments laid end to end, so its span is the sum of their spans (their
 /// own advances, not the box they happen to share) — for the ordinary single-fragment case this
-/// is just that fragment's span. `None` when the group has non-empty text none of which is
-/// measurable (a font with no in-file metrics), so the caller refuses rather than reaching for
-/// the box.
-fn group_span(document: &Document, page: u32, runs: &[RawRun], group: &RunGroup) -> Option<f32> {
-    let mut span = 0.0_f32;
-    let mut measurable = false;
+/// is just that fragment's span.
+///
+/// **Char-grid first** (P2.4.3 T23a): each fragment's span is the union of its own characters'
+/// advance boxes, read off the rendered page. That sum is measured for every font class,
+/// including the embedded subsets whose program carries no metrics — which is the Maastricht
+/// case that previously had no measurable span at all. Only when some non-empty fragment could
+/// not be located in the grid do the per-fragment **in-file** metrics take over, and only when a
+/// fragment has neither does the group report no span, exactly as P2.4.2 did (T23d).
+///
+/// The union of the group's *box* is never used: a box may be a whole line the group only
+/// occupies part of, which is the 0.4.1 hole.
+fn group_span(
+    document: &Document,
+    page: u32,
+    runs: &[RawRun],
+    pairs: &[Option<Pair>],
+    group: &RunGroup,
+) -> Option<f32> {
+    let mut grid_span = 0.0_f32;
+    let mut grid_measurable = false;
+    let mut grid_complete = true;
+
+    let mut metric_span = 0.0_f32;
+    let mut metric_complete = true;
+    let mut metric_measurable = false;
+
     for offset in 0..group.len {
         let run = &runs[group.first + offset];
         // An emptied tail fragment (a cleared operand) contributes nothing and needs no metric;
@@ -589,14 +713,34 @@ fn group_span(document: &Document, page: u32, runs: &[RawRun], group: &RunGroup)
         if run.text.is_empty() {
             continue;
         }
-        span += measured_span(document, page, run)?;
-        measurable = true;
+        match pairs[group.first + offset].and_then(|pair| pair.span) {
+            Some(span) => {
+                grid_span += span.width();
+                grid_measurable = true;
+            }
+            None => grid_complete = false,
+        }
+
+        // The in-file metric is only needed in the fallback, but is cheap and is also what the
+        // suspicion test compares against, so it is resolved for every non-empty fragment. A
+        // single fragment with no metric makes the *sum* unusable, so the flag is only ever
+        // cleared, never re-set by a later fragment (which would leave a partial sum).
+        match measured_span(document, page, run) {
+            Some(width) => {
+                metric_span += width;
+                metric_measurable = true;
+            }
+            None => metric_complete = false,
+        }
     }
-    if measurable {
-        Some(span)
-    } else {
-        None
+
+    if grid_measurable && grid_complete {
+        return Some(grid_span);
     }
+    if metric_measurable && metric_complete {
+        return Some(metric_span);
+    }
+    None
 }
 
 /// The union of a group's rendered boxes.
@@ -668,15 +812,17 @@ fn describe_group(
         None => head.admissibility.clone(),
     };
 
-    // P2.4.2 T22: the width quota is the group's own measured span, never the union box's width.
-    // A strong pair may supply the box, but only when box ≈ span (the ordinary merged run). A
-    // line-sized box is *box-suspicious*: flagged weak, and its quota is its own span — so a
-    // replacement too wide for the run refuses quoting that span, not the line. When nothing is
-    // measurable the run refuses rather than trusting a possibly line-sized box (safe direction).
-    let span = group_span(document, page, runs, group);
+    // P2.4.2 T22 / P2.4.3 T23c: the width quota walks a preference order — the char-grid span,
+    // then the font-metric span, then the box for a strong pair whose box is ≈ the span it
+    // measures (the ordinary merged run), then refusal. Nothing is weakened: a box is only ever
+    // trusted when it agrees with a real span, so a box that may be a whole line never supplies
+    // the number the gate compares against. A measurably line-sized box is *box-suspicious*:
+    // flagged weak, its quota its own span, so a replacement too wide for the run refuses quoting
+    // that span rather than the line.
+    let span = group_span(document, page, runs, pairs, group);
     let box_width = rect.map(crate::editor::geometry::PdfRect::width);
-    let group_strong =
-        pairs[group.first].is_some_and(|pair| pair.confidence == PairConfidence::Strong);
+    let head_pair = pairs[group.first];
+    let group_strong = head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong);
     let (width, box_suspicious) = match resolve_quota(span, box_width, group_strong) {
         Quota::Box(box_width) => (Some(box_width), false),
         Quota::Span { width, suspicious } => (Some(width), suspicious),
@@ -730,7 +876,8 @@ fn describe_group(
 }
 
 /// Builds the picker's run list for a page, pairing lopdf addresses with PDFium geometry
-/// **by position** (P2.4.1 T17).
+/// **by position** (P2.4.1 T17) and walking each run in PDFium's character grid for its own
+/// measured span (P2.4.3 T23a).
 ///
 /// The 0.4.0 defect was pairing by decoded-text equality: Word/PowerPoint emit a `Tj` per
 /// kerning group or a `TJ` per glyph, so a lopdf "run" is a fragment while a PDFium run is a
@@ -745,6 +892,7 @@ pub fn describe_runs(
     document: &Document,
     page: u32,
     pdfium_runs: &[crate::editor::runmetrics::PdfiumRun],
+    grid: &crate::editor::runmetrics::PdfiumCharGrid,
 ) -> Result<Vec<PageTextRun>, AppError> {
     let page_id = page_id(document, page)?;
     let runs = textlocate::locate_runs(document, page_id)?;
@@ -752,7 +900,10 @@ pub fn describe_runs(
     // Pair every run independently: several lopdf fragments may legitimately sit inside one
     // PDFium box, which is precisely the fragmentation this phase exists for. Nothing is
     // consumed, so a shared box is not a conflict.
-    let pairs: Vec<Option<Pair>> = runs.iter().map(|run| pair_run(run, pdfium_runs)).collect();
+    let pairs: Vec<Option<Pair>> = runs
+        .iter()
+        .map(|run| pair_run(run, pdfium_runs, grid))
+        .collect();
 
     let mut described = Vec::new();
     for group in group_runs(&runs, &pairs, pdfium_runs) {
@@ -868,7 +1019,7 @@ fn group_box_suspicious(
     rects: &[crate::editor::runmetrics::PdfiumRun],
     group: &RunGroup,
 ) -> bool {
-    let span = group_span(document, page, runs, group);
+    let span = group_span(document, page, runs, pairs, group);
     let box_width = union_rect(group, pairs, rects).map(crate::editor::geometry::PdfRect::width);
     let strong = pairs[group.first].is_some_and(|pair| pair.confidence == PairConfidence::Strong);
     matches!(
@@ -881,7 +1032,7 @@ fn group_box_suspicious(
 }
 
 /// Resolves the width-gate old width — the run's own span, never an inherited box width
-/// (P2.4.2 T22).
+/// (P2.4.2 T22). The span itself is now the char-grid measurement where available (T23a).
 ///
 /// * A strong pair whose box is no wider than `span × BOX_SPAN_SLACK` supplies the box width:
 ///   box ≈ span, so the box is the run's own ink.
@@ -1265,7 +1416,7 @@ mod tests {
         // "He" then "llo", the second starting exactly where the first ends.
         let head = test_run("He", 72.0, 12.0, "F1");
         let next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
-        assert!(mergeable(&head, &next, false));
+        assert!(mergeable(&head, &next, false, None, None));
     }
 
     #[test]
@@ -1274,10 +1425,10 @@ mod tests {
         // Same position and size, different font: the merged run could not be encoded with
         // one font (T19).
         let other_font = test_run("CD", 72.0 + head.advance, 12.0, "F2");
-        assert!(!mergeable(&head, &other_font, false));
+        assert!(!mergeable(&head, &other_font, false, None, None));
         // Same font and position, different size: a heading is not a body word.
         let other_size = test_run("CD", 72.0 + head.advance, 10.0, "F1");
-        assert!(!mergeable(&head, &other_size, false));
+        assert!(!mergeable(&head, &other_size, false, None, None));
     }
 
     #[test]
@@ -1285,7 +1436,7 @@ mod tests {
         let head = test_run("AB", 72.0, 12.0, "F1");
         let mut next = test_run("CD", 72.0 + head.advance, 12.0, "F1");
         next.origin.1 = head.origin.1 + 12.0; // next line
-        assert!(!mergeable(&head, &next, false));
+        assert!(!mergeable(&head, &next, false, None, None));
     }
 
     #[test]
@@ -1296,12 +1447,12 @@ mod tests {
         let body_head = test_run("foo", 72.0, 9.0, "F1");
         let body_next = test_run("bar", 72.0 + body_head.advance + 3.0, 9.0, "F1");
         // 3pt gap vs tolerance 0.25*9 = 2.25pt: too far, the words stay separate.
-        assert!(!mergeable(&body_head, &body_next, false));
+        assert!(!mergeable(&body_head, &body_next, false, None, None));
 
         let head_head = test_run("Fo", 72.0, 24.0, "F1");
         let head_next = test_run("o", 72.0 + head_head.advance + 3.0, 24.0, "F1");
         // 3pt gap vs tolerance 0.25*24 = 6pt: fine, the heading's glyphs merge.
-        assert!(mergeable(&head_head, &head_next, false));
+        assert!(mergeable(&head_head, &head_next, false, None, None));
     }
 
     /// P2.4.2 O-Chain-2: the widened `0.5em` gap applies **only** when PDFium's reconstructed
@@ -1312,11 +1463,11 @@ mod tests {
         let head = test_run("foo", 72.0, 12.0, "F1");
         let next = test_run("bar", 72.0 + head.advance + 4.0, 12.0, "F1");
         assert!(
-            !mergeable(&head, &next, false),
+            !mergeable(&head, &next, false, None, None),
             "no space at the seam, so the quarter-em bound still applies"
         );
         assert!(
-            mergeable(&head, &next, true),
+            mergeable(&head, &next, true, None, None),
             "PDFium shows a space there, so the seam is one word-space apart"
         );
     }
@@ -1342,10 +1493,10 @@ mod tests {
         let head = test_run("AB", 72.0, 12.0, "F1");
         // Inside the 0.05em (0.6pt) overlap: still one chain.
         let touching = test_run("CD", 72.0 + head.advance - 0.3, 12.0, "F1");
-        assert!(mergeable(&head, &touching, false));
+        assert!(mergeable(&head, &touching, false, None, None));
         // Past it: the head's advance overshot, so do not join.
         let overlapping = test_run("CD", 72.0 + head.advance - 2.0, 12.0, "F1");
-        assert!(!mergeable(&head, &overlapping, false));
+        assert!(!mergeable(&head, &overlapping, false, None, None));
     }
 
     #[test]
@@ -1367,7 +1518,11 @@ mod tests {
         // can (the next case).
         let run = test_run("He", 72.0, 12.0, "F1");
         let rects = vec![box_at("other", 72.0), box_at("He", 72.0)];
-        let pair = pair_run(&run, &rects).expect("a containing box pairs");
+        let grid = crate::editor::runmetrics::PdfiumCharGrid {
+            text: String::new(),
+            chars: Vec::new(),
+        };
+        let pair = pair_run(&run, &rects, &grid).expect("a containing box pairs");
         assert_eq!(pair.rect, 1, "exact text breaks the tie");
 
         // Geometry first: a box whose baseline is nearer wins even though its text differs,
@@ -1376,7 +1531,7 @@ mod tests {
         exact_but_far.y0 = 700.2;
         exact_but_far.y1 = 712.2;
         let rects = vec![exact_but_far, box_at("other", 72.0)];
-        let pair = pair_run(&run, &rects).expect("a containing box pairs");
+        let pair = pair_run(&run, &rects, &grid).expect("a containing box pairs");
         assert_eq!(
             pair.rect, 1,
             "the nearer baseline wins even though its text differs"
@@ -1422,6 +1577,7 @@ mod tests {
             Some(Pair {
                 rect,
                 confidence: PairConfidence::Strong,
+                span: None,
             })
         };
         let boxes = group_boxes(&document, &runs);
@@ -1444,6 +1600,7 @@ mod tests {
         let weak = Some(Pair {
             rect: 0,
             confidence: PairConfidence::Weak,
+            span: None,
         });
         let boxes = group_boxes(&document, &runs);
         let groups = group_runs(&runs, &[weak, weak, None], &boxes);
@@ -1466,6 +1623,7 @@ mod tests {
             Some(Pair {
                 rect,
                 confidence: PairConfidence::Strong,
+                span: None,
             })
         };
         let pairs = [strong(0), strong(0)];
@@ -1496,6 +1654,40 @@ mod tests {
             &line_sized,
             &group
         ));
+    }
+
+    /// P2.4.3 T23b: the gap between two fragments is read from PDFium's character grid when
+    /// both spans are available — exact for every font class, including one with no metrics.
+    #[test]
+    fn the_gap_is_the_char_grid_span_when_both_spans_are_available() {
+        use crate::editor::runmetrics::CharSpan;
+        let head = test_run("DataSci", 72.0, 12.0, "F1");
+        // Placed so the *approximation* would call this a wide gap: the head measures 42pt
+        // (0.5em/glyph) where its rendered span is 50.4pt.
+        let next = test_run("ence", 122.4, 12.0, "F1");
+        let head_span = CharSpan {
+            first: 0,
+            last: 6,
+            x0: 72.0,
+            x1: 72.0 + 50.4,
+        };
+        let next_span = CharSpan {
+            first: 7,
+            last: 10,
+            x0: 122.4,
+            x1: 122.4 + 24.0,
+        };
+        // Char-grid: gap = 0, the chain is whole.
+        assert!(
+            mergeable(&head, &next, false, Some(head_span), Some(next_span)),
+            "the rendered seam is a zero gap"
+        );
+        // Without the grid the approximation inflates the head and breaks the chain — the
+        // exact 0.4.2 field failure this test pins the cure for.
+        assert!(
+            !mergeable(&head, &next, false, None, None),
+            "the approximation breaks the same seam"
+        );
     }
 
     #[test]

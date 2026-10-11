@@ -78,6 +78,16 @@ fn pdfium_runs(path: &Path, page: u32) -> Vec<PdfiumRun> {
     runmetrics::extract_runs(path, page, None).expect("PDFium run extraction failed")
 }
 
+/// PDFium's whole-page character grid, the span oracle (P2.4.3 T23a), read the same way the
+/// command does: through a handle cache, read-only.
+fn char_grid(path: &Path, page: u32) -> runmetrics::PdfiumCharGrid {
+    document_reader_lib::provider::DocumentHandles::new()
+        .with_document(path, None, |document| {
+            runmetrics::char_grid(document, page, path)
+        })
+        .expect("PDFium char grid extraction failed")
+}
+
 /// Applies an edit with a fixed measurement, so a gate test does not depend on PDFium
 /// metrics for the gates it is not testing.
 fn edit_with(
@@ -622,7 +632,8 @@ fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
     }
     let path = fixture("simple-winansi.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
 
     assert!(runs.len() >= 2);
     let alpha = runs.iter().find(|run| run.text == "ALPHA").expect("ALPHA");
@@ -635,7 +646,16 @@ fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
     // out before the user types (P2.4 §4).
     let cid_path = fixture("cid-identity.pdf");
     let cid = load(&cid_path);
-    let verdicts = textedit::describe_runs(&cid, 0, &[]).unwrap();
+    let verdicts = textedit::describe_runs(
+        &cid,
+        0,
+        &[],
+        &runmetrics::PdfiumCharGrid {
+            text: String::new(),
+            chars: Vec::new(),
+        },
+    )
+    .unwrap();
     assert_eq!(verdicts.len(), 1);
     assert!(!verdicts[0].admissibility.editable);
     assert_eq!(
@@ -660,7 +680,8 @@ fn fragmented_tj_fragments_pair_by_origin_not_text() {
     }
     let path = fixture("fragmented-tj.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
 
     assert_eq!(runs.len(), 1, "the word is one entry, not five");
     let word = &runs[0];
@@ -734,7 +755,8 @@ fn fragments_never_merge_across_a_font_or_a_size() {
     }
     let path = fixture("fragmented-mixed-fonts.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
 
     assert_eq!(
         runs.len(),
@@ -770,7 +792,8 @@ fn merged_width_refusal_quotes_both_widths() {
     }
     let path = fixture("fragmented-wider-merged.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
     assert_eq!(runs.len(), 1, "Hi merges into one entry");
     let word = &runs[0];
     assert_eq!(word.fragment_count, 2);
@@ -819,7 +842,7 @@ fn a_merged_edit_is_one_atomic_write_and_one_undo() {
     let path = fixture("fragmented-tj.pdf");
     let described = {
         let document = load(&path);
-        textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap()
+        textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0)).unwrap()
     };
     let word = &described[0];
     let tail: Vec<textedit::FragmentRef> = word.fragments[1..]
@@ -879,7 +902,8 @@ fn an_unpaired_run_refuses_naming_the_missing_box() {
     }
     let path = fixture("fragmented-unpairable.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
 
     // The normal run merged and paired; the size-0 run did not.
     let paired = runs
@@ -926,7 +950,8 @@ fn a_run_rect_converts_through_the_shared_geometry() {
     }
     let path = fixture("simple-winansi.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
     let run = runs.iter().find(|run| run.rect.is_some()).unwrap();
     let rect: PdfRect = run.rect.unwrap();
     assert!(rect.width() > 0.0 && rect.height() >= 0.0);
@@ -976,7 +1001,8 @@ fn chain_break_orphan_merges_once_exact_metrics_run() {
         "the walk and the quota share the same exact metric"
     );
 
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
     assert_eq!(runs.len(), 1, "the whole line is one entry, no orphan tail");
     let word = &runs[0];
     assert_eq!(word.text, "Science", "the joined line");
@@ -1017,7 +1043,7 @@ fn space_kern_gap_merges_a_kerned_word_break() {
     );
 
     let document = load(&path);
-    let described = textedit::describe_runs(&document, 0, &runs).unwrap();
+    let described = textedit::describe_runs(&document, 0, &runs, &char_grid(&path, 0)).unwrap();
     assert_eq!(
         described.len(),
         1,
@@ -1048,7 +1074,8 @@ fn the_orphans_own_span_is_the_quota_and_a_wider_replacement_refuses() {
     }
     let path = fixture("wider-replacement-orphan.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
 
     // The tail is its own entry, and its width is its own ~24pt span — never the ~127pt line.
     let tail = runs
@@ -1127,7 +1154,8 @@ fn a_small_replacement_still_fits_the_orphans_own_span() {
     }
     let path = fixture("wider-replacement-orphan.pdf");
     let document = load(&path);
-    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
     let tail = runs.iter().find(|run| run.text == "ce").unwrap();
     let mut document = load(&path);
     let replacement = "ex";
@@ -1200,5 +1228,60 @@ fn a_substitution_edit_re_indexes_the_copy_so_search_finds_the_new_text() {
     assert!(
         stale.is_empty(),
         "the pre-edit token must not survive re-indexing: {stale:?}"
+    );
+}
+
+// --- P2.4.3 T23: the rendered page is the measurement oracle -------------------------
+
+/// §3 `unmeasurable-font.pdf`: the over-refusal 0.4.2 produced, and its cure.
+///
+/// The font is a subset-named `TrueType` dict with **no embedded program and no standard-14
+/// name**. 0.4.2's `FontMetrics::resolve` finds no `FontFile*` to read and no AFM entry, returns
+/// `Nominal`, and the run has no in-file span — so `group_span` was `None`, `resolve_quota` hit
+/// its `Unmeasurable` arm, and the gate refused **every** run on the page with "font carries no
+/// width metrics". That is the Maastricht lockout in miniature.
+///
+/// T23a measures the span from PDFium's character grid instead: the run is editable and its
+/// quota is the union of its characters' advance boxes.
+#[test]
+fn an_unmeasurable_font_run_is_measurable_from_the_char_grid() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("unmeasurable-font.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
+
+    assert_eq!(runs.len(), 1, "one run on the page");
+    let run = &runs[0];
+    assert_eq!(run.text, "Data Science");
+    assert!(
+        run.admissibility.editable,
+        "T23a restores editability where 0.4.2 refused the page: {:?}",
+        run.admissibility
+    );
+    assert_eq!(run.admissibility.gate, None);
+
+    // The font really is unmeasurable in-file: the raw run's advance fell back to the
+    // approximation (`0.5em` per character), not an exact metric.
+    let raw = first_run(&document, 0);
+    assert_eq!(raw.text, "Data Science");
+    assert_eq!(
+        raw.advance_exact, None,
+        "the fixture's font carries no in-file metrics"
+    );
+
+    // The quota is a *rendered* measurement (12 glyphs x 0.6em at 12pt = 86.4pt), not the
+    // 72pt the `0.5em`-per-character approximation would give. In this phase the quota is the
+    // box when it is ~= the span (0.4.2's rule); the precise span becomes the quota in Phase B.
+    let width = run.width.expect("an editable run has a quota");
+    assert!(
+        width > 80.0 && width < 90.0,
+        "the quota is the rendered measurement, not the 72pt approximation: {width}"
+    );
+    assert!(
+        !run.box_suspicious,
+        "the box is ~= the span, so it is not line-sized"
     );
 }

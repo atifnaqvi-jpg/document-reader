@@ -820,8 +820,12 @@ pub async fn get_page_text_runs(
     let service = Arc::clone(&service);
     let pdfium_path = path.clone();
     let pdfium_hash = content_hash.clone();
-    let pdfium_runs = tauri::async_runtime::spawn_blocking(move || {
-        service.page_runs(Path::new(&pdfium_path), pdfium_hash.as_deref(), page)
+    // The char grid (T23a) and the text objects (T17) come from the same PDFium document in one
+    // pass, so a run's span is measured against the very layout its box came from.
+    let (pdfium_runs, grid) = tauri::async_runtime::spawn_blocking(move || {
+        let runs = service.page_runs(Path::new(&pdfium_path), pdfium_hash.as_deref(), page)?;
+        let grid = service.char_grid(Path::new(&pdfium_path), pdfium_hash.as_deref(), page)?;
+        Ok::<_, AppError>((runs, grid))
     })
     .await
     .map_err(|error| AppError::Other(format!("run extraction task failed: {error}")))??;
@@ -833,7 +837,7 @@ pub async fn get_page_text_runs(
             .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
         let document = lopdf::Document::load_mem(&bytes)
             .map_err(|error| AppError::Other(format!("could not read PDF: {error}")))?;
-        crate::editor::textedit::describe_runs(&document, page, &pdfium_runs)
+        crate::editor::textedit::describe_runs(&document, page, &pdfium_runs, &grid)
     })
     .await
     .map_err(|error| AppError::Other(format!("run description task failed: {error}")))?

@@ -879,6 +879,85 @@ pub fn space_kern_gap() -> Document {
     document
 }
 
+/// A font dictionary with **no embedded program at all** and a non-standard-14 base name —
+/// the class `docs/P2.4.3-FINDINGS.md` records as "A′": `FontMetrics::resolve` finds no
+/// `FontFile*` to read, the name is not in the AFM table, so it returns `Nominal` and the run
+/// has no measurable in-file span.
+fn unmeasurable_font_face() -> Dictionary {
+    dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "ABCDEE+Monaco",
+        "Encoding" => "WinAnsiEncoding",
+        "FirstChar" => 32,
+        "LastChar" => 255,
+        // Nominal widths, so a producer would still lay the run out; the *program* these would
+        // belong to is simply absent, which is what makes the run unmeasurable in-file.
+        "Widths" => (32..=255).map(|_| Object::Integer(600)).collect::<Vec<Object>>(),
+        "FontDescriptor" => dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "ABCDEE+Monaco",
+            "Flags" => 4,
+            "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
+            "ItalicAngle" => 0,
+            "Ascent" => 800,
+            "Descent" => -200,
+            "CapHeight" => 700,
+            "StemV" => 80,
+        },
+    }
+}
+
+/// §3 `unmeasurable-font.pdf`: a run whose font carries **no in-file metrics**, on one line,
+/// inside one box (P2.4.3 T23).
+///
+/// Before T23 this is the Maastricht field report in miniature: the font class yields no
+/// metric, so the width gate had nothing to measure a replacement against and refused the run
+/// outright ("font carries no width metrics"), locking the page. After T23 the run's span comes
+/// from PDFium's **character grid**, so the same run is editable and a wider replacement is
+/// refused *quoting the rendered span*, which is the honest number.
+pub fn unmeasurable_font_page() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(unmeasurable_font_face());
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    // One `Tj` at 12pt: PDFium renders it as one box whose glyphs the char grid can walk.
+    let operations = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("Tj", vec![Object::string_literal("Data Science")]),
+        Operation::new("ET", vec![]),
+    ];
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
 /// §3 `wider-replacement-orphan.pdf`: the user's exact 0.4.1 failure, in one fixture.
 ///
 /// A `TJ` line `DataScien|ce` whose seam is wide enough (`0.6em`) to break the chain leaves the

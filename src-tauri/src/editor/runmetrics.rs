@@ -116,6 +116,242 @@ pub fn page_runs(
     Ok(runs)
 }
 
+/// One character of PDFium's **rendered** text grid (P2.4.3 T23a).
+///
+/// The char grid is the span oracle: it is present for every font class that can be drawn —
+/// including the PowerPoint subsets whose in-file metrics `FontMetrics` cannot read (see
+/// `docs/P2.4.3-FINDINGS.md`) — because it is measured from the *rendered* page rather than
+/// from the font program.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfiumChar {
+    /// The Unicode scalar PDFium reports, or `None` when the byte has no mapping.
+    pub unicode: Option<char>,
+    /// True for a character PDFium synthesised (a line break, or the space it inserts at a
+    /// kerning seam). Generated characters occupy grid slots but no run's bytes.
+    pub generated: bool,
+    /// The **advance** box (`FPDFText_GetLooseCharBox`): the pen moves these, so consecutive
+    /// characters abut with no gap. This is the box spans are measured from — the tight box
+    /// is *ink*, and summing ink would under-measure a proportional face by the side bearings.
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    /// The ink box (`FPDFText_GetCharBox`), carried for diagnostics only.
+    pub ink_x0: f32,
+    pub ink_y0: f32,
+    pub ink_x1: f32,
+    pub ink_y1: f32,
+    /// The pen origin, which is what pairing (T17) compares against a run's text-space origin.
+    pub origin_x: f32,
+    pub origin_y: f32,
+    pub font_size: f32,
+}
+
+/// PDFium's whole-page character grid (P2.4.3 T23a).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfiumCharGrid {
+    /// PDFium's reconstructed page text, exactly as `page.text().all()` returns it. Kept so a
+    /// caller can search it with the same whitespace rules [`Self::locate`] applies.
+    pub text: String,
+    pub chars: Vec<PdfiumChar>,
+}
+
+/// The character range one piece of text occupies in the grid, and its measured span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharSpan {
+    /// First and last grid indices of the match.
+    pub first: usize,
+    pub last: usize,
+    /// The union of the matched characters' advance boxes, in points.
+    pub x0: f32,
+    pub x1: f32,
+}
+
+impl CharSpan {
+    /// The span width in points.
+    pub fn width(&self) -> f32 {
+        self.x1 - self.x0
+    }
+}
+
+/// Collapses every run of whitespace to a single space and trims the ends.
+///
+/// Both sides of [`PdfiumCharGrid::locate`]'s search go through this, because PDFium
+/// reconstructs the same line differently depending on how the producer drew it: a `Tj` per
+/// kerning group leaves no separator, a real line break arrives as a generated `\r\n`, and a
+/// space drawn as kerning arrives as a *generated* space. Normalising whitespace is what lets
+/// one rule find text drawn any of those ways. It is deliberately not a general text fold —
+/// nothing else is normalised, so a search can never match text the page does not carry.
+fn normalise_whitespace(chars: impl Iterator<Item = char>) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    let mut pending_space = false;
+    for ch in chars {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+impl PdfiumCharGrid {
+    /// Finds `text` in the grid, from the first character whose advance box starts at or after
+    /// `x_min` on the baseline in `band`, returning the matched range and its measured span.
+    ///
+    /// This is T23a's walk. The search is anchored in two places at once, and both are needed:
+    ///
+    /// * **the band** (`band.0..=band.1`, the paired box's y-range widened by the pairing
+    ///   tolerance) keeps the walk on one baseline, so a run never measures text on the line
+    ///   above or below; and
+    /// * **`from`** (the head pair's start index) keeps a run that reads the same as an earlier
+    ///   one on the page — a repeated word is ordinary — from measuring the *earlier* occurrence.
+    ///
+    /// Every character of the match must satisfy the band and the `x_min` window, so a partial
+    /// match that wanders off the line is rejected rather than half-counted.
+    pub fn locate(
+        &self,
+        text: &str,
+        from: usize,
+        band: (f32, f32),
+        x_min: f32,
+    ) -> Option<CharSpan> {
+        let needle = normalise_whitespace(text.chars());
+        if needle.is_empty() {
+            return None;
+        }
+
+        // The grid's own searchable form, with a map from normalised position back to grid index.
+        let mut haystack: Vec<char> = Vec::new();
+        let mut map: Vec<usize> = Vec::new();
+        let mut pending_space = false;
+        for (index, ch) in self.chars.iter().enumerate() {
+            match ch.unicode {
+                Some(c) if !c.is_whitespace() => {
+                    if pending_space && !haystack.is_empty() {
+                        haystack.push(' ');
+                        map.push(index);
+                    }
+                    pending_space = false;
+                    haystack.push(c);
+                    map.push(index);
+                }
+                _ => pending_space = !haystack.is_empty(),
+            }
+        }
+
+        // Start searching at the first normalised position whose grid index is `>= from`.
+        let start = map
+            .iter()
+            .position(|index| *index >= from)
+            .unwrap_or(map.len());
+
+        let mut position = start;
+        while position + needle.len() <= haystack.len() {
+            if haystack[position..position + needle.len()] == needle[..] {
+                let indices = &map[position..position + needle.len()];
+                let on_band = indices.iter().all(|index| {
+                    let ch = &self.chars[*index];
+                    (band.0..=band.1).contains(&ch.origin_y) && ch.x0 >= x_min
+                });
+                if on_band {
+                    let x0 = indices
+                        .iter()
+                        .map(|index| self.chars[*index].x0)
+                        .fold(f32::INFINITY, f32::min);
+                    let x1 = indices
+                        .iter()
+                        .map(|index| self.chars[*index].x1)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    return Some(CharSpan {
+                        first: indices[0],
+                        last: *indices.last().expect("needle is non-empty"),
+                        x0,
+                        x1,
+                    });
+                }
+            }
+            position += 1;
+        }
+        None
+    }
+
+    /// The first grid index whose advance box starts at or after `x`, on the baseline band.
+    ///
+    /// Used to anchor a walk at the paired box's left edge (T23a's "x ≥ box.x0 − tolerance").
+    pub fn first_index_from(&self, x: f32, band: (f32, f32), x_min: f32) -> usize {
+        self.chars
+            .iter()
+            .position(|ch| (band.0..=band.1).contains(&ch.origin_y) && ch.x0 >= x_max(x, x_min))
+            .unwrap_or(0)
+    }
+}
+
+/// `a.max(b)` as a free function, so [`PdfiumCharGrid::first_index_from`] reads as one predicate.
+fn x_max(a: f32, b: f32) -> f32 {
+    a.max(b)
+}
+
+/// Reads PDFium's whole-page character grid (P2.4.3 T23a).
+///
+/// Read-only and routed through the same handle cache a render uses. The grid is what makes a
+/// span measurable for a font whose program carries no metrics: the renderer has already laid
+/// the glyphs out, so their boxes exist whatever the font file contains.
+pub fn char_grid(
+    document: &PdfDocument<'_>,
+    page: u32,
+    path: &Path,
+) -> Result<PdfiumCharGrid, AppError> {
+    let page = document.pages().get(page as u16).map_err(|e| {
+        AppError::Other(format!(
+            "page {page} unavailable on {}: {e}",
+            path.display()
+        ))
+    })?;
+
+    let text = page
+        .text()
+        .map_err(|e| AppError::Other(format!("text extraction failed: {e}")))?;
+    let page_text = text.all();
+
+    let mut chars = Vec::new();
+    for character in text.chars().iter() {
+        let Ok(loose) = character.loose_bounds() else {
+            continue;
+        };
+        let Ok(ink) = character.tight_bounds() else {
+            continue;
+        };
+        let Ok((origin_x, origin_y)) = character.origin() else {
+            continue;
+        };
+        chars.push(PdfiumChar {
+            unicode: character.unicode_char(),
+            generated: character.is_generated().unwrap_or(false),
+            x0: loose.left().value,
+            y0: loose.bottom().value,
+            x1: loose.right().value,
+            y1: loose.top().value,
+            ink_x0: ink.left().value,
+            ink_y0: ink.bottom().value,
+            ink_x1: ink.right().value,
+            ink_y1: ink.top().value,
+            origin_x: origin_x.value,
+            origin_y: origin_y.value,
+            font_size: character.unscaled_font_size().value,
+        });
+    }
+
+    Ok(PdfiumCharGrid {
+        text: page_text,
+        chars,
+    })
+}
+
 /// Measures `text` in `font_name` at `font_size`, in PDF points (T3d).
 ///
 /// Done by building a detached text object in PDFium's own model and reading its bounds —

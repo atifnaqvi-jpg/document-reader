@@ -406,6 +406,18 @@ impl RenderService {
         PdfProvider::page_runs(&self.handles, path, content_hash, page)
     }
 
+    /// PDFium's whole-page character grid, the span oracle (P2.4.3 T23a).
+    ///
+    /// Read-only and routed through the shared handle cache, like [`Self::page_runs`].
+    pub fn char_grid(
+        &self,
+        path: &Path,
+        content_hash: Option<&str>,
+        page: u32,
+    ) -> Result<crate::editor::runmetrics::PdfiumCharGrid, AppError> {
+        PdfProvider::char_grid(&self.handles, path, content_hash, page)
+    }
+
     /// Measures a candidate replacement through PDFium's own metrics (P2.4 T3d).
     pub fn measure_text(
         &self,
