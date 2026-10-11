@@ -326,7 +326,7 @@ fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Opt
     let tol = origin_tolerance(run.font_size);
 
     let mut best: Option<Pair> = None;
-    let mut best_key: Option<(bool, f32, f32)> = None;
+    let mut best_key: Option<(bool, f32, f32, bool)> = None;
     for (index, rect) in rects.iter().enumerate() {
         // `contains` uses the box grown by the tolerance, which absorbs the ink offset and a
         // small metric disagreement without reaching a neighbouring line.
@@ -339,8 +339,11 @@ fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Opt
         }
         let baseline_delta = (run.origin.1 - rect.y0).abs();
         let strong = baseline_delta <= BASELINE_TOLERANCE;
-        // Prefer strong over weak, then the smallest baseline delta, then the leftmost box.
-        let key = (!strong, baseline_delta, rect.x0);
+        // Prefer strong over weak, then the smallest baseline delta, then the leftmost box —
+        // and, per §3 step 2, exact text equality as the *final* tiebreaker when two boxes
+        // agree on all of it. Text is only ever a tiebreaker here: it never decides a pair the
+        // geometry already separated, which is the whole point of T17.
+        let key = (!strong, baseline_delta, rect.x0, run.text != rect.text);
         if best_key.map_or(true, |current| key < current) {
             best_key = Some(key);
             best = Some(Pair {
@@ -1024,6 +1027,41 @@ mod tests {
         let head_next = test_run("o", 72.0 + head_head.advance + 3.0, 24.0, "F1");
         // 3pt gap vs tolerance 0.25*24 = 6pt: fine, the heading's glyphs merge.
         assert!(mergeable(&head_head, &head_next));
+    }
+
+    #[test]
+    fn text_equality_only_breaks_a_geometric_tie() {
+        use crate::editor::runmetrics::PdfiumRun;
+        let box_at = |text: &str, x0: f32| PdfiumRun {
+            text: text.to_string(),
+            font_name: "Helvetica".to_string(),
+            font_size: 12.0,
+            x0,
+            y0: 700.0,
+            x1: x0 + 20.0,
+            y1: 712.0,
+            width: 20.0,
+        };
+        // Two boxes that are geometrically indistinguishable at the run's origin: the same
+        // baseline, the same left edge, the same delta. Only exact text can separate them, and
+        // §3 step 2 says it does — but it is the *last* key, so geometry still wins whenever it
+        // can (the next case).
+        let run = test_run("He", 72.0, 12.0, "F1");
+        let rects = vec![box_at("other", 72.0), box_at("He", 72.0)];
+        let pair = pair_run(&run, &rects).expect("a containing box pairs");
+        assert_eq!(pair.rect, 1, "exact text breaks the tie");
+
+        // Geometry first: a box whose baseline is nearer wins even though its text differs,
+        // because text must never override the position T17 pairs on.
+        let mut exact_but_far = box_at("He", 72.0);
+        exact_but_far.y0 = 700.2;
+        exact_but_far.y1 = 712.2;
+        let rects = vec![exact_but_far, box_at("other", 72.0)];
+        let pair = pair_run(&run, &rects).expect("a containing box pairs");
+        assert_eq!(
+            pair.rect, 1,
+            "the nearer baseline wins even though its text differs"
+        );
     }
 
     #[test]
