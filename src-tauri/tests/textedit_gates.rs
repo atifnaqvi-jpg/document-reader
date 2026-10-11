@@ -128,9 +128,45 @@ fn edit_with_options(
     textedit::edit(document, &request)
 }
 
+/// Applies an edit with a caller-chosen font size, so a width-gate test whose fixture is not
+/// at 24pt measures the replacement at the size the run actually is (P2.4.2 T22).
+#[allow(clippy::too_many_arguments)]
+fn edit_with_size(
+    document: &mut lopdf::Document,
+    page: u32,
+    run_id: RunId,
+    expected: &str,
+    replacement: &str,
+    old_width: f32,
+    new_width: f32,
+    font_size: f32,
+) -> Result<textedit::EditOutcome, AppError> {
+    let measure = move |_text: &str| Ok(new_width);
+    let request = textedit::EditRequest {
+        page,
+        run_id,
+        expected: expected.to_string(),
+        replacement: replacement.to_string(),
+        old_width,
+        font_size,
+        allow_substitution: true,
+        fragments: Vec::new(),
+        measure: &measure,
+    };
+    textedit::edit(document, &request)
+}
+
 fn first_run(document: &lopdf::Document, page: u32) -> textlocate::RawRun {
     let page_id = textlocate::page_id(document, page).unwrap();
     textlocate::locate_runs(document, page_id).unwrap()[0].clone()
+}
+
+/// Measures a replacement the way the write path does, using the fixture fonts' real in-file
+/// metrics (P2.4.2 T22/O1): the fixtures' fonts are `Helvetica`/subset programs, so the AFM
+/// table answers exactly. This keeps a width-gate test independent of a hand-picked constant.
+fn measured_width(text: &str, font_size: f32) -> f32 {
+    document_reader_lib::editor::afm::text_width("Helvetica", text, font_size)
+        .expect("Helvetica is a standard-14 font with an AFM table")
 }
 
 // --- happy path ----------------------------------------------------------------
@@ -949,6 +985,14 @@ fn chain_break_orphan_merges_once_exact_metrics_run() {
         "head and tail folded into one run, not split"
     );
     assert!(word.admissibility.editable, "the font gates pass");
+    // P2.4.2 T22: here the two fragments genuinely tile the word box (36+48 = 84 ≈ box 72),
+    // so the box is ≈ the span and the quota is well-formed — the run is not box-suspicious.
+    assert!(!word.box_suspicious);
+    assert!(
+        word.width.is_some_and(|width| width > 0.0),
+        "a measurable span is the quota: {:?}",
+        word.width
+    );
 }
 
 /// §3 `space-kern-gap.pdf`: an inter-word gap carried as kerning merges when, and only when,
@@ -984,6 +1028,122 @@ fn space_kern_gap_merges_a_kerned_word_break() {
     // operands have no `0x20` to join — and the widened gap is still what let the seam merge.
     assert_eq!(described[0].text, "foobar");
     assert_eq!(described[0].fragment_count, 2);
+}
+
+// --- P2.4.2 T22: the width quota is the run's own span, never a line box ----------
+
+/// §3 `wider-replacement-orphan.pdf`: the user's exact 0.4.1 failure, memorialised.
+///
+/// The line `DataScien|ce` breaks between head and tail, so the tail `ce` is an orphan with no
+/// box of its own — its only plausible box is the whole **line**. Under 0.4.1 the width gate took
+/// that line box (~127pt) as the orphan's old width, so a ~110pt replacement passed a quota that
+/// should have refused it and was written into the ~24pt tail operand alone.
+///
+/// T22 fixes it: the tail's quota is its **own** measured span (24pt), the pair is flagged
+/// box-suspicious, and the same replacement now **hard-refuses** quoting both widths (O1).
+#[test]
+fn the_orphans_own_span_is_the_quota_and_a_wider_replacement_refuses() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("wider-replacement-orphan.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+
+    // The tail is its own entry, and its width is its own ~24pt span — never the ~127pt line.
+    let tail = runs
+        .iter()
+        .find(|run| run.text == "ce")
+        .expect("the orphan tail");
+    let line_box = runs
+        .iter()
+        .find(|run| run.text == "DataScien")
+        .and_then(|run| run.rect.map(|rect| rect.x1 - rect.x0))
+        .expect("the head pairs to the line box");
+    assert!(
+        line_box > 120.0,
+        "the fixture's box really is line-sized: {line_box}"
+    );
+    assert!(
+        tail.width.is_some_and(|width| width < 30.0),
+        "the orphan's quota is its own ~24pt span, not the line box: {:?}",
+        tail.width
+    );
+    assert!(
+        (tail.width.unwrap() - 24.0).abs() < 0.5,
+        "the tail is 2 glyphs x 1.0em at 12pt = 24pt: {:?}",
+        tail.width
+    );
+    assert!(
+        tail.box_suspicious,
+        "the pair is flagged box-suspicious (it claimed a line box)"
+    );
+    assert_eq!(
+        tail.pair_confidence,
+        Some(textedit::PairConfidence::Weak),
+        "a line-sized box is a weak match"
+    );
+
+    // O1: the ~110pt replacement the user's report describes now hard-refuses, quoting both
+    // measured widths — the quota and the replacement — and pointing at the annotation tool.
+    let mut document = load(&path);
+    let replacement = "Hello from this world";
+    let new_width = measured_width(replacement, tail.font_size);
+    assert!(
+        new_width > 90.0,
+        "the described replacement is genuinely line-wide: {new_width}"
+    );
+    let error = edit_with_size(
+        &mut document,
+        0,
+        tail.run_id.clone(),
+        "ce",
+        replacement,
+        tail.width.unwrap(),
+        new_width,
+        tail.font_size,
+    )
+    .expect_err("writing a line-wide replacement into a 24pt orphan must be refused");
+    assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+    let message = error.to_string();
+    assert!(message.contains("fits-width"), "{message}");
+    assert!(
+        message.contains(&format!("{new_width:.1}pt")),
+        "quotes the replacement width: {message}"
+    );
+    assert!(
+        message.contains(&format!("{:.1}pt", tail.width.unwrap())),
+        "quotes the run's own span, not the line: {message}"
+    );
+    assert!(message.contains("add a text annotation"), "{message}");
+}
+
+/// O1: the replacement that the user actually wrote into the tail must fit the tail's own span
+/// — a ~24pt quota is generous for two glyphs and refuses a word.
+#[test]
+fn a_small_replacement_still_fits_the_orphans_own_span() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("wider-replacement-orphan.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    let tail = runs.iter().find(|run| run.text == "ce").unwrap();
+    let mut document = load(&path);
+    let replacement = "ex";
+    let new_width = measured_width(replacement, tail.font_size);
+    assert!(new_width <= tail.width.unwrap() + 0.5, "{new_width}");
+    edit_with_size(
+        &mut document,
+        0,
+        tail.run_id.clone(),
+        "ce",
+        replacement,
+        tail.width.unwrap(),
+        new_width,
+        tail.font_size,
+    )
+    .expect("two glyphs for two glyphs fits the orphan's own span");
 }
 
 // --- T16 / R5: the edited copy is re-indexed, and search finds the NEW text ----------

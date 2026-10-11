@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { LibraryEntry, PageTextRun } from "../api/types";
+import type { PdfRect } from "../state/geometry";
 import { pdfToPage } from "../state/geometry";
 import { useEditor } from "../state/EditorProvider";
 
@@ -63,6 +64,44 @@ export function sameRun(a: PageTextRun | null, b: PageTextRun | null): boolean {
   );
 }
 
+/** Whether `outer` fully covers `inner` in PDF points, edges included. */
+function covers(outer: PdfRect, inner: PdfRect): boolean {
+  return (
+    outer.x0 <= inner.x0 &&
+    outer.y0 <= inner.y0 &&
+    outer.x1 >= inner.x1 &&
+    outer.y1 >= inner.y1
+  );
+}
+
+/**
+ * The runs that should receive a click on the page (P2.4.2 O-Chain-3).
+ *
+ * The picker draws one box per top-level run, so a click on the page must resolve to the run
+ * the user can see is there. A **box-suspicious** run (T22) is the exception: it claimed a box
+ * it does not fill — the 0.4.1 `ence` orphan against a whole **line** — so its line-sized box
+ * must not swallow clicks meant for the run that really occupies that line. When an honest
+ * run's box covers a suspicious run's, the suspicious one is reached only from the panel list
+ * (fragment-level targeting after explicit expand, O-Pair-3) and takes no page click.
+ *
+ * A run with no box is never shadowed — it has nothing to be covered by, and the panel is the
+ * only way to select it (T21).
+ */
+export function clickTargets(runs: PageTextRun[]): PageTextRun[] {
+  return runs.filter((run) => {
+    if (!run.rect || !run.boxSuspicious) return true;
+    const rect = run.rect;
+    return !runs.some(
+      (other) =>
+        other !== run &&
+        other.rect !== null &&
+        other.rect !== undefined &&
+        !other.boxSuspicious &&
+        covers(other.rect, rect),
+    );
+  });
+}
+
 /**
  * The error codes the text-edit path can produce (P2.4 §5).
  *
@@ -97,9 +136,13 @@ export function TextRunOverlay({
   const { selectedRun, selectRun, textEditMode } = useEditor();
   if (!textEditMode || !metrics) return null;
 
+  // P2.4.2 O-Chain-3: a box-suspicious run's line-sized box does not take page clicks when an
+  // honest run's box covers it — the panel list remains the way to reach it.
+  const targets = clickTargets(runs);
+
   return (
     <div className="textrun-overlay" aria-label="Editable text on this page">
-      {runs.map((run, index) => {
+      {targets.map((run, index) => {
         const box = runBox(run, metrics);
         if (!box) return null;
         return (
@@ -171,6 +214,17 @@ function RunListItem({
       {run.pairConfidence === "weak" ? (
         <span className="textrun-weak muted" title="matched to the nearest box, not a containing one">
           nearest box
+        </span>
+      ) : null}
+      {/* P2.4.2 T22: a box-suspicious pair claimed a box far wider than its own span — the
+          0.4.1 orphan's line box. It is measured against its own span, and the user is told
+          the geometric match is not to be trusted. */}
+      {run.boxSuspicious ? (
+        <span
+          className="textrun-weak muted"
+          title="paired to a box far wider than this run's own span; measured against its own span"
+        >
+          line box
         </span>
       ) : null}
       {/* T10-style disclosure: a merged run says so, and how many fragments it joined, so a

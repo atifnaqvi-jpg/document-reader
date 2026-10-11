@@ -543,3 +543,64 @@ describe("P2.4.1 merged runs: one entry, expandable fragments, one atomic write"
   });
 });
 
+/**
+ * P2.4.2 O-Chain-3: click targeting resolves group-first, not fragment-first.
+ *
+ * The 0.4.1 bug was that a chain-break orphan inherited the **line box** as its own geometry,
+ * so a click anywhere on the line opened the orphan and a replacement was written into its
+ * tail operand alone. The backend now flags such a pair `boxSuspicious` (T22); the overlay must
+ * then let the honest run that really occupies the line take the click, leaving the orphan to
+ * the panel list (fragment-level targeting after an explicit expand, O-Pair-3).
+ */
+describe("P2.4.2 click targeting: a line-sized orphan does not swallow the line", () => {
+  it("does not draw a click target for a box-suspicious run covered by an honest run", async () => {
+    // An honest run occupying most of the line ...
+    const line = makeRun({
+      runId: { opIndex: 1, operandPath: [1] },
+      text: "DataScien",
+      rect: { x0: 72, y0: 600, x1: 199.2, y1: 612 },
+      width: 108,
+    });
+    // ... and the orphan `ce` whose *only* box is that same line, flagged by T22.
+    const orphan = makeRun({
+      runId: { opIndex: 2, operandPath: [2] },
+      text: "ce",
+      rect: { x0: 72, y0: 600, x1: 199.2, y1: 612 },
+      width: 24,
+      boxSuspicious: true,
+    });
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [line, orphan]);
+
+    await startEditing();
+
+    // Both are listed in the panel — the orphan is reachable, with its flag shown.
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    expect(within(list).getByRole("button", { name: /ce/ })).toBeInTheDocument();
+    expect(within(list).getByText("line box")).toBeInTheDocument();
+
+    // But only the honest run gets a page click target: the orphan's line-sized box is
+    // shadowed, so a click on the line cannot open the orphan (the 0.4.1 defect).
+    expect(screen.getAllByRole("button", { name: /^Edit text: DataScien/ })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /^Edit text: ce/ })).toBeNull();
+  });
+
+  it("still draws a target for a box-suspicious run no honest run covers", async () => {
+    // An orphan on its own — nothing honest covers its box, so it stays clickable.
+    const orphan = makeRun({
+      runId: { opIndex: 2, operandPath: [2] },
+      text: "ce",
+      rect: { x0: 400, y0: 600, x1: 520, y1: 612 },
+      width: 24,
+      boxSuspicious: true,
+    });
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [orphan]);
+
+    await startEditing();
+    expect(screen.getAllByRole("button", { name: /^Edit text: ce/ })).toHaveLength(1);
+  });
+});
+

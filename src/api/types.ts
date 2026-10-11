@@ -241,6 +241,13 @@ export interface PageTextRun {
   rect: PdfRect | null;
   /** Advance width in points, the `oldWidth` the width gate compares against. */
   width: number | null;
+  /**
+   * True when the run's paired box is line-sized for its own span (P2.4.2 T22).
+   *
+   * The 0.4.1 chain-break orphan claimed the whole line's box. The pair is flagged, and the
+   * picker says so; `width` above is then the run's own span, never the line.
+   */
+  boxSuspicious?: boolean;
   admissibility: TextAdmissibility;
   /** How the run paired with a box (P2.4.1 T17/T21); `null` when unpaired. */
   pairConfidence: PairConfidence | null;

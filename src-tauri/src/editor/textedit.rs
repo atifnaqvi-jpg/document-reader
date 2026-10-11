@@ -243,7 +243,20 @@ pub struct PageTextRun {
     /// this run, in which case the UI must not offer it.
     pub rect: Option<crate::editor::geometry::PdfRect>,
     /// Measured advance width in points (PDFium), the `old_width` the width gate uses.
+    ///
+    /// P2.4.2 T22: this is the run's **own** measured span, never an inherited box width. A
+    /// paired box supplies it only when the pair is strong *and* the box is no wider than
+    /// `span × BOX_SPAN_SLACK`; otherwise the span wins and the box is flagged
+    /// [`Self::box_suspicious`]. `None` when nothing is measurable — the run is then refused by
+    /// the width gate rather than trusted to a possibly line-sized box.
     pub width: Option<f32>,
+    /// True when the run's paired box is far wider than its own span (P2.4.2 T22).
+    ///
+    /// The 0.4.1 `ence` orphan paired to a line-sized box. Such a pair is flagged, never
+    /// merged, and never trusted for its box width. When the span is measurable the run stays
+    /// editable (the span is a good quota); when it is not, the group refuses.
+    #[serde(default)]
+    pub box_suspicious: bool,
     /// The precomputed Stage-1 verdict. `editable` is false for a gate refusal *or* for a
     /// run with no PDFium geometry (nothing to click, nothing to measure).
     pub admissibility: Admissibility,
@@ -330,6 +343,24 @@ const SIZE_TOLERANCE_PT: f32 = 0.2;
 /// The size-equality tolerance as a fraction of the size — the larger of the two rules applies
 /// (P2.4.2: `|Δ| ≤ max(0.2pt, 1% of size)`).
 const SIZE_TOLERANCE_FRACTION: f32 = 0.01;
+
+/// The largest a paired box may be, relative to the run's own measured span, and still be
+/// trusted as the width-gate old width (P2.4.2 T22).
+///
+/// A box far wider than the span it supposedly measures is a *line* box that a small run
+/// claimed — the 0.4.1 `ence` orphan, whose ~14pt tail paired to a ~300pt line and passed a
+/// ~110pt replacement. `1.25` leaves room for the ordinary ink/advance difference (a box is
+/// ink, an advance is a pen move) while refusing anything line-sized.
+const BOX_SPAN_SLACK: f32 = 1.25;
+
+/// The refusal for a run whose width cannot be measured at all (P2.4.2 T22).
+///
+/// It is a **width-gate** refusal — the gate the user is about to be judged by — so it names
+/// `fits-width`, but its reason is the measurement, not the overflow: the font carries no
+/// in-file metrics, so the only width on offer is a box that may be a whole line. Trusting it
+/// is exactly the 0.4.1 bug, so the safe direction is to refuse and point at the annotation.
+const UNMEASURABLE_WIDTH_MESSAGE: &str = "this run's font carries no width metrics to measure \
+     the replacement against; add a text annotation instead (gate: fits-width)";
 
 /// Whether two `Tf` sizes are the same fragment's (P2.4.2, relative rule).
 ///
@@ -484,7 +515,7 @@ struct RunGroup {
     len: usize,
 }
 
-/// Groups consecutive paired fragments into merged runs (P2.4.1 T18/T19).
+/// Groups consecutive paired fragments into merged runs (P2.4.1 T18/T19 / P2.4.2 T22).
 ///
 /// A group starts at any paired run and extends greedily while the next run is paired with
 /// **strong** confidence and satisfies [`mergeable`]. Weak pairs are deliberately left on
@@ -527,6 +558,47 @@ fn group_runs(
     groups
 }
 
+/// The run's own measured span in points, or `None` when its font carries no in-file metrics
+/// (P2.4.2 T22).
+///
+/// The span is measured with the same Stage-2 machinery the walker uses: AFM for a standard-14
+/// font, `hmtx` via `ttf-parser` for an embedded program. It is never a box width — that is the
+/// whole point of T22 — and never an approximation, because an approximation is exactly what
+/// opened the 0.4.1 hole.
+fn measured_span(document: &Document, page: u32, run: &RawRun) -> Option<f32> {
+    let page_id = page_id(document, page).ok()?;
+    let metrics = crate::editor::substitute::FontMetrics::resolve(document, page_id, &run.font_key);
+    metrics.advance(&run.text, run.font_size)
+}
+
+/// The group's own measured span in points, or `None` when no fragment's span is measurable
+/// (P2.4.2 T22).
+///
+/// A group is a set of fragments laid end to end, so its span is the sum of their spans (their
+/// own advances, not the box they happen to share) — for the ordinary single-fragment case this
+/// is just that fragment's span. `None` when the group has non-empty text none of which is
+/// measurable (a font with no in-file metrics), so the caller refuses rather than reaching for
+/// the box.
+fn group_span(document: &Document, page: u32, runs: &[RawRun], group: &RunGroup) -> Option<f32> {
+    let mut span = 0.0_f32;
+    let mut measurable = false;
+    for offset in 0..group.len {
+        let run = &runs[group.first + offset];
+        // An emptied tail fragment (a cleared operand) contributes nothing and needs no metric;
+        // its bytes may be unmapped once the head carries the whole replacement.
+        if run.text.is_empty() {
+            continue;
+        }
+        span += measured_span(document, page, run)?;
+        measurable = true;
+    }
+    if measurable {
+        Some(span)
+    } else {
+        None
+    }
+}
+
 /// The union of a group's rendered boxes.
 fn union_rect(
     group: &RunGroup,
@@ -556,7 +628,7 @@ fn union_rect(
     union
 }
 
-/// Describes one run or merged group (P2.4.1 T18/T20).
+/// Describes one run or merged group (P2.4.1 T18/T20 / P2.4.2 T22).
 fn describe_group(
     document: &Document,
     page: u32,
@@ -590,15 +662,36 @@ fn describe_group(
     // as the fragment that failed. When the head paired but a later fragment did not, the
     // merged run has no box either (`union_rect` returns `None`), so it is refused with the
     // same T21 prose.
-    let admissibility = match refused {
+    let mut admissibility = match refused {
         Some(verdict) => verdict,
         None if rect.is_none() => Admissibility::refused_with(Gate::RunMismatch, UNPAIRED_MESSAGE),
         None => head.admissibility.clone(),
     };
 
+    // P2.4.2 T22: the width quota is the group's own measured span, never the union box's width.
+    // A strong pair may supply the box, but only when box ≈ span (the ordinary merged run). A
+    // line-sized box is *box-suspicious*: flagged weak, and its quota is its own span — so a
+    // replacement too wide for the run refuses quoting that span, not the line. When nothing is
+    // measurable the run refuses rather than trusting a possibly line-sized box (safe direction).
+    let span = group_span(document, page, runs, group);
+    let box_width = rect.map(crate::editor::geometry::PdfRect::width);
+    let group_strong =
+        pairs[group.first].is_some_and(|pair| pair.confidence == PairConfidence::Strong);
+    let (width, box_suspicious) = match resolve_quota(span, box_width, group_strong) {
+        Quota::Box(box_width) => (Some(box_width), false),
+        Quota::Span { width, suspicious } => (Some(width), suspicious),
+        Quota::Unmeasurable => {
+            if admissibility.editable {
+                admissibility =
+                    Admissibility::refused_with(Gate::FitsWidth, UNMEASURABLE_WIDTH_MESSAGE);
+            }
+            (None, true)
+        }
+    };
+
     // The group's confidence is its weakest member. A merged run is only ever assembled from
     // strong pairs, so for a group this is the head's confidence; for an unpaired singleton it
-    // is `None`.
+    // is `None`. A box-suspicious pair is reported weak: its box cannot be trusted as a match.
     let mut confidence = Some(PairConfidence::Strong);
     for offset in 0..group.len {
         match pairs[group.first + offset] {
@@ -611,6 +704,9 @@ fn describe_group(
             Some(_) => {}
         }
     }
+    if box_suspicious && confidence.is_some() {
+        confidence = Some(PairConfidence::Weak);
+    }
 
     Ok(PageTextRun {
         run_id: head.run_id.clone(),
@@ -620,9 +716,10 @@ fn describe_group(
         font_name: head.font_name.clone(),
         font_size: head.font_size,
         rect,
-        // O1 (§4): the width gate measures the *merged* box's advance, not any one fragment's,
-        // and the refusal quotes this as the old width.
-        width: rect.map(crate::editor::geometry::PdfRect::width),
+        // O1 (§4) / T22: the width gate measures the run's own span, and the refusal quotes this
+        // as the old width. The merged union box supplies it only when box ≈ span.
+        width,
+        box_suspicious,
         admissibility,
         pair_confidence: confidence,
         fragment_count: group.len,
@@ -659,6 +756,27 @@ pub fn describe_runs(
 
     let mut described = Vec::new();
     for group in group_runs(&runs, &pairs, pdfium_runs) {
+        // P2.4.2 T22: a merged group whose union box is line-sized for its own span is not a
+        // merge — its fragments do not fill the box they share, so the box is a line the group
+        // only occupies part of. Split into singletons, each measured by its own span.
+        if group.len > 1 && group_box_suspicious(document, page, &runs, &pairs, pdfium_runs, &group)
+        {
+            for offset in 0..group.len {
+                let singleton = RunGroup {
+                    first: group.first + offset,
+                    len: 1,
+                };
+                described.push(describe_group(
+                    document,
+                    page,
+                    &runs,
+                    &pairs,
+                    pdfium_runs,
+                    &singleton,
+                )?);
+            }
+            continue;
+        }
         described.push(describe_group(
             document,
             page,
@@ -711,14 +829,82 @@ fn describe_single(
                 y1: rect.y1,
             }
         }),
+        // The *box* width is what a display fragment shows. T22 replaces this with the run's
+        // own span on the top-level entry (`describe_group`); a fragment nested inside a merged
+        // run is display-only and keeps the box, exactly as the overlay draws it.
         width: pair
             .and_then(|pair| rects.get(pair.rect))
             .map(|rect| rect.width),
+        box_suspicious: false,
         admissibility: verdict,
         pair_confidence: pair.map(|pair| pair.confidence),
         fragment_count: 1,
         fragments: Vec::new(),
     })
+}
+
+/// How a run's width-gate old width was resolved (P2.4.2 T22).
+enum Quota {
+    /// A strong pair whose box is ≈ the run's own span: the box *is* its ink, so the user's
+    /// expectation is measured directly.
+    Box(f32),
+    /// The run's own measured span. `suspicious` when the paired box was line-sized.
+    Span { width: f32, suspicious: bool },
+    /// No in-file metric to measure with: the box cannot be trusted, so the run refuses.
+    Unmeasurable,
+}
+
+/// True when a group's union box is line-sized for the group's own span (P2.4.2 T22).
+///
+/// A *group* is box-suspicious when its fragments share a box far wider than they tile — the
+/// 0.4.1 chain-break orphan, whose only box was the whole line. Per-fragment sharing is normal
+/// (a per-glyph `TJ`'s fragments legitimately share the word's box, which they tile); only the
+/// whole-group test tells a line box from a word box.
+fn group_box_suspicious(
+    document: &Document,
+    page: u32,
+    runs: &[RawRun],
+    pairs: &[Option<Pair>],
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+    group: &RunGroup,
+) -> bool {
+    let span = group_span(document, page, runs, group);
+    let box_width = union_rect(group, pairs, rects).map(crate::editor::geometry::PdfRect::width);
+    let strong = pairs[group.first].is_some_and(|pair| pair.confidence == PairConfidence::Strong);
+    matches!(
+        resolve_quota(span, box_width, strong),
+        Quota::Span {
+            suspicious: true,
+            ..
+        }
+    )
+}
+
+/// Resolves the width-gate old width — the run's own span, never an inherited box width
+/// (P2.4.2 T22).
+///
+/// * A strong pair whose box is no wider than `span × BOX_SPAN_SLACK` supplies the box width:
+///   box ≈ span, so the box is the run's own ink.
+/// * Otherwise the span wins. A box that is measurably line-sized comes back `suspicious`, so
+///   the caller flags the pair and the UI can say so.
+/// * With no span at all, a box may be a whole line: [`Quota::Unmeasurable`], and the caller
+///   refuses rather than trusting it (the safe direction).
+fn resolve_quota(span: Option<f32>, box_width: Option<f32>, strong: bool) -> Quota {
+    let box_plausible = strong
+        && span.is_some_and(|span| box_width.is_some_and(|box_w| box_w <= span * BOX_SPAN_SLACK));
+    if box_plausible {
+        return Quota::Box(box_width.expect("box_plausible implies a box width"));
+    }
+    match span {
+        Some(span) => {
+            let suspicious = box_width.is_some_and(|box_w| box_w > span * BOX_SPAN_SLACK);
+            Quota::Span {
+                width: span,
+                suspicious,
+            }
+        }
+        None => Quota::Unmeasurable,
+    }
 }
 
 /// One further fragment of a merged run, as the picker knows it (P2.4.1 T18).
@@ -1197,24 +1383,33 @@ mod tests {
         );
     }
 
-    /// Two boxes for the grouping tests, both with space-free reconstructed text so the
-    /// widened O-Chain-2 gap does not apply.
-    fn group_boxes() -> Vec<crate::editor::runmetrics::PdfiumRun> {
-        let box_at = |text: &str, x0: f32| crate::editor::runmetrics::PdfiumRun {
-            text: text.to_string(),
-            font_name: "Helvetica".to_string(),
-            font_size: 12.0,
-            x0,
-            y0: 700.0,
-            x1: x0 + 20.0,
-            y1: 712.0,
-            width: 20.0,
-        };
-        vec![box_at("Hello", 72.0), box_at("far", 200.0)]
+    /// Builds one box per run, sized to that run's **own** measured span (P2.4.2 T22), so a
+    /// group test that is not about box-vs-span sees ordinary, non-suspicious boxes. Text is
+    /// space-free so the widened O-Chain-2 gap never applies.
+    fn group_boxes(
+        document: &lopdf::Document,
+        runs: &[RawRun],
+    ) -> Vec<crate::editor::runmetrics::PdfiumRun> {
+        runs.iter()
+            .map(|run| {
+                let span = measured_span(document, 0, run).unwrap_or(0.0);
+                crate::editor::runmetrics::PdfiumRun {
+                    text: run.text.clone(),
+                    font_name: "Helvetica".to_string(),
+                    font_size: run.font_size,
+                    x0: run.origin.0,
+                    y0: 700.0,
+                    x1: run.origin.0 + span,
+                    y1: 712.0,
+                    width: span,
+                }
+            })
+            .collect()
     }
 
     #[test]
     fn groups_merge_strongly_paired_consecutive_runs_only() {
+        let document = testpdf::simple_winansi();
         let head = test_run("He", 72.0, 12.0, "F1");
         // Placed exactly where the head ends, so the seam is a genuine adjacency, not an
         // overlap (P2.4.2's overlap guard).
@@ -1229,7 +1424,8 @@ mod tests {
                 confidence: PairConfidence::Strong,
             })
         };
-        let groups = group_runs(&runs, &[strong(0), strong(0), strong(1)], &group_boxes());
+        let boxes = group_boxes(&document, &runs);
+        let groups = group_runs(&runs, &[strong(0), strong(0), strong(2)], &boxes);
         // Two groups: "Hello" (2 fragments) and "far" (1), because the gap to "far" is far
         // past a quarter em.
         assert_eq!(groups.len(), 2);
@@ -1239,6 +1435,7 @@ mod tests {
 
     #[test]
     fn a_weak_pair_is_never_merged_and_an_unpaired_run_stays_visible() {
+        let document = testpdf::simple_winansi();
         let runs = vec![
             test_run("He", 72.0, 12.0, "F1"),
             test_run("llo", 78.0, 12.0, "F1"),
@@ -1248,11 +1445,57 @@ mod tests {
             rect: 0,
             confidence: PairConfidence::Weak,
         });
-        let groups = group_runs(&runs, &[weak, weak, None], &group_boxes());
+        let boxes = group_boxes(&document, &runs);
+        let groups = group_runs(&runs, &[weak, weak, None], &boxes);
         // One group per run: the weak pair is not merged, and the unpaired run is still
         // reported as a singleton so the picker can name its refusal (T21).
         assert_eq!(groups.len(), 3);
         assert!(groups.iter().all(|group| group.len == 1));
+    }
+
+    /// P2.4.2 T22: a group whose union box is line-sized for the group's own span is
+    /// box-suspicious — the 0.4.1 `ence` orphan against a whole-line box. Two per-glyph
+    /// fragments that *tile* their shared word box are not.
+    #[test]
+    fn a_group_with_a_line_sized_box_is_suspicious() {
+        let document = testpdf::simple_winansi();
+        let head = test_run("He", 72.0, 12.0, "F1");
+        let tail = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        let runs = vec![head, tail];
+        let strong = |rect: usize| {
+            Some(Pair {
+                rect,
+                confidence: PairConfidence::Strong,
+            })
+        };
+        let pairs = [strong(0), strong(0)];
+        let group = RunGroup { first: 0, len: 2 };
+
+        // A word box the two fragments tile: not suspicious.
+        let mut tiled = group_boxes(&document, &runs);
+        tiled[0].x1 = 90.0;
+        tiled[0].width = 18.0;
+        tiled[1].x0 = 72.0;
+        tiled[1].x1 = 90.0;
+        tiled[1].width = 18.0;
+        assert!(!group_box_suspicious(
+            &document, 0, &runs, &pairs, &tiled, &group
+        ));
+
+        // A line box ten times their span: suspicious — this is the orphan's pair.
+        let mut line_sized = tiled.clone();
+        line_sized[0].x1 = 72.0 + 200.0;
+        line_sized[0].width = 200.0;
+        line_sized[1].x1 = 72.0 + 200.0;
+        line_sized[1].width = 200.0;
+        assert!(group_box_suspicious(
+            &document,
+            0,
+            &runs,
+            &pairs,
+            &line_sized,
+            &group
+        ));
     }
 
     #[test]

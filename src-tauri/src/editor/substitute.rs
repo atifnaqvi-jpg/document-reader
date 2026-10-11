@@ -421,7 +421,7 @@ mod tests {
         let metrics = FontMetrics::resolve(&helvetica, page_id, b"F1");
         match &metrics {
             FontMetrics::Afm { base_font } => assert_eq!(base_font, "Helvetica"),
-            other => panic!("expected AFM metrics, got a different source"),
+            _ => panic!("expected AFM metrics, got a different source"),
         }
         let afm_width = metrics
             .advance("Sci", 12.0)
