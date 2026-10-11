@@ -109,10 +109,14 @@ fn main() {
             "wider-replacement-orphan.pdf",
             testpdf::bytes(&testpdf::wider_replacement_orphan()),
         ),
-        // P2.4.3 §3: a font with no in-file metrics, measured from the char grid (T23a).
+        // P2.4.3 §3: the span oracle's two fixtures (a font with no in-file metrics).
         (
             "unmeasurable-font.pdf",
             testpdf::bytes(&testpdf::unmeasurable_font_page()),
+        ),
+        (
+            "unmeasurable-chain-break.pdf",
+            testpdf::bytes(&testpdf::unmeasurable_chain_break()),
         ),
     ];
 

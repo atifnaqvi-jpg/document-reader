@@ -397,6 +397,10 @@ struct Pair {
     /// This is the measurement the P2.4.3 field report needed: it works for a font whose program
     /// carries no readable metrics, because it is read from the *rendered* page.
     span: Option<CharSpan>,
+    /// True when this box is the **smallest** box containing the run's origin (P2.4.3 T23c's
+    /// clause 3). Only such a box may stand in for an unmeasurable span: a larger box that also
+    /// contains the origin is a line the run only occupies part of.
+    smallest_containing: bool,
 }
 
 /// The tolerance with which a grid character's pen origin may precede the run's text-space
@@ -489,6 +493,7 @@ fn pair_run(
                     PairConfidence::Weak
                 },
                 span: locate_span(run, rect, grid),
+                smallest_containing: smallest_containing(run, index, rects, tol),
             });
         }
     }
@@ -520,7 +525,34 @@ fn pair_run(
             span: rects
                 .get(rect)
                 .and_then(|box_| locate_span(run, box_, grid)),
+            smallest_containing: smallest_containing(run, rect, rects, tol),
         })
+}
+
+/// True when `index` is the **smallest** box that contains the run's text-space origin.
+///
+/// T23c's clause 3 trusts a box only when it is the smallest one containing the run: on a line
+/// of several boxes, the one a run's origin falls in and that no other containing box undercuts
+/// is the run's own, while a box that several others nest inside is a line. Ties (two boxes the
+/// same size) resolve to the first, which is the leftmost by input order.
+fn smallest_containing(
+    run: &RawRun,
+    index: usize,
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+    tol: f32,
+) -> bool {
+    let Some(candidate) = rects.get(index) else {
+        return false;
+    };
+    let width = candidate.x1 - candidate.x0;
+    !rects.iter().enumerate().any(|(other_index, other)| {
+        other_index != index
+            && run.origin.0 >= other.x0 - tol
+            && run.origin.0 <= other.x1 + tol
+            && run.origin.1 >= other.y0 - tol
+            && run.origin.1 <= other.y1 + tol
+            && (other.x1 - other.x0) < width
+    })
 }
 
 /// True when the reconstructed text of two fragments shows a real space at their seam.
@@ -823,17 +855,19 @@ fn describe_group(
     let box_width = rect.map(crate::editor::geometry::PdfRect::width);
     let head_pair = pairs[group.first];
     let group_strong = head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong);
-    let (width, box_suspicious) = match resolve_quota(span, box_width, group_strong) {
-        Quota::Box(box_width) => (Some(box_width), false),
-        Quota::Span { width, suspicious } => (Some(width), suspicious),
-        Quota::Unmeasurable => {
-            if admissibility.editable {
-                admissibility =
-                    Admissibility::refused_with(Gate::FitsWidth, UNMEASURABLE_WIDTH_MESSAGE);
+    let smallest_containing = head_pair.is_some_and(|pair| pair.smallest_containing);
+    let (width, box_suspicious) =
+        match resolve_quota(span, box_width, smallest_containing, group_strong) {
+            Quota::Box(box_width) => (Some(box_width), false),
+            Quota::Span { width, suspicious } => (Some(width), suspicious),
+            Quota::Unmeasurable => {
+                if admissibility.editable {
+                    admissibility =
+                        Admissibility::refused_with(Gate::FitsWidth, UNMEASURABLE_WIDTH_MESSAGE);
+                }
+                (None, true)
             }
-            (None, true)
-        }
-    };
+        };
 
     // The group's confidence is its weakest member. A merged run is only ever assembled from
     // strong pairs, so for a group this is the head's confidence; for an unpaired singleton it
@@ -1021,9 +1055,11 @@ fn group_box_suspicious(
 ) -> bool {
     let span = group_span(document, page, runs, pairs, group);
     let box_width = union_rect(group, pairs, rects).map(crate::editor::geometry::PdfRect::width);
-    let strong = pairs[group.first].is_some_and(|pair| pair.confidence == PairConfidence::Strong);
+    let head_pair = pairs[group.first];
+    let strong = head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong);
+    let smallest_containing = head_pair.is_some_and(|pair| pair.smallest_containing);
     matches!(
-        resolve_quota(span, box_width, strong),
+        resolve_quota(span, box_width, smallest_containing, strong),
         Quota::Span {
             suspicious: true,
             ..
@@ -1031,21 +1067,33 @@ fn group_box_suspicious(
     )
 }
 
-/// Resolves the width-gate old width — the run's own span, never an inherited box width
-/// (P2.4.2 T22). The span itself is now the char-grid measurement where available (T23a).
+/// Resolves the width-gate old width from the best available source (P2.4.2 T22 / P2.4.3 T23c).
 ///
-/// * A strong pair whose box is no wider than `span × BOX_SPAN_SLACK` supplies the box width:
-///   box ≈ span, so the box is the run's own ink.
-/// * Otherwise the span wins. A box that is measurably line-sized comes back `suspicious`, so
-///   the caller flags the pair and the UI can say so.
-/// * With no span at all, a box may be a whole line: [`Quota::Unmeasurable`], and the caller
-///   refuses rather than trusting it (the safe direction).
-fn resolve_quota(span: Option<f32>, box_width: Option<f32>, strong: bool) -> Quota {
-    let box_plausible = strong
-        && span.is_some_and(|span| box_width.is_some_and(|box_w| box_w <= span * BOX_SPAN_SLACK));
-    if box_plausible {
-        return Quota::Box(box_width.expect("box_plausible implies a box width"));
-    }
+/// The preference order is exactly T23c's:
+///
+/// 1. **`span`** — the char-grid span, else the font-metric span (the caller's `group_span`
+///    preference, T23a/T23d). Always the quota when it exists.
+/// 2. **`box`** — the strongest pair's box, supplied only when the group has **no** span *and*
+///    the box is the **smallest** containing box (`smallest_containing`), and is measurably
+///    no wider than a strong pair's own ink would allow. This is the case T23c names: a strong
+///    pair whose box is the smallest containing one restores the 0.4.1 `course`/`online` path
+///    for a font the renderer drew but the file cannot measure.
+/// 3. **refuse** — [`Quota::Unmeasurable`], and the caller refuses rather than trusting a box
+///    that may be a whole line (the safe direction, unchanged from P2.4.2).
+///
+/// A line-sized box never reaches clause 2: it fails `smallest_containing` whenever a smaller
+/// box also contains the run, and the `BOX_SPAN_SLACK` guard rejects the rest. A box is only
+/// ever `suspicious` when a span exists to compare against, which is why the flag is `false` in
+/// the box-quota branch.
+///
+/// `box_measure` is the same measurement the suspicion test uses, passed as a number so the
+/// branch does not recompute the font's metrics.
+fn resolve_quota(
+    span: Option<f32>,
+    box_width: Option<f32>,
+    smallest_containing: bool,
+    strong: bool,
+) -> Quota {
     match span {
         Some(span) => {
             let suspicious = box_width.is_some_and(|box_w| box_w > span * BOX_SPAN_SLACK);
@@ -1054,7 +1102,10 @@ fn resolve_quota(span: Option<f32>, box_width: Option<f32>, strong: bool) -> Quo
                 suspicious,
             }
         }
-        None => Quota::Unmeasurable,
+        None => match box_width {
+            Some(box_width) if strong && smallest_containing => Quota::Box(box_width),
+            _ => Quota::Unmeasurable,
+        },
     }
 }
 
@@ -1578,6 +1629,7 @@ mod tests {
                 rect,
                 confidence: PairConfidence::Strong,
                 span: None,
+                smallest_containing: true,
             })
         };
         let boxes = group_boxes(&document, &runs);
@@ -1601,6 +1653,7 @@ mod tests {
             rect: 0,
             confidence: PairConfidence::Weak,
             span: None,
+            smallest_containing: true,
         });
         let boxes = group_boxes(&document, &runs);
         let groups = group_runs(&runs, &[weak, weak, None], &boxes);
@@ -1624,6 +1677,7 @@ mod tests {
                 rect,
                 confidence: PairConfidence::Strong,
                 span: None,
+                smallest_containing: true,
             })
         };
         let pairs = [strong(0), strong(0)];
@@ -1687,6 +1741,102 @@ mod tests {
         assert!(
             !mergeable(&head, &next, false, None, None),
             "the approximation breaks the same seam"
+        );
+    }
+
+    /// P2.4.3 T23a: a span from the grid also supplies the width quota, replacing both the
+    /// approximation and the unmeasurable refusal.
+    #[test]
+    fn the_char_grid_span_is_the_width_quota() {
+        // A span with a box the group fills: the quota is the span, not the box.
+        match resolve_quota(Some(84.4), Some(84.4), true, true) {
+            Quota::Span { width, suspicious } => {
+                assert_eq!(width, 84.4);
+                assert!(!suspicious);
+            }
+            _ => panic!("a span is always the quota"),
+        }
+    }
+
+    /// P2.4.3 T23c: the full preference order, one branch per arm.
+    #[test]
+    fn the_width_quota_follows_the_documented_preference_order() {
+        // (1) the span wins whenever it exists, even for a strong pair with a plausible box —
+        // T22's rule, preserved: the box never overrides a real span.
+        match resolve_quota(Some(20.0), Some(20.5), true, true) {
+            Quota::Span { width, .. } => assert_eq!(width, 20.0),
+            _ => panic!("the span is clause 1"),
+        }
+
+        // A span the box dwarfs is suspicious: the box was a line, the quota is the span.
+        match resolve_quota(Some(24.0), Some(127.0), true, true) {
+            Quota::Span { width, suspicious } => {
+                assert_eq!(width, 24.0);
+                assert!(
+                    suspicious,
+                    "a line-sized box against a 24pt span is suspicious"
+                );
+            }
+            _ => panic!("a span is clause 1"),
+        }
+
+        // (2) no span, a strong pair whose box is the smallest containing one: the box is the
+        // run's own ink, so it supplies the quota (T23c's restored `course`/`online` case).
+        match resolve_quota(None, Some(38.0), true, true) {
+            Quota::Box(width) => assert_eq!(width, 38.0),
+            _ => panic!("clause 2 supplies the box"),
+        }
+
+        // …but not when the box is not the smallest one containing the run: it may be a line.
+        match resolve_quota(None, Some(38.0), false, true) {
+            Quota::Unmeasurable => {}
+            _ => panic!("a non-smallest box must not supply the quota"),
+        }
+
+        // …and not from a weak pair, whose box is suspect for that reason too.
+        match resolve_quota(None, Some(38.0), true, false) {
+            Quota::Unmeasurable => {}
+            _ => panic!("a weak pair must not supply the quota"),
+        }
+
+        // (3) nothing measurable: refuse (T23d), unchanged from P2.4.2.
+        match resolve_quota(None, None, false, false) {
+            Quota::Unmeasurable => {}
+            _ => panic!("with no measurement the run refuses"),
+        }
+    }
+
+    /// P2.4.3 T23c: the "smallest containing box" test that clause 2 rests on.
+    #[test]
+    fn only_the_smallest_containing_box_may_supply_the_quota() {
+        use crate::editor::runmetrics::PdfiumRun;
+        let box_at = |x0: f32, x1: f32| PdfiumRun {
+            text: "x".to_string(),
+            font_name: "ABCDEE+Monaco".to_string(),
+            font_size: 12.0,
+            x0,
+            y0: 700.0,
+            x1,
+            y1: 712.0,
+            width: x1 - x0,
+        };
+        let run = test_run("DataSci", 72.0, 12.0, "F1");
+        let tol = origin_tolerance(run.font_size);
+
+        // One box only: it is trivially the smallest.
+        let rects = vec![box_at(72.0, 122.4)];
+        assert!(smallest_containing(&run, 0, &rects, tol));
+
+        // A word box and a line box both containing the run: the word box is the smallest, so
+        // the orphan's line box (index 1) is *not*.
+        let rects = vec![box_at(72.0, 122.4), box_at(72.0, 500.0)];
+        assert!(
+            smallest_containing(&run, 0, &rects, tol),
+            "the word box is the smallest containing box"
+        );
+        assert!(
+            !smallest_containing(&run, 1, &rects, tol),
+            "the line box is not: only a larger one contains the run"
         );
     }
 

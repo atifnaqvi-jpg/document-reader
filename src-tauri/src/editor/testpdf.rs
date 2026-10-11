@@ -958,6 +958,71 @@ pub fn unmeasurable_font_page() -> Document {
     document
 }
 
+/// §3 `unmeasurable-chain-break.pdf`: the Maastricht line-1 shape — a merge chain that the
+/// **approximation** breaks — in a font with **no in-file metrics**.
+///
+/// The head and the tail are two separate `Tj` operators, so the tail's origin comes from its
+/// own `Td` (authoritative) rather than from a walk of the head's width. Placing that `Td` at the
+/// head's **rendered** end (`72 + 7 × 0.6em × 12pt = 122.4pt`) makes the true seam zero:
+///
+/// * **char-grid (T23b)** — `next.x0 − head.x1 = 0pt`: the chain is whole, the line is one run,
+///   and its quota is the grid span `72..158.4 = 86.4pt`.
+/// * **the approximation** — the font has no metric, so `fragment_advance` charges `0.5em` per
+///   character: the head measures `42pt` instead of `50.4pt`, the computed gap becomes `8.4pt`,
+///   past the bound, and the chain breaks — leaving `ence` an orphan with a line-sized box,
+///   exactly the field report.
+///
+/// Under 0.4.2 both the break and the missing metric conspired: the orphan refused outright.
+/// T23b re-merges the line; T23c gives the single run a char-grid quota, so a short replacement
+/// fits and an over-wide one hard-refuses quoting both widths (O1).
+pub fn unmeasurable_chain_break() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(unmeasurable_font_face());
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    // Each glyph is 0.6em = 7.2pt at 12pt, so `DataSci` (7 glyphs) is 50.4pt wide and the tail
+    // starts at exactly 122.4pt. Two `Tj` operators, so PDFium reports one box per operator.
+    let operations = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("Tj", vec![Object::string_literal("DataSci")]),
+        Operation::new("ET", vec![]),
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![Object::Real(122.4), 700.into()]),
+        Operation::new("Tj", vec![Object::string_literal("ence")]),
+        Operation::new("ET", vec![]),
+    ];
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
 /// §3 `wider-replacement-orphan.pdf`: the user's exact 0.4.1 failure, in one fixture.
 ///
 /// A `TJ` line `DataScien|ce` whose seam is wide enough (`0.6em`) to break the chain leaves the

@@ -1272,16 +1272,122 @@ fn an_unmeasurable_font_run_is_measurable_from_the_char_grid() {
         "the fixture's font carries no in-file metrics"
     );
 
-    // The quota is a *rendered* measurement (12 glyphs x 0.6em at 12pt = 86.4pt), not the
-    // 72pt the `0.5em`-per-character approximation would give. In this phase the quota is the
-    // box when it is ~= the span (0.4.2's rule); the precise span becomes the quota in Phase B.
+    // The char-grid quota is the rendered span, 12 glyphs x 0.6em at 12pt = 86.4pt.
     let width = run.width.expect("an editable run has a quota");
     assert!(
-        width > 80.0 && width < 90.0,
-        "the quota is the rendered measurement, not the 72pt approximation: {width}"
+        (width - 86.4).abs() < 0.5,
+        "the quota is the rendered span, not the approximation: {width}"
     );
     assert!(
         !run.box_suspicious,
         "the box is ~= the span, so it is not line-sized"
     );
+}
+
+/// §3 `unmeasurable-chain-break.pdf`: the Maastricht line-1 shape, memorialised.
+///
+/// Two `Tj` operands — `DataSci` and `ence` — placed so the tail begins exactly where the head's
+/// **rendered** advance ends (a zero seam). The font has no in-file metrics, so 0.4.2 measured
+/// the head with the `0.5em` approximation (`42pt` instead of `50.4pt`), computed a spurious
+/// `8.4pt` gap, broke the chain, left `ence` an orphan on a line-sized box, and refused the page.
+///
+/// T23b measures the seam from the char grid: gap = `next.x0 - head.x1 = 0`, the chain is whole,
+/// and the line is **one** editable run with one quota. A short replacement fits; an over-wide
+/// one hard-refuses quoting both widths (O1).
+#[test]
+fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("unmeasurable-chain-break.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
+
+    // The line is ONE entry: T23b re-merged the two operands that the approximation severed.
+    assert_eq!(
+        runs.len(),
+        1,
+        "the whole line is one run, not a head + orphan"
+    );
+    let line = &runs[0];
+    assert_eq!(line.text, "DataScience");
+    assert_eq!(line.fragment_count, 2, "both operands folded in");
+    assert!(line.admissibility.editable);
+    assert_eq!(
+        line.pair_confidence,
+        Some(textedit::PairConfidence::Strong),
+        "the head's pair is strong"
+    );
+    assert!(
+        !line.box_suspicious,
+        "a genuinely merged line is not box-suspicious"
+    );
+    let quota = line.width.expect("the merged line has a quota");
+    assert!(quota > 70.0, "the whole line's span: {quota}");
+
+    // A short replacement — same glyph count, same width — fits the merged line.
+    let short = "DataSci";
+    let new_width = measured_width(short, line.font_size);
+    assert!(new_width <= quota, "{new_width} <= {quota}");
+    let mut document = load(&path);
+    let tail: Vec<textedit::FragmentRef> = line.fragments[1..]
+        .iter()
+        .map(|fragment| textedit::FragmentRef {
+            run_id: fragment.run_id.clone(),
+            text: fragment.text.clone(),
+        })
+        .collect();
+    let measure = move |_text: &str| Ok(new_width);
+    let request = textedit::EditRequest {
+        page: 0,
+        run_id: line.fragments[0].run_id.clone(),
+        expected: line.fragments[0].text.clone(),
+        replacement: short.to_string(),
+        old_width: quota,
+        font_size: line.font_size,
+        allow_substitution: true,
+        fragments: tail,
+        measure: &measure,
+    };
+    textedit::edit(&mut document, &request).expect("a short replacement fits the merged line");
+
+    // An over-wide replacement hard-refuses, quoting the run's own span and the replacement.
+    let wide = "DataScience and more";
+    let wide_width = measured_width(wide, line.font_size);
+    assert!(wide_width > quota, "{wide_width} > {quota}");
+    let mut document = load(&path);
+    let tail: Vec<textedit::FragmentRef> = line.fragments[1..]
+        .iter()
+        .map(|fragment| textedit::FragmentRef {
+            run_id: fragment.run_id.clone(),
+            text: fragment.text.clone(),
+        })
+        .collect();
+    let measure = move |_text: &str| Ok(wide_width);
+    let request = textedit::EditRequest {
+        page: 0,
+        run_id: line.fragments[0].run_id.clone(),
+        expected: line.fragments[0].text.clone(),
+        replacement: wide.to_string(),
+        old_width: quota,
+        font_size: line.font_size,
+        allow_substitution: true,
+        fragments: tail,
+        measure: &measure,
+    };
+    let error = textedit::edit(&mut document, &request)
+        .expect_err("a line-wide replacement into the merged run must be refused");
+    assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+    let message = error.to_string();
+    assert!(message.contains("fits-width"), "{message}");
+    assert!(
+        message.contains(&format!("{wide_width:.1}pt")),
+        "quotes the replacement width: {message}"
+    );
+    assert!(
+        message.contains(&format!("{quota:.1}pt")),
+        "quotes the run's own span: {message}"
+    );
+    assert!(message.contains("add a text annotation"), "{message}");
 }
