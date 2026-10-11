@@ -279,21 +279,6 @@ impl PdfiumCharGrid {
         }
         None
     }
-
-    /// The first grid index whose advance box starts at or after `x`, on the baseline band.
-    ///
-    /// Used to anchor a walk at the paired box's left edge (T23a's "x ≥ box.x0 − tolerance").
-    pub fn first_index_from(&self, x: f32, band: (f32, f32), x_min: f32) -> usize {
-        self.chars
-            .iter()
-            .position(|ch| (band.0..=band.1).contains(&ch.origin_y) && ch.x0 >= x_max(x, x_min))
-            .unwrap_or(0)
-    }
-}
-
-/// `a.max(b)` as a free function, so [`PdfiumCharGrid::first_index_from`] reads as one predicate.
-fn x_max(a: f32, b: f32) -> f32 {
-    a.max(b)
 }
 
 /// Reads PDFium's whole-page character grid (P2.4.3 T23a).
