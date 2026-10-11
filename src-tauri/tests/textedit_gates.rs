@@ -25,11 +25,17 @@ use document_reader_lib::editor::geometry::PdfRect;
 use document_reader_lib::editor::protect;
 use document_reader_lib::editor::runmetrics::{self, PdfiumRun};
 use document_reader_lib::editor::textedit;
-use document_reader_lib::editor::textlocate::{self, ContentOperation, RunId};
+use document_reader_lib::editor::textlocate::{self, RunId};
 use document_reader_lib::model::AppError;
 use document_reader_lib::provider::PdfProvider;
 
 mod support;
+
+use document_reader_lib::db::{search, Db};
+use document_reader_lib::index::{app as index_app, IndexService};
+use document_reader_lib::library;
+use document_reader_lib::render::RenderService;
+use std::sync::Arc;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -67,7 +73,31 @@ fn edit_with(
     replacement: &str,
     old_width: f32,
     new_width: f32,
-) -> Result<ContentOperation, AppError> {
+) -> Result<textedit::EditOutcome, AppError> {
+    edit_with_options(
+        document,
+        page,
+        run_id,
+        expected,
+        replacement,
+        old_width,
+        new_width,
+        true,
+    )
+}
+
+/// The same, with the O-ST2-4 toggle and font size exposed for the substitution gates.
+#[allow(clippy::too_many_arguments)]
+fn edit_with_options(
+    document: &mut lopdf::Document,
+    page: u32,
+    run_id: RunId,
+    expected: &str,
+    replacement: &str,
+    old_width: f32,
+    new_width: f32,
+    allow_substitution: bool,
+) -> Result<textedit::EditOutcome, AppError> {
     let measure = move |_text: &str| Ok(new_width);
     let request = textedit::EditRequest {
         page,
@@ -75,6 +105,8 @@ fn edit_with(
         expected: expected.to_string(),
         replacement: replacement.to_string(),
         old_width,
+        font_size: 24.0,
+        allow_substitution,
         measure: &measure,
     };
     textedit::edit(document, &request)
@@ -93,7 +125,7 @@ fn simple_winansi_edits_and_saves_a_new_file() {
     let run = first_run(&document, 0);
     assert_eq!(run.text, "ALPHA");
 
-    let inverse = edit_with(
+    let outcome = edit_with(
         &mut document,
         0,
         run.id.clone(),
@@ -104,20 +136,29 @@ fn simple_winansi_edits_and_saves_a_new_file() {
     )
     .expect("the best case must be editable");
 
-    assert_eq!(inverse.old_bytes, b"ALPHA");
-    assert_eq!(inverse.new_bytes, b"BRAVO");
+    assert_eq!(outcome.inverse.old_bytes, b"ALPHA");
+    assert_eq!(outcome.inverse.new_bytes, b"BRAVO");
+    // A standard-14 original keeps its own font: no substitution, no disclosure (T11/T10).
+    assert!(outcome.substitution.is_none());
+    assert!(outcome.note.is_none());
 
     // The written bytes re-read as the edit, and the original file is untouched on disk.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("edited.pdf");
     document.save(&target).unwrap();
-    let reread = textlocate::locate_runs(&load(&target), textlocate::page_id(&load(&target), 0).unwrap())
-        .unwrap();
+    let reread = textlocate::locate_runs(
+        &load(&target),
+        textlocate::page_id(&load(&target), 0).unwrap(),
+    )
+    .unwrap();
     assert_eq!(reread[0].text, "BRAVO");
 
     let original = load(&fixture("simple-winansi.pdf"));
     let original_run = first_run(&original, 0);
-    assert_eq!(original_run.text, "ALPHA", "the fixture on disk was not modified");
+    assert_eq!(
+        original_run.text, "ALPHA",
+        "the fixture on disk was not modified"
+    );
 }
 
 // --- gate (a) ------------------------------------------------------------------
@@ -156,18 +197,211 @@ fn roundtrip_fail_is_refused_by_gate_b() {
     assert!(error.to_string().contains("encoding-round-trip"), "{error}");
 }
 
-// --- gate (c) ------------------------------------------------------------------
+// --- gate (c) → Stage 2 substitution -------------------------------------------
 
+/// Stage 1 refused a subset font outright. Stage 2 (§3) turns that refusal into MECH-A:
+/// with substitution on (the default), a subset run is edited by switching it to a
+/// standard-14 substitute, and the success path names the substitute (T10).
+///
+/// **Design-vs-reality note:** Stage 1's `subset_font_is_refused_by_gate_c` asserted a
+/// `not-subset` refusal against `simple-embedded-subset.pdf`. That assertion is obsolete —
+/// the design's §3 gate table explicitly says `font-subset` becomes "MECH-A substitute".
+/// The fixture still has a subset-flagged name and no program, so it is not covered and
+/// substitutes; the refusal it used to prove is now proved by `refuses_...when_off` below
+/// (with the toggle off) and by `non_winansi_replacement_is_not_coverable`.
 #[test]
-fn subset_font_is_refused_by_gate_c() {
+fn subset_font_is_substituted_by_stage_two() {
     let mut document = load(&fixture("simple-embedded-subset.pdf"));
     let run = first_run(&document, 0);
     assert_eq!(run.text, "SUBSET");
 
-    let error = edit_with(&mut document, 0, run.id, "SUBSET", "EDIT", 100.0, 10.0)
-        .expect_err("a subset font must be refused");
+    // old_width is generous so the width gate does not pre-empt the substitution path.
+    let outcome = edit_with(&mut document, 0, run.id, "SUBSET", "EDIT", 100.0, 5.0)
+        .expect("a subset font is editable in Stage 2");
+    assert_eq!(outcome.substitution.as_deref(), Some("Helvetica"));
+    assert!(
+        outcome.note.as_deref().unwrap().contains("substituting"),
+        "the note must disclose the substitution: {:?}",
+        outcome.note
+    );
+    assert!(
+        outcome.inverse.font_swap.is_some(),
+        "the /Tf swap is recorded for undo"
+    );
+}
+
+/// O-ST2-4: the toggle off restores Stage-1 behaviour for the same run.
+#[test]
+fn subset_font_is_refused_when_substitution_is_off() {
+    let mut document = load(&fixture("simple-embedded-subset.pdf"));
+    let run = first_run(&document, 0);
+
+    let error = edit_with_options(
+        &mut document,
+        0,
+        run.id,
+        "SUBSET",
+        "EDIT",
+        100.0,
+        5.0,
+        false,
+    )
+    .expect_err("with substitution off, a subset must refuse");
+    assert_eq!(error.code(), "SUBSTITUTE_REFUSED");
+    assert!(
+        error.to_string().contains("add a text annotation"),
+        "{error}"
+    );
+}
+
+// --- T11: coverage keeps the original font -------------------------------------
+
+/// The requirement's headline test: the original subset genuinely contains every glyph
+/// the replacement needs, so the original font is kept, no substitution fires, and no
+/// note is produced.
+#[test]
+fn subset_winansi_keeps_the_original_font_when_it_covers() {
+    let mut document = load(&fixture("subset-winansi.pdf"));
+    let run = first_run(&document, 0);
+    assert_eq!(run.text, "SUBSET");
+
+    // "SET" uses only glyphs the fixture's program maps.
+    let outcome = edit_with(&mut document, 0, run.id, "SUBSET", "SET", 100.0, 5.0)
+        .expect("a covered subset edit must succeed");
+    assert!(
+        outcome.substitution.is_none(),
+        "no substitution when the font covers"
+    );
+    assert!(
+        outcome.note.is_none(),
+        "no substitution note when the font covers"
+    );
+    assert!(
+        outcome.inverse.font_swap.is_none(),
+        "the /Tf stays on the original font"
+    );
+    assert_eq!(outcome.inverse.new_bytes, b"SET");
+}
+
+/// T11's other half: the subset lacks a needed glyph, so MECH-A substitutes.
+#[test]
+fn subset_winansi_escape_substitutes_when_the_glyph_is_missing() {
+    let mut document = load(&fixture("subset-winansi-escape.pdf"));
+    let run = first_run(&document, 0);
+    assert_eq!(run.text, "WIND");
+
+    // "WINDOW" needs O, which the program does not map. old_width is generous so the
+    // width gate (which now measures the substitute) does not pre-empt the substitution.
+    let outcome = edit_with(&mut document, 0, run.id, "WIND", "WINDOW", 200.0, 5.0)
+        .expect("an uncovered subset edit substitutes");
+    assert_eq!(outcome.substitution.as_deref(), Some("Helvetica"));
+    assert!(outcome.note.as_deref().unwrap().contains("substituting"));
+    assert!(outcome.inverse.font_swap.is_some());
+
+    // The swap really happened: reload and confirm the run's /Tf now names the substitute
+    // and the text reads back as the replacement.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("edited.pdf");
+    document.save(&target).unwrap();
+    let reread = load(&target);
+    let after = first_run(&reread, 0);
+    assert_eq!(after.text, "WINDOW");
+    assert_eq!(after.font_key, b"FS1");
+}
+
+// --- T13: the width gate uses the FINAL font's metrics -------------------------
+
+/// After a substitution the width gate compares the *substitute's* AFM width (T13), and a
+/// refusal reports that measured width.
+#[test]
+fn wider_after_substitute_refuses_with_substitute_metrics() {
+    let mut document = load(&fixture("subset-wider-after-substitute.pdf"));
+    let run = first_run(&document, 0);
+    assert_eq!(run.text, "HI");
+
+    // Helvetica AFM width of "WWWWWWWW" at 24pt is far past a 5pt run; the measured
+    // `new_width` supplied here is irrelevant because MECH-A overrides it with AFM.
+    let error = edit_with(&mut document, 0, run.id, "HI", "WWWWWWWW", 5.0, 5.0)
+        .expect_err("the substitute's metrics overflow the run");
     assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
-    assert!(error.to_string().contains("not-subset"), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("fits-width"), "{message}");
+    // 8 x Helvetica 'W' (944/1000 em) at 24pt = 181.2pt; the run has 5.0pt.
+    assert!(
+        message.contains("181.2"),
+        "must quote the substitute's width: {message}"
+    );
+    assert!(
+        message.contains("5.0"),
+        "must quote the available width: {message}"
+    );
+    assert!(message.contains("add a text annotation"), "{message}");
+}
+
+// --- MECH-B absence: non-WinAnsi is not coverable -------------------------------
+
+/// §6 / MECH-B: a replacement needing a glyph outside WinAnsi (an em-dash, a typographic
+/// arrow) can be supplied by neither the subset nor any standard-14 substitute, so it
+/// refuses `GLYPHS_NOT_COVERABLE` — the documented case for MECH-B.
+#[test]
+fn non_winansi_replacement_is_not_coverable() {
+    let mut document = load(&fixture("non-winansi-replacement.pdf"));
+    let run = first_run(&document, 0);
+    assert_eq!(run.text, "HI");
+
+    // U+2014 EM DASH and U+2192 RIGHTWARDS ARROW have no WinAnsi code.
+    let error = edit_with(
+        &mut document,
+        0,
+        run.id,
+        "HI",
+        "H\u{2014}\u{2192}",
+        100.0,
+        5.0,
+    )
+    .expect_err("a non-WinAnsi replacement cannot be covered");
+    assert_eq!(error.code(), "GLYPHS_NOT_COVERABLE");
+    assert!(
+        error.to_string().contains("add a text annotation"),
+        "{error}"
+    );
+}
+
+// --- style match (§6 case table) ------------------------------------------------
+
+/// Every original-name page maps to the documented standard-14 family (O-ST2-6), with the
+/// subset prefix stripped first.
+#[test]
+fn style_match_cases_map_to_the_documented_fonts() {
+    use document_reader_lib::editor::substitute::style_match;
+
+    let document = load(&fixture("style-match-cases.pdf"));
+    let expected = [
+        "Times-Roman",
+        "Times-BoldItalic",
+        "Courier",
+        "Times-Roman",
+        "Helvetica",
+        "Helvetica-Bold",
+        "Helvetica-Oblique",
+    ];
+
+    let page_ids: Vec<_> = (0..expected.len() as u32)
+        .map(|page| textlocate::page_id(&document, page).unwrap())
+        .collect();
+    assert_eq!(page_ids.len(), expected.len(), "one page per case");
+
+    for (page, want) in expected.iter().enumerate() {
+        let page_id = page_ids[page];
+        let run = &textlocate::locate_runs(&document, page_id).unwrap()[0];
+        let info = textlocate::font_info(&document, page_id, &run.font_key).unwrap();
+        assert_eq!(
+            style_match(info.base_font.as_deref()),
+            *want,
+            "page {page} ({:?})",
+            info.base_font
+        );
+    }
 }
 
 // --- gate (d) ------------------------------------------------------------------
@@ -184,8 +418,14 @@ fn too_wide_is_refused_by_gate_d_with_both_widths() {
         .expect_err("an over-wide replacement must be refused");
     assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
     let message = error.to_string();
-    assert!(message.contains("41.3"), "must report needed width: {message}");
-    assert!(message.contains("38.7"), "must report available width: {message}");
+    assert!(
+        message.contains("41.3"),
+        "must report needed width: {message}"
+    );
+    assert!(
+        message.contains("38.7"),
+        "must report available width: {message}"
+    );
     assert!(message.contains("fits-width"), "{message}");
 }
 
@@ -227,7 +467,8 @@ fn measured_widths_refuse_a_genuinely_wider_replacement() {
     let message = error.to_string();
     assert!(message.contains("fits-width"), "{message}");
     assert!(
-        message.contains(&format!("{new_width:.1}")) && message.contains(&format!("{:.1}", run.width)),
+        message.contains(&format!("{new_width:.1}"))
+            && message.contains(&format!("{:.1}", run.width)),
         "both measured widths must appear: {message}"
     );
 }
@@ -302,7 +543,11 @@ fn decrypt_copy_writes_an_unprotected_file() {
     assert!(!protect::is_encrypted(copy).unwrap());
     assert_eq!(PdfProvider::page_count(copy).unwrap(), 3);
     assert!(
-        copy.file_name().unwrap().to_str().unwrap().contains("(unprotected)"),
+        copy.file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("(unprotected)"),
         "unexpected name: {outcome:?}"
     );
 
@@ -341,7 +586,10 @@ fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
     let verdicts = textedit::describe_runs(&cid, 0, &[]).unwrap();
     assert_eq!(verdicts.len(), 1);
     assert!(!verdicts[0].admissibility.editable);
-    assert_eq!(verdicts[0].admissibility.gate.as_deref(), Some("simple-font"));
+    assert_eq!(
+        verdicts[0].admissibility.gate.as_deref(),
+        Some("simple-font")
+    );
 }
 
 // --- T3d geometry conversion ---------------------------------------------------
@@ -362,5 +610,65 @@ fn a_run_rect_converts_through_the_shared_geometry() {
 
     // 792pt tall page: the conversion flips y so the overlay can draw in CSS space.
     let (_x, y, _w, _h) = document_reader_lib::editor::geometry::pdf_to_page(rect, 1.0, 792.0);
-    assert!((0.0..=792.0).contains(&y), "converted y out of page bounds: {y}");
+    assert!(
+        (0.0..=792.0).contains(&y),
+        "converted y out of page bounds: {y}"
+    );
+}
+
+// --- T16 / R5: the edited copy is re-indexed, and search finds the NEW text ----------
+
+/// T16 extends T6: a substituting edit changes the page's text, so the copy's FTS5 rows
+/// must be rebuilt from the bytes actually written — not left pointing at the pre-edit
+/// text, and not merely cache-invalidated.
+///
+/// The test walks the real path the edit command takes: apply the edit to the fixture
+/// through lopdf, write the copy, import it through the library layer, and index it with
+/// the index service. It asserts the new text is searchable *and* the old text is not,
+/// which is the difference between "re-extracted" and "stale rows survive".
+#[test]
+fn a_substitution_edit_re_indexes_the_copy_so_search_finds_the_new_text() {
+    if !pdfium_ready() {
+        return;
+    }
+
+    let db = Db::open_in_memory().unwrap();
+    let render = Arc::new(RenderService::new());
+    let index_service = IndexService::new();
+
+    // Edit the fixture in memory and write the copy to a temp path.
+    let mut document = load(&fixture("subset-winansi-escape.pdf"));
+    let run = first_run(&document, 0);
+    assert_eq!(run.text, "WIND");
+    let outcome = edit_with(&mut document, 0, run.id, "WIND", "WINDOW", 200.0, 5.0).unwrap();
+    assert!(outcome.substitution.is_some(), "this edit substitutes");
+
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("edited.pdf");
+    document.save(&copy).unwrap();
+
+    // Import the copy through the ordinary library route, then index it exactly as the
+    // command's detached `spawn_import_and_index` does.
+    let entry = db
+        .with(|connection| library::open_and_import(connection, &copy, 1))
+        .unwrap();
+    let doc_id = entry.meta.id.clone();
+    index_app::index_document(None, &db, &render, &index_service, &doc_id).unwrap();
+
+    // R5: search finds the NEW text.
+    let hits = db
+        .with(|connection| search::query(connection, "WINDOW", 10))
+        .unwrap();
+    assert_eq!(hits.len(), 1, "the replacement text must be searchable");
+    assert_eq!(hits[0].document_id, doc_id);
+    assert_eq!(hits[0].page, 0);
+
+    // And the pre-edit text is gone: the rows were replaced, not appended.
+    let stale = db
+        .with(|connection| search::query(connection, "WIND", 10))
+        .unwrap();
+    assert!(
+        stale.is_empty(),
+        "the pre-edit token must not survive re-indexing: {stale:?}"
+    );
 }

@@ -212,13 +212,26 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
 /// machine: `Tf` inside a form XObject or a nested `q`/`Q` is out of scope for Stage 1,
 /// and the gates refuse anything whose font this simple walk cannot resolve.
 fn font_in_force(operations: &[Operation], op_index: usize) -> Option<Vec<u8>> {
+    font_in_force_with_index(operations, op_index).map(|(_, name)| name)
+}
+
+/// The index of the governing `Tf` and the resource name it sets.
+///
+/// The index matters for MECH-A: the substitute is installed by rewriting that exact
+/// `Tf`, so the swap can be recorded and reverted at the same address the run read.
+fn font_in_force_with_index(operations: &[Operation], op_index: usize) -> Option<(usize, Vec<u8>)> {
     operations[..=op_index]
         .iter()
+        .enumerate()
         .rev()
-        .find(|operation| operation.operator == "Tf")
-        .and_then(|operation| operation.operands.first())
-        .and_then(|operand| operand.as_name().ok())
-        .map(|name| name.to_vec())
+        .find(|(_, operation)| operation.operator == "Tf")
+        .and_then(|(index, operation)| {
+            operation
+                .operands
+                .first()
+                .and_then(|operand| operand.as_name().ok())
+                .map(|name| (index, name.to_vec()))
+        })
 }
 
 /// The properties a run's font must have for Stage 1, read from the font dictionary.
@@ -257,9 +270,7 @@ pub fn is_subset_font(base_font: Option<&str>) -> bool {
         return false;
     };
     let bytes = name.as_bytes();
-    bytes.len() > 7
-        && bytes[6] == b'+'
-        && bytes[..6].iter().all(u8::is_ascii_uppercase)
+    bytes.len() > 7 && bytes[6] == b'+' && bytes[..6].iter().all(u8::is_ascii_uppercase)
 }
 
 /// True when the font is CID-keyed (Type0 / Identity-H), which Stage 1 cannot edit.
@@ -321,8 +332,12 @@ pub fn apply_text(
     let fonts = document
         .get_page_fonts(page_id)
         .map_err(|error| AppError::Other(format!("could not read page fonts: {error}")))?;
-    let font_key = font_in_force(&content.operations, id.op_index).ok_or(AppError::TextRunMismatch)?;
-    let font = fonts.get(&font_key).copied().ok_or(AppError::TextRunMismatch)?;
+    let font_key =
+        font_in_force(&content.operations, id.op_index).ok_or(AppError::TextRunMismatch)?;
+    let font = fonts
+        .get(&font_key)
+        .copied()
+        .ok_or(AppError::TextRunMismatch)?;
     let encoding = font
         .get_font_encoding(document)
         .map_err(|_| AppError::TextRunMismatch)?;
@@ -356,7 +371,149 @@ pub fn apply_text(
         operand_path: id.operand_path.clone(),
         old_bytes,
         new_bytes: new_bytes.to_vec(),
+        font_swap: None,
     })
+}
+
+/// Installs a standard-14 substitute font as a resource on `page_id` and rewrites the
+/// run's governing `Tf` to name it, returning the [`FontSwap`] for undo (P2.4 Stage 2
+/// T10/T15).
+///
+/// The substitute dictionary is a document-local, standard-14 `/Type1` entry with
+/// `/Encoding /WinAnsiEncoding` — no font stream, no CMap, nothing that needs a program
+/// file the viewer must have (T15). The resource *name* is the same for every substitute
+/// on a page (`FS1`), so a second substitution on the page reuses one dictionary rather
+/// than accumulating one per edit; that is also what keeps the resource dictionary
+/// bounded on a long session.
+pub fn apply_font_swap(
+    document: &mut Document,
+    page_index: u32,
+    page_id: ObjectId,
+    id: &RunId,
+    base_font: &str,
+) -> Result<FontSwap, AppError> {
+    let _ = (page_index, base_font);
+    ensure_substitute_resource(document, page_id, base_font)?;
+
+    let mut content = decoded_content(document, page_id)?;
+    let (tf_index, old_name) = font_in_force_with_index(&content.operations, id.op_index)
+        .ok_or(AppError::TextRunMismatch)?;
+
+    // `Tf` is `name size Tf`; operand 0 is the resource name. Rewriting it is the whole
+    // swap: the substitute declares `/WinAnsiEncoding`, the encoding the run's bytes were
+    // already decoded through, so no byte remapping is needed for MECH-A.
+    {
+        let operation = content
+            .operations
+            .get_mut(tf_index)
+            .ok_or(AppError::TextRunMismatch)?;
+        let slot = operation
+            .operands
+            .first_mut()
+            .ok_or(AppError::TextRunMismatch)?;
+        *slot = Object::Name(SUBSTITUTE_NAME.to_vec());
+    }
+
+    let encoded = content
+        .encode()
+        .map_err(|error| AppError::Other(format!("could not re-encode page content: {error}")))?;
+    document
+        .change_page_content(page_id, encoded)
+        .map_err(|error| AppError::Other(format!("could not replace page content: {error}")))?;
+
+    Ok(FontSwap {
+        op_index: tf_index,
+        operand_path: vec![0],
+        old_name,
+        new_name: SUBSTITUTE_NAME.to_vec(),
+    })
+}
+
+/// The resource name every MECH-A substitute is installed under.
+///
+/// One name per document, not per substitute: a page that substitutes twice reuses one
+/// dictionary rather than accumulating one entry per edit, which keeps the resource
+/// dictionary bounded. On a document whose pages *share* one `/Resources` object (the
+/// synthetic fixtures do), a later substitution to a different family replaces the
+/// earlier one's dictionary — acceptable for MECH-A, whose substitutes are all
+/// standard-14 and all WinAnsi-encoded.
+const SUBSTITUTE_NAME: &[u8] = b"FS1";
+
+/// Ensures the page's `/Font` resources map [`SUBSTITUTE_NAME`] to a standard-14
+/// dictionary for `base_font` (P2.4 Stage 2 T15).
+///
+/// Standard-14 needs no program: the entry is a document-local `/Type1` dictionary with
+/// `/Encoding /WinAnsiEncoding`. No stream, no CMap. The page's `/Resources` may be an
+/// indirect reference or an inline dictionary; both are handled.
+fn ensure_substitute_resource(
+    document: &mut Document,
+    page_id: ObjectId,
+    base_font: &str,
+) -> Result<ObjectId, AppError> {
+    let mut font_dictionary = lopdf::Dictionary::new();
+    font_dictionary.set("Type", Object::Name(b"Font".to_vec()));
+    font_dictionary.set("Subtype", Object::Name(b"Type1".to_vec()));
+    font_dictionary.set("BaseFont", Object::Name(base_font.as_bytes().to_vec()));
+    font_dictionary.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
+    let substitute_id = document.add_object(font_dictionary);
+
+    // `get_page_resources` walks the page and its `/Parent` chain; the first reference it
+    // reports is the page's own `/Resources` when that is indirect. An inline `/Resources`
+    // (or an absent one) reports nothing and is handled on the page dictionary itself.
+    let (_, resource_ids) = document
+        .get_page_resources(page_id)
+        .map_err(|error| AppError::Other(format!("could not read page resources: {error}")))?;
+
+    if let Some(resources_id) = resource_ids.first().copied() {
+        let resources = document
+            .get_object_mut(resources_id)
+            .map_err(|error| AppError::Other(format!("page resources unreadable: {error}")))?
+            .as_dict_mut()
+            .map_err(|error| {
+                AppError::Other(format!("page resources not a dictionary: {error}"))
+            })?;
+        set_font_entry(resources, substitute_id)?;
+    } else {
+        let page = document
+            .get_object_mut(page_id)
+            .map_err(|error| AppError::Other(format!("page object unreadable: {error}")))?
+            .as_dict_mut()
+            .map_err(|error| AppError::Other(format!("page object not a dictionary: {error}")))?;
+        if !page.has(b"Resources") {
+            page.set(b"Resources", Object::Dictionary(lopdf::Dictionary::new()));
+        }
+        let resources = page
+            .get_mut(b"Resources")
+            .and_then(Object::as_dict_mut)
+            .map_err(|_| {
+                AppError::Other(
+                    "page /Resources is an indirect reference MECH-A cannot rewrite".to_string(),
+                )
+            })?;
+        set_font_entry(resources, substitute_id)?;
+    }
+
+    Ok(substitute_id)
+}
+
+/// Sets `/Font /FS1` in a resources dictionary, creating `/Font` when absent.
+fn set_font_entry(
+    resources: &mut lopdf::Dictionary,
+    substitute_id: ObjectId,
+) -> Result<(), AppError> {
+    if !resources.has(b"Font") {
+        resources.set(b"Font", Object::Dictionary(lopdf::Dictionary::new()));
+    }
+    let fonts = resources
+        .get_mut(b"Font")
+        .and_then(Object::as_dict_mut)
+        .map_err(|_| {
+            AppError::Other(
+                "page /Font map is an indirect form MECH-A does not rewrite".to_string(),
+            )
+        })?;
+    fonts.set(SUBSTITUTE_NAME, Object::Reference(substitute_id));
+    Ok(())
 }
 
 /// The inverse of one text edit (T5). Applying `old_bytes` where `new_bytes` is now is
@@ -370,6 +527,29 @@ pub struct ContentOperation {
     pub operand_path: Vec<usize>,
     pub old_bytes: Vec<u8>,
     pub new_bytes: Vec<u8>,
+    /// The font-resource swap MECH-A performed, when the edit substituted a font
+    /// (P2.4 Stage 2 T10/T15). `None` for an ordinary Stage-1 edit. Reverted together
+    /// with the bytes so an undo restores the original font as well as the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_swap: Option<FontSwap>,
+}
+
+/// One run's switch from its original font resource to a standard-14 substitute.
+///
+/// Recorded as the `Tf` operation that names the resource, so reverting sets the name
+/// back exactly where it was read — no re-derivation, no guess about which `Tf` governed
+/// the run.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontSwap {
+    /// Index of the governing `Tf` operation in the decoded content.
+    pub op_index: usize,
+    /// Path to the resource-name operand inside that `Tf` (always `[0]` for `Tf`).
+    pub operand_path: Vec<usize>,
+    /// Resource name in force before the edit (`F1`).
+    pub old_name: Vec<u8>,
+    /// Resource name the edit switched the run to (`FS1`).
+    pub new_name: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -385,7 +565,10 @@ mod tests {
         let runs = locate_runs(&document, page).unwrap();
 
         let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
-        assert_eq!(texts, vec!["ALPHA", "Document Reader P1 fixture, page one."]);
+        assert_eq!(
+            texts,
+            vec!["ALPHA", "Document Reader P1 fixture, page one."]
+        );
         // Two separate `Tj` operations, each a one-string run. `BT`/`Tf`/`Td` precede
         // the first `Tj`, so its operation index is 3, not 0.
         assert_eq!(runs[0].id.op_index, 3);
@@ -438,11 +621,7 @@ mod tests {
                 Operation::new("Tf", vec!["F1".into(), 12.into()]),
                 Operation::new(
                     "\"",
-                    vec![
-                        1.into(),
-                        2.into(),
-                        Object::string_literal("spaced"),
-                    ],
+                    vec![1.into(), 2.into(), Object::string_literal("spaced")],
                 ),
                 Operation::new("ET", vec![]),
             ],
@@ -506,15 +685,8 @@ mod tests {
         let target = runs[0].clone();
 
         let page_obj = page_id(&document, 0).unwrap();
-        let inverse = apply_text(
-            &mut document,
-            0,
-            page_obj,
-            &target.id,
-            "ALPHA",
-            b"BRAVO",
-        )
-        .unwrap();
+        let inverse =
+            apply_text(&mut document, 0, page_obj, &target.id, "ALPHA", b"BRAVO").unwrap();
 
         assert_eq!(inverse.old_bytes, b"ALPHA");
         assert_eq!(inverse.new_bytes, b"BRAVO");

@@ -1,6 +1,7 @@
 //! The P2 editing seam (P2-D1). Commands delegate here; no editing logic lives
 //! in the Tauri command layer.
 
+pub mod afm;
 pub mod annotate;
 pub mod events;
 pub mod export;
@@ -12,8 +13,9 @@ pub mod protect;
 pub mod runmetrics;
 pub mod save;
 pub mod session;
-pub mod textedit;
-pub mod textlocate;
+pub mod substitute;
 #[cfg(any(test, feature = "testfixtures"))]
 pub mod testpdf;
+pub mod textedit;
+pub mod textlocate;
 pub mod undo;

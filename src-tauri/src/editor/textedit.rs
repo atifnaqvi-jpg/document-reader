@@ -22,8 +22,7 @@
 use lopdf::Document;
 
 use crate::editor::textlocate::{
-    self, is_cid_font, is_simple_font, is_subset_font, page_id, ContentOperation, FontInfo, RawRun,
-    RunId,
+    self, is_cid_font, is_simple_font, page_id, ContentOperation, FontInfo, RawRun, RunId,
 };
 use crate::model::AppError;
 
@@ -131,11 +130,7 @@ pub struct RunGates {
 /// An unresolvable font is not an error here: it is simply not editable, and the
 /// caller reports that as a gate refusal. Only a genuinely unreadable document (no
 /// page, no content) surfaces as an error.
-pub fn resolve_gates(
-    document: &Document,
-    page: u32,
-    run: &RawRun,
-) -> Result<RunGates, AppError> {
+pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<RunGates, AppError> {
     let page_id = page_id(document, page)?;
     let font = textlocate::font_info(document, page_id, &run.font_key).ok_or_else(|| {
         AppError::TextRunNotEditable(format!(
@@ -163,15 +158,20 @@ pub fn resolve_gates(
 
 /// The a/b/c verdict for a run, independent of the width gate (which needs PDFium and
 /// is folded in by the caller).
+///
+/// Stage 2 (T14) keeps the SimpleFont and EncodingRoundTrip refusals exactly as Stage 1
+/// had them, and **stops refusing a subset font**: a subset is now the *trigger* for
+/// MECH-A substitution, whose keep-original/substitute decision needs the replacement text
+/// (T11) and therefore cannot be made here. The picker therefore offers a subset run as
+/// editable and the write path resolves the font; a replacement the original cannot set and
+/// no substitute can cover still refuses, with `GLYPHS_NOT_COVERABLE` or
+/// `SUBSTITUTE_REFUSED`.
 pub fn font_admissibility(gates: &RunGates) -> Admissibility {
     if !is_simple_font(&gates.font) {
         return Admissibility::refused(Gate::SimpleFont);
     }
     if is_cid_font(&gates.font) {
         return Admissibility::refused(Gate::SimpleFont);
-    }
-    if is_subset_font(gates.font.base_font.as_deref()) {
-        return Admissibility::refused(Gate::NotSubset);
     }
     if !gates.round_trips {
         return Admissibility::refused(Gate::EncodingRoundTrip);
@@ -304,82 +304,155 @@ pub struct EditRequest<'a> {
     pub replacement: String,
     /// The run's measured advance width in points (PDFium, read-only).
     pub old_width: f32,
+    /// The run's font size, so MECH-A can measure the substitute's width itself (T13).
+    pub font_size: f32,
+    /// The O-ST2-4 toggle: when false, a run whose font cannot set the replacement refuses
+    /// (`SUBSTITUTE_REFUSED`) instead of being switched to a standard-14 font.
+    pub allow_substitution: bool,
     pub measure: WidthMeasure<'a>,
 }
 
-/// Applies a Stage-1 edit, returning the inverse operation for undo (T5).
+/// What an edit actually did, so the caller can surface the substitution note (T10) and
+/// fold the correct inverse into the undo stack (T5/T16).
+#[derive(Debug)]
+pub struct EditOutcome {
+    pub inverse: ContentOperation,
+    /// The substitute's `/BaseFont` when MECH-A fired, `None` for an ordinary edit.
+    pub substitution: Option<String>,
+    /// The disclosure sentence shown to the user when MECH-A fired (T10).
+    pub note: Option<String>,
+}
+
+/// Applies a Stage-2 edit, returning the inverse operation for undo (T5).
 ///
-/// All gates are enforced here — not just the ones the picker precomputed — because the
-/// precomputed verdict is a UX hint and this is the write. The order is deliberate:
-/// encode the replacement first (so an unencodable string cannot pass the width gate
-/// and then corrupt the file), then measure, then re-validate identity, then mutate.
-pub fn edit(
-    document: &mut Document,
-    request: &EditRequest<'_>,
-) -> Result<ContentOperation, AppError> {
+/// Gate order (T11/T13/T14 is load-bearing):
+/// 1. identity + font gates (SimpleFont, EncodingRoundTrip, RunMismatch) — as Stage 1;
+/// 2. **coverage check** — if the run's own font covers the replacement, keep it (T11);
+/// 3. otherwise MECH-A substitute by style-match (or refuse if the toggle is off);
+/// 4. encode the replacement through the *final* font's encoding;
+/// 5. **width gate with the final font's metrics** (T13): the substitute's AFM widths when
+///    MECH-A fires, the caller's measured width otherwise;
+/// 6. mutate through lopdf (bytes + `/Fx` swap).
+pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOutcome, AppError> {
     let page_id = textlocate::page_id(document, request.page)?;
     let runs = textlocate::locate_runs(document, page_id)?;
 
     let run = runs
         .iter()
         .find(|run| run.id == request.run_id)
-        .ok_or_else(|| AppError::TextRunNotEditable(
-            format!("that text is no longer at this position; reopen the page and try again (gate: {})", Gate::EncodingRoundTrip.name()),
-        ))?;
+        .ok_or_else(|| {
+            AppError::TextRunNotEditable(format!(
+                "that text is no longer at this position; reopen the page and try again (gate: {})",
+                Gate::EncodingRoundTrip.name()
+            ))
+        })?;
 
     // T4: the run at this address must still read as what the user edited.
     if run.text != request.expected {
         return Err(AppError::TextRunMismatch);
     }
 
-    // T3 (a)/(c)/(b): re-run the font gates against the freshly parsed run.
+    // T3/T14 (a)/(b): re-run the invariant font gates against the freshly parsed run.
     let gates = resolve_gates(document, request.page, run)?;
     let verdict = font_admissibility(&gates);
     if !verdict.editable {
-        return Err(refuse(
-            match verdict.gate.as_deref() {
-                Some("not-subset") => Gate::NotSubset,
-                Some("encoding-round-trip") => Gate::EncodingRoundTrip,
-                _ => Gate::SimpleFont,
-            },
-        ));
+        return Err(refuse(match verdict.gate.as_deref() {
+            Some("encoding-round-trip") => Gate::EncodingRoundTrip,
+            _ => Gate::SimpleFont,
+        }));
     }
 
-    // Encode the replacement through the *document's own* font encoding. If a glyph is
-    // unmappable, lopdf drops it silently; a length change means the string the user
-    // typed cannot be represented, which is a gate (b) refusal, not a partial write.
-    let encoding = {
-        let fonts = document
-            .get_page_fonts(page_id)
-            .map_err(|error| AppError::Other(format!("could not read page fonts: {error}")))?;
-        fonts
-            .get(&run.font_key)
-            .copied()
-            .and_then(|font| font.get_font_encoding(document).ok())
-            .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?
+    // Stage 2 (T11): keep the original font when it can set the replacement; otherwise
+    // MECH-A picks a standard-14 substitute. This runs BEFORE any mutation.
+    let plan = crate::editor::substitute::plan(
+        document,
+        page_id,
+        &run.font_key,
+        &gates.font,
+        &request.replacement,
+        request.allow_substitution,
+    )?;
+
+    // Step 4 (design §4): encode the replacement through the encoding that will actually
+    // be in force. Keep-original uses the run's own encoding; MECH-A uses WinAnsi, which
+    // the substitute declares. In both cases an unmappable character is a named refusal,
+    // never a silent drop (`string_to_bytes` would drop it).
+    let new_bytes = match &plan {
+        crate::editor::substitute::Plan::KeepOriginal => {
+            let encoding = {
+                let fonts = document.get_page_fonts(page_id).map_err(|error| {
+                    AppError::Other(format!("could not read page fonts: {error}"))
+                })?;
+                fonts
+                    .get(&run.font_key)
+                    .copied()
+                    .and_then(|font| font.get_font_encoding(document).ok())
+                    .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?
+            };
+            let bytes = encoding.string_to_bytes(&request.replacement);
+            let round_tripped = encoding
+                .bytes_to_string(&bytes)
+                .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
+            if round_tripped != request.replacement {
+                return Err(refuse(Gate::EncodingRoundTrip));
+            }
+            bytes
+        }
+        crate::editor::substitute::Plan::Substitute { .. } => {
+            crate::editor::afm::winansi_encode(&request.replacement)
+                .ok_or(AppError::GlyphsNotCoverable)?
+        }
     };
-    let new_bytes = encoding.string_to_bytes(&request.replacement);
-    let round_tripped = encoding
-        .bytes_to_string(&new_bytes)
-        .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
-    if round_tripped != request.replacement {
-        return Err(refuse(Gate::EncodingRoundTrip));
-    }
 
-    // T3 (d): the replacement must fit the space the run occupies.
-    let new_width = (request.measure)(&request.replacement)?;
+    // T13: the width gate compares the FINAL font's metrics. When MECH-A fires, the final
+    // font is the standard-14 substitute and its AFM widths are authoritative; otherwise
+    // the caller's PDFium measurement is. `old_width` is unchanged either way (O1).
+    let (new_width, substitution, note) = match &plan {
+        crate::editor::substitute::Plan::KeepOriginal => {
+            ((request.measure)(&request.replacement)?, None, None)
+        }
+        crate::editor::substitute::Plan::Substitute { base_font, note } => {
+            let width = crate::editor::substitute::substitute_width(
+                base_font,
+                &request.replacement,
+                request.font_size,
+            )
+            .ok_or(AppError::GlyphsNotCoverable)?;
+            (width, Some(base_font.clone()), Some(note.clone()))
+        }
+    };
     if let Some(error) = width_refusal(request.old_width, new_width) {
         return Err(error);
     }
 
-    textlocate::apply_text(
+    // Byte replacement first, then the `/Fx` swap, so a failure in either leaves no
+    // half-done state visible: both mutate the same decoded content before it is written.
+    let mut inverse = textlocate::apply_text(
         document,
         request.page,
         page_id,
         &request.run_id,
         &request.expected,
         &new_bytes,
-    )
+    )?;
+
+    if substitution.is_some() {
+        let base_font = substitution.clone().unwrap_or_default();
+        let swap = textlocate::apply_font_swap(
+            document,
+            request.page,
+            page_id,
+            &request.run_id,
+            &base_font,
+        )?;
+        inverse.font_swap = Some(swap);
+    }
+
+    Ok(EditOutcome {
+        inverse,
+        substitution,
+        note,
+    })
 }
 
 /// Reverses a text edit from its recorded inverse (T5), re-validating first.
@@ -394,7 +467,8 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
         .operations
         .get(operation.op_index)
         .ok_or(AppError::TextRunMismatch)?;
-    let current = string_at(operation_at, &operation.operand_path).ok_or(AppError::TextRunMismatch)?;
+    let current =
+        string_at(operation_at, &operation.operand_path).ok_or(AppError::TextRunMismatch)?;
     if current != operation.new_bytes.as_slice() {
         // Something else changed these bytes since; replaying the inverse would undo an
         // edit the user did not make.
@@ -411,14 +485,39 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
         )
         .ok_or(AppError::TextRunMismatch)?;
         *slot = operation.old_bytes.clone();
-        content
-            .encode()
-            .map_err(|error| AppError::Other(format!("could not re-encode page content: {error}")))?
+
+        // Undo the font swap alongside the bytes (Stage 2 T10/T16): leaving the substitute
+        // in place while restoring the text would silently keep the changed typeface.
+        if let Some(swap) = &operation.font_swap {
+            let slot = operation_at_mut(&mut content, swap).ok_or(AppError::TextRunMismatch)?;
+            *slot = swap.old_name.clone();
+        }
+
+        content.encode().map_err(|error| {
+            AppError::Other(format!("could not re-encode page content: {error}"))
+        })?
     };
 
     document
         .change_page_content(page_id, encoded)
         .map_err(|error| AppError::Other(format!("could not replace page content: {error}")))
+}
+
+/// The mutable resource-name operand a [`FontSwap`] names.
+fn operation_at_mut<'a>(
+    content: &'a mut lopdf::content::Content<Vec<lopdf::content::Operation>>,
+    swap: &crate::editor::textlocate::FontSwap,
+) -> Option<&'a mut Vec<u8>> {
+    let path = swap.operand_path.as_slice();
+    let operation = content.operations.get_mut(swap.op_index)?;
+    let mut current = operation.operands.get_mut(*path.first()?)?;
+    for index in &path[1..] {
+        current = current.as_array_mut().ok()?.get_mut(*index)?;
+    }
+    match current {
+        lopdf::Object::Name(name) => Some(name),
+        _ => None,
+    }
 }
 
 // Local copies of the string accessors, so `revert` does not depend on `textlocate`'s
@@ -469,6 +568,8 @@ mod tests {
             expected: run.text.clone(),
             replacement: replacement.to_string(),
             old_width,
+            font_size: 24.0,
+            allow_substitution: true,
             measure,
         }
     }
@@ -476,14 +577,17 @@ mod tests {
     #[test]
     fn edits_a_simple_font_run_when_it_fits() {
         let mut document = testpdf::simple_winansi();
-        let run = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0]
-            .clone();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         let measure = measure_fixed(30.0);
 
-        let inverse = edit(&mut document, &request(&run, "BRAVO", 38.7, &measure)).unwrap();
+        let outcome = edit(&mut document, &request(&run, "BRAVO", 38.7, &measure)).unwrap();
 
-        assert_eq!(inverse.old_bytes, b"ALPHA");
-        assert_eq!(inverse.new_bytes, b"BRAVO");
+        assert_eq!(outcome.inverse.old_bytes, b"ALPHA");
+        assert_eq!(outcome.inverse.new_bytes, b"BRAVO");
+        // The run's own font was kept: no substitution, no note (T11/T10).
+        assert!(outcome.substitution.is_none());
+        assert!(outcome.note.is_none());
     }
 
     #[test]
@@ -498,16 +602,37 @@ mod tests {
         assert!(error.to_string().contains("simple-font"), "{error}");
     }
 
+    /// Stage 2 T14: a subset font is no longer refused by gate (c). With no embedded
+    /// program to inspect (`subset_font_page` has none), the run is *not* covered, so
+    /// MECH-A substitutes Helvetica and the edit succeeds — where Stage 1 refused.
     #[test]
-    fn refuses_a_subset_font_with_gate_c() {
+    fn substitutes_a_subset_font_rather_than_refusing_it() {
         let mut document = testpdf::subset_font_page();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         let measure = measure_fixed(10.0);
 
-        let error = edit(&mut document, &request(&run, "EDIT", 100.0, &measure)).unwrap_err();
-        assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
-        assert!(error.to_string().contains("not-subset"), "{error}");
+        let outcome = edit(&mut document, &request(&run, "EDIT", 100.0, &measure)).unwrap();
+        assert_eq!(outcome.substitution.as_deref(), Some("Helvetica"));
+        assert!(outcome.note.as_deref().unwrap().contains("substituting"));
+        assert!(
+            outcome.inverse.font_swap.is_some(),
+            "the /Tf swap must be recorded"
+        );
+    }
+
+    /// O-ST2-4: the same run with substitution off refuses `SUBSTITUTE_REFUSED`.
+    #[test]
+    fn refuses_a_subset_font_when_substitution_is_off() {
+        let mut document = testpdf::subset_font_page();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        let measure = measure_fixed(10.0);
+        let mut req = request(&run, "EDIT", 100.0, &measure);
+        req.allow_substitution = false;
+
+        let error = edit(&mut document, &req).unwrap_err();
+        assert_eq!(error.code(), "SUBSTITUTE_REFUSED");
     }
 
     #[test]
@@ -531,16 +656,22 @@ mod tests {
     #[test]
     fn refuses_too_wide_with_both_measured_widths() {
         let mut document = testpdf::simple_winansi();
-        let run = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0]
-            .clone();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         // 38.7pt available, 41.3pt needed: the design's worked example (O1).
         let measure = measure_fixed(41.3);
 
         let error = edit(&mut document, &request(&run, "ALPHABETIC", 38.7, &measure)).unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
         let message = error.to_string();
-        assert!(message.contains("41.3"), "must report the needed width: {message}");
-        assert!(message.contains("38.7"), "must report the available width: {message}");
+        assert!(
+            message.contains("41.3"),
+            "must report the needed width: {message}"
+        );
+        assert!(
+            message.contains("38.7"),
+            "must report the available width: {message}"
+        );
         assert!(message.contains("fits-width"), "{message}");
     }
 
@@ -559,8 +690,8 @@ mod tests {
     #[test]
     fn refuses_when_the_run_no_longer_matches() {
         let mut document = testpdf::simple_winansi();
-        let run = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0]
-            .clone();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         let measure = measure_fixed(30.0);
         let mut req = request(&run, "BRAVO", 100.0, &measure);
         req.expected = "SOMETHING ELSE".to_string();
@@ -572,31 +703,52 @@ mod tests {
     #[test]
     fn revert_restores_the_previous_bytes() {
         let mut document = testpdf::simple_winansi();
-        let run = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0]
-            .clone();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         let measure = measure_fixed(30.0);
 
-        let inverse = edit(&mut document, &request(&run, "BRAVO", 100.0, &measure)).unwrap();
+        let outcome = edit(&mut document, &request(&run, "BRAVO", 100.0, &measure)).unwrap();
 
-        revert(&mut document, &inverse).unwrap();
+        revert(&mut document, &outcome.inverse).unwrap();
 
-        let after =
-            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap();
+        let after = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap();
         assert_eq!(after[0].text, "ALPHA");
+    }
+
+    /// Stage 2 T16: undoing a *substituting* edit restores both the text and the font.
+    #[test]
+    fn revert_restores_the_font_after_a_substitution() {
+        let mut document = testpdf::subset_font_page();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        let measure = measure_fixed(10.0);
+
+        let outcome = edit(&mut document, &request(&run, "EDIT", 100.0, &measure)).unwrap();
+        assert!(outcome.inverse.font_swap.is_some());
+
+        // The substitute is now in force; the run reads through WinAnsi and is "EDIT".
+        let substituted =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap();
+        assert_eq!(substituted[0].text, "EDIT");
+
+        revert(&mut document, &outcome.inverse).unwrap();
+
+        let restored = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap();
+        assert_eq!(restored[0].text, "SUBSET");
     }
 
     #[test]
     fn revert_refuses_when_the_bytes_changed_since() {
         let mut document = testpdf::simple_winansi();
-        let run = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0]
-            .clone();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         let measure = measure_fixed(30.0);
-        let inverse = edit(&mut document, &request(&run, "BRAVO", 100.0, &measure)).unwrap();
+        let outcome = edit(&mut document, &request(&run, "BRAVO", 100.0, &measure)).unwrap();
 
         // Simulate a later, unrelated edit: the inverse's `new_bytes` are no longer there.
         let stale = ContentOperation {
             new_bytes: b"SOMETHING ELSE".to_vec(),
-            ..inverse
+            ..outcome.inverse
         };
         let error = revert(&mut document, &stale).unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_MISMATCH");
