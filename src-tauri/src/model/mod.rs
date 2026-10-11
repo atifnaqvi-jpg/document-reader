@@ -200,6 +200,21 @@ pub enum AppError {
     /// that does not say why is indistinguishable from a bug.
     #[error("{0}")]
     TextRunNotEditable(String),
+    /// Stage 2 (T11/T13): the replacement needs glyphs that neither the run's original
+    /// font nor any standard-14 substitute can supply, and no embeddable font is bundled.
+    /// The only way to set that text is an annotation.
+    #[error(
+        "the replacement needs glyphs that neither this run's font nor a standard font can \
+         supply; add a text annotation instead"
+    )]
+    GlyphsNotCoverable,
+    /// Stage 2 (O-ST2-4): the user turned substitution off, and the original font cannot
+    /// set the replacement. Refused rather than substituting, per the toggle's contract.
+    #[error(
+        "this run's font does not contain the glyphs the replacement needs, and substitution \
+         is turned off; add a text annotation instead"
+    )]
+    SubstituteRefused,
     /// The lopdf run no longer matches the run the user picked (P2.4 T4): the file
     /// changed under the editor, so writing would land the text in the wrong place.
     #[error("this text changed since it was selected; reopen the page and try again")]
@@ -224,6 +239,8 @@ impl AppError {
             AppError::EncryptedReadOnly => "ENCRYPTED_READ_ONLY",
             AppError::WrongPassword => "WRONG_PASSWORD",
             AppError::TextRunNotEditable(_) => "TEXT_RUN_NOT_EDITABLE",
+            AppError::GlyphsNotCoverable => "GLYPHS_NOT_COVERABLE",
+            AppError::SubstituteRefused => "SUBSTITUTE_REFUSED",
             AppError::TextRunMismatch => "TEXT_RUN_MISMATCH",
             AppError::ContentTooLarge => "CONTENT_TOO_LARGE",
             AppError::Other(_) => "OTHER",

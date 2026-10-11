@@ -37,6 +37,7 @@ image = "0.25"
 lru = "0.12"
 base64 = "0.22"
 lopdf = { version = "0.45", default-features = false, features = ["serde"] }
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

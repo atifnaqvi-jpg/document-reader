@@ -19,14 +19,66 @@ fn main() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
 
     let fixtures: Vec<(&str, Vec<u8>)> = vec![
-        ("simple-winansi.pdf", testpdf::bytes(&testpdf::simple_winansi())),
-        ("simple-embedded-subset.pdf", testpdf::bytes(&testpdf::subset_font_page())),
-        ("cid-identity.pdf", testpdf::bytes(&testpdf::cid_identity_page())),
-        ("roundtrip-fail.pdf", testpdf::bytes(&testpdf::roundtrip_fail_page())),
+        (
+            "simple-winansi.pdf",
+            testpdf::bytes(&testpdf::simple_winansi()),
+        ),
+        (
+            "simple-embedded-subset.pdf",
+            testpdf::bytes(&testpdf::subset_font_page()),
+        ),
+        (
+            "cid-identity.pdf",
+            testpdf::bytes(&testpdf::cid_identity_page()),
+        ),
+        (
+            "roundtrip-fail.pdf",
+            testpdf::bytes(&testpdf::roundtrip_fail_page()),
+        ),
         ("too-wide.pdf", testpdf::bytes(&testpdf::too_wide_page())),
-        ("encrypted-aes.pdf", testpdf::bytes(&testpdf::encrypted_aes())),
-        ("multi-stream-page.pdf", testpdf::bytes(&testpdf::multi_stream())),
+        (
+            "encrypted-aes.pdf",
+            testpdf::bytes(&testpdf::encrypted_aes()),
+        ),
+        (
+            "multi-stream-page.pdf",
+            testpdf::bytes(&testpdf::multi_stream()),
+        ),
         ("bomb.pdf", testpdf::bytes(&testpdf::bomb())),
+        // Stage 2 §6. The first two carry a real embedded program whose glyph set is
+        // exact, so T11's coverage check is decided by the font, not by a name convention.
+        (
+            "subset-winansi.pdf",
+            testpdf::bytes(&testpdf::embedded_subset_page(
+                "SUBSET",
+                &"SUBET".chars().collect::<Vec<_>>(),
+            )),
+        ),
+        (
+            "subset-winansi-escape.pdf",
+            testpdf::bytes(&testpdf::embedded_subset_page(
+                "WIND",
+                &"WIND".chars().collect::<Vec<_>>(),
+            )),
+        ),
+        (
+            "subset-wider-after-substitute.pdf",
+            testpdf::bytes(&testpdf::embedded_subset_page(
+                "HI",
+                &"HI".chars().collect::<Vec<_>>(),
+            )),
+        ),
+        (
+            "non-winansi-replacement.pdf",
+            testpdf::bytes(&testpdf::embedded_subset_page(
+                "HI",
+                &"HI".chars().collect::<Vec<_>>(),
+            )),
+        ),
+        (
+            "style-match-cases.pdf",
+            testpdf::bytes(&testpdf::style_match_cases()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

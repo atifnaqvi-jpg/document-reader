@@ -97,7 +97,9 @@ pub fn simple_winansi() -> Document {
                 Operation::new("Td", vec![72.into(), 657.into()]),
                 Operation::new(
                     "Tj",
-                    vec![Object::string_literal("Document Reader P1 fixture, page one.")],
+                    vec![Object::string_literal(
+                        "Document Reader P1 fixture, page one.",
+                    )],
                 ),
                 Operation::new("ET", vec![]),
             ],
@@ -301,10 +303,300 @@ pub fn encrypted_aes() -> Document {
     document
 }
 
+// --- Stage 2: committed fixture builders (§6) ---------------------------------
+
+/// §6 `style-match-cases.pdf`: one page per original font name, so a test can drive the
+/// name heuristic and assert each maps to the documented standard-14 family. The names
+/// are subset-prefixed on purpose: the prefix must be stripped before matching.
+pub fn style_match_cases() -> Document {
+    let names = [
+        "ABCDEF+TimesNewRoman",
+        "ABCDEF+TimesNewRoman-BoldItalic",
+        "ABCDEF+CourierNew",
+        "ABCDEF+DejaVuSerif",
+        "ABCDEF+Arial",
+        "ABCDEF+Arial-Bold",
+        "ABCDEF+Helvetica-Oblique",
+    ];
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+
+    let mut kids = Vec::new();
+    for name in names {
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => name,
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let resources_id = document.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let content_id = document.add_object(page_body(single_run("SAMPLE")));
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => resources_id,
+        });
+        kids.push(Object::Reference(page_id));
+    }
+
+    let count = kids.len() as i64;
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(kids),
+            "Count" => count,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
 /// Serialises a document to bytes.
 pub fn bytes(document: &Document) -> Vec<u8> {
     let mut copy = document.clone();
     let mut out = Vec::new();
     copy.save_to(&mut out).unwrap();
     out
+}
+
+// --- Stage 2: embedded-subset fixtures (T11) ----------------------------------
+
+/// A minimal, valid TrueType program whose `cmap` maps exactly `glyphs`.
+///
+/// Stage 2's T11 coverage check reads the *actual* glyph set of an embedded program, so
+/// the fixtures need real, parseable program bytes. Rather than commit a system font
+/// (whose bytes vary by machine and are not ours to distribute), the fixture carries this
+/// hand-synthesised sfnt: `head`, `hhea`, `maxp`, `hmtx`, `cmap` (format 4), `loca` and
+/// `glyf` — the tables `ttf-parser` reads, and no more. Coverage is exact, so a "subset
+/// lacks the glyph" case is real rather than a name convention.
+pub fn true_type_program(glyphs: &[char]) -> Vec<u8> {
+    fn u16be(value: u16) -> [u8; 2] {
+        value.to_be_bytes()
+    }
+    fn u32be(value: u32) -> [u8; 4] {
+        value.to_be_bytes()
+    }
+
+    let mut segments: Vec<(u16, u16)> = {
+        // Deduplicate: a repeated character (the fixtures intentionally reuse letters)
+        // would emit two segments with the same code and break the `cmap`'s strictly
+        // increasing order — the lookup then fails for every character, not just that one.
+        let mut seen: Vec<char> = Vec::new();
+        let mut mapped: Vec<(u16, u16)> = Vec::new();
+        for ch in glyphs {
+            if seen.contains(ch) {
+                continue;
+            }
+            seen.push(*ch);
+            mapped.push((*ch as u16, seen.len() as u16));
+        }
+        mapped
+    };
+    segments.sort_unstable();
+    let num_glyphs = (segments.len() + 1) as u16;
+
+    let mut body = Vec::new();
+    let seg_count = (segments.len() + 1) as u16;
+    let entry_selector = 15 - seg_count.leading_zeros() as u16;
+    let search_range = 2 * (1u16 << entry_selector);
+    // The first field is `segCountX2`, not `segCount` (the spec stores it doubled, and
+    // ttf-parser's parser divides it back out).
+    body.extend_from_slice(&u16be(seg_count * 2));
+    body.extend_from_slice(&u16be(search_range));
+    body.extend_from_slice(&u16be(entry_selector));
+    body.extend_from_slice(&u16be(seg_count * 2 - search_range));
+    for (code, _) in &segments {
+        body.extend_from_slice(&u16be(*code));
+    }
+    body.extend_from_slice(&u16be(0xFFFF));
+    body.extend_from_slice(&u16be(0));
+    for (code, _) in &segments {
+        body.extend_from_slice(&u16be(*code));
+    }
+    body.extend_from_slice(&u16be(0xFFFF));
+    for (code, gid) in &segments {
+        body.extend_from_slice(&u16be(gid.wrapping_sub(*code)));
+    }
+    body.extend_from_slice(&u16be(1));
+    for _ in &segments {
+        body.extend_from_slice(&u16be(0));
+    }
+    body.extend_from_slice(&u16be(0));
+    // The `cmap` *table* wraps its subtables: version + numTables + one encoding record
+    // (platform 3 = Windows, encoding 1 = Unicode BMP) whose offset points at the
+    // format-4 subtable that follows. Without this header the subtable is unreadable.
+    let subtable = {
+        let mut cmap = Vec::new();
+        cmap.extend_from_slice(&u16be(4));
+        cmap.extend_from_slice(&u16be((6 + body.len()) as u16));
+        cmap.extend_from_slice(&u16be(0));
+        cmap.extend_from_slice(&body);
+        cmap
+    };
+    let mut cmap = Vec::new();
+    cmap.extend_from_slice(&u16be(0)); // version
+    cmap.extend_from_slice(&u16be(1)); // numTables
+    cmap.extend_from_slice(&u16be(3)); // platformID = Windows
+    cmap.extend_from_slice(&u16be(1)); // encodingID = Unicode BMP
+    cmap.extend_from_slice(&u32be(12)); // offset to the subtable
+    cmap.extend_from_slice(&subtable);
+
+    let mut head = Vec::new();
+    head.extend_from_slice(&u32be(0x0001_0000)); // version
+    head.extend_from_slice(&u32be(0x0001_0000)); // fontRevision
+    head.extend_from_slice(&u32be(0)); // checkSumAdjustment
+    head.extend_from_slice(&u32be(0x5F0F_3CF5)); // magicNumber
+    head.extend_from_slice(&u16be(0)); // flags
+    head.extend_from_slice(&u16be(1000)); // unitsPerEm
+    head.extend_from_slice(&[0; 8]); // created
+    head.extend_from_slice(&[0; 8]); // modified
+    head.extend_from_slice(&[0, 0, 0, 0]); // xMin/yMin
+    head.extend_from_slice(&[0x03, 0xE8, 0x03, 0xE8]); // xMax/yMax
+    head.extend_from_slice(&u16be(0)); // macStyle
+    head.extend_from_slice(&u16be(8)); // lowestRecPPEM
+    head.extend_from_slice(&[0, 2]); // fontDirectionHint
+    head.extend_from_slice(&u16be(1)); // indexToLocFormat = long
+    head.extend_from_slice(&[0, 0]); // glyphDataFormat
+
+    let mut hhea = Vec::new();
+    hhea.extend_from_slice(&u32be(0x0001_0000));
+    hhea.extend_from_slice(&800i16.to_be_bytes());
+    hhea.extend_from_slice(&(-200i16).to_be_bytes());
+    hhea.extend_from_slice(&0i16.to_be_bytes());
+    hhea.extend_from_slice(&u16be(1000)); // advanceWidthMax
+                                          // ttf-parser skips 24 bytes after lineGap (advanceWidthMax + the rest of the fixed
+                                          // fields) before reading numberOfHMetrics; hhea is 36 bytes total.
+    hhea.extend_from_slice(&[0; 22]);
+    hhea.extend_from_slice(&u16be(num_glyphs));
+
+    let mut maxp = Vec::new();
+    maxp.extend_from_slice(&u32be(0x0001_0000));
+    maxp.extend_from_slice(&u16be(num_glyphs));
+
+    let hmtx: Vec<u8> = (0..num_glyphs)
+        .flat_map(|_| vec![0x02, 0x58, 0x00, 0x00]) // advanceWidth 600, lsb 0
+        .collect();
+    let loca: Vec<u8> = (0..=num_glyphs).flat_map(|_| u32be(0)).collect();
+
+    let mut tables: Vec<(&[u8; 4], Vec<u8>)> = vec![
+        (b"cmap", cmap),
+        (b"glyf", Vec::new()),
+        (b"head", head),
+        (b"hhea", hhea),
+        (b"hmtx", hmtx),
+        (b"loca", loca),
+        (b"maxp", maxp),
+    ];
+    tables.sort_by(|a, b| a.0.cmp(b.0));
+
+    let num_tables = tables.len() as u16;
+    let entry_selector = 15 - num_tables.leading_zeros() as u16;
+    let search_range = 16 * (1u16 << entry_selector);
+    let mut out = Vec::new();
+    out.extend_from_slice(&u32be(0x0001_0000));
+    out.extend_from_slice(&u16be(num_tables));
+    out.extend_from_slice(&u16be(search_range));
+    out.extend_from_slice(&u16be(entry_selector));
+    out.extend_from_slice(&u16be(num_tables * 16 - search_range));
+
+    let mut offset = 12 + tables.len() * 16;
+    let mut records = Vec::new();
+    let mut blobs = Vec::new();
+    for (tag, data) in &tables {
+        records.extend_from_slice(*tag);
+        records.extend_from_slice(&u32be(0));
+        records.extend_from_slice(&u32be(offset as u32));
+        records.extend_from_slice(&u32be(data.len() as u32));
+        let padded = (4 - data.len() % 4) % 4;
+        blobs.extend_from_slice(data);
+        blobs.extend_from_slice(&vec![0; padded]);
+        offset += data.len() + padded;
+    }
+    out.extend_from_slice(&records);
+    out.extend_from_slice(&blobs);
+    out
+}
+
+/// A one-page document whose `/F1` is an embedded-subset TrueType font.
+///
+/// The font dictionary is `/Subtype /TrueType`, `/BaseFont /ABCDEF+FixtureSubset` (a real
+/// subset prefix), `/Encoding /WinAnsiEncoding`, and a `/FontDescriptor /FontFile2` stream
+/// carrying a real program that maps exactly `program_glyphs`. `run_text` is the run on
+/// the page. This is what lets T11 be tested against a font that genuinely does — or
+/// genuinely does not — contain the glyphs a replacement needs.
+pub fn embedded_subset_page(run_text: &str, program_glyphs: &[char]) -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+
+    let program = true_type_program(program_glyphs);
+    let program_id = document.add_object(Stream::new(dictionary! {}, program));
+
+    // Widths are nominal; coverage/metrics tests use the AFM substitute or a fixed
+    // measurement, never this array.
+    let first: i64 = 32;
+    let last: i64 = 255;
+    let widths: Vec<Object> = (first..=last).map(|_| Object::Integer(600)).collect();
+
+    let descriptor_id = document.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "ABCDEF+FixtureSubset",
+        "Flags" => 32,
+        "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
+        "ItalicAngle" => 0,
+        "Ascent" => 800,
+        "Descent" => -200,
+        "CapHeight" => 700,
+        "StemV" => 80,
+        "FontFile2" => program_id,
+    });
+
+    let font_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "ABCDEF+FixtureSubset",
+        "Encoding" => "WinAnsiEncoding",
+        "FirstChar" => first,
+        "LastChar" => last,
+        "Widths" => widths,
+        "FontDescriptor" => descriptor_id,
+    });
+
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let content_id = document.add_object(page_body(single_run(run_text)));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
 }
