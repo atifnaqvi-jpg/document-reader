@@ -662,6 +662,48 @@ button:disabled {
   color: var(--danger, #d1242f);
 }
 
+/* P2.4.1 O-Pair-3: one row is the run button plus, for a merged run, its expand toggle. */
+.textrun-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+
+.textrun-row > button:first-child {
+  flex: 1;
+}
+
+.textrun-expand {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  padding: 0 0.25rem;
+}
+
+.textrun-merged {
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+/* The second level: a merged run's fragments, indented under it. */
+.textrun-fragments {
+  list-style: none;
+  margin: 0.15rem 0 0.3rem;
+  padding: 0 0 0 1rem;
+}
+
+.textrun-fragments button {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  font-size: 0.85em;
+}
+
+.textrun-fragments button.refused {
+  color: var(--muted, #57606a);
+}
+
 .textedit-refusal,
 .textedit-error {
   color: var(--danger, #d1242f);

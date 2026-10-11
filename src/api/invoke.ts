@@ -17,6 +17,7 @@ import type {
   RenderedPage,
   SearchHit,
   TextEditResult,
+  TextRunFragmentRef,
   TextRunId,
 } from "./types";
 import { ANNOTATION_CHANGED_EVENT } from "./types";
@@ -288,6 +289,13 @@ export const editPageText = (
   fontName: string,
   fontSize: number,
   allowSubstitution: boolean,
+  /**
+   * The remaining fragments of a merged run, head first after the head (P2.4.1 T18). The
+   * backend writes the replacement into the head, clears each of these, and records all of
+   * them in ONE inverse, so a merged edit is one atomic pass and one undo. Empty for an
+   * ordinary run; each entry is re-validated against the document before anything is written.
+   */
+  fragments: TextRunFragmentRef[],
 ) =>
   invoke<TextEditResult>("edit_page_text", {
     documentId,
@@ -301,6 +309,7 @@ export const editPageText = (
     // O-ST2-4: the toggle travels explicitly so the backend never guesses the user's
     // intent; the UI defaults it on.
     allowSubstitution,
+    fragments,
   });
 
 /**

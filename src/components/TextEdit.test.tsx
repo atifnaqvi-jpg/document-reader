@@ -372,3 +372,157 @@ describe("P2.4 decrypt-a-copy requires confirmation", () => {
     await screen.findByText(/a \(unprotected\)\.pdf/);
   });
 });
+
+/**
+ * P2.4.1 fragment merging, as the *user* sees it.
+ *
+ * Three promises, and each is the reason the phase exists:
+ *
+ * 1. A word the producer split into per-glyph operands is **one** picker entry, and it says
+ *    how many fragments it joined (T10-style disclosure) instead of silently rewriting five
+ *    operands on one click.
+ * 2. The fragments are still reachable — two levels, collapsed by default (O-Pair-3).
+ * 3. Applying it sends the tail fragments on the wire, so the backend clears them in the same
+ *    atomic pass (T18).
+ */
+describe("P2.4.1 merged runs: one entry, expandable fragments, one atomic write", () => {
+  /** The five per-glyph fragments of "Hello", as the backend pairs them. */
+  function helloFragments(): PageTextRun[] {
+    const glyphs = ["H", "e", "l", "l", "o"];
+    return glyphs.map((glyph, index) =>
+      makeRun({
+        runId: { opIndex: 7 + index, operandPath: [1] },
+        text: glyph,
+        rect: { x0: 72 + index * 6, y0: 600, x1: 72 + (index + 1) * 6, y1: 612 },
+        width: 6,
+      }),
+    );
+  }
+
+  it("lists a merged run once, discloses the fragment count, and expands to fragments", async () => {
+    const fragments = helloFragments();
+    const word = makeRun({
+      runId: { opIndex: 7, operandPath: [1] },
+      text: "Hello",
+      width: 30,
+      fragmentCount: 5,
+      fragments,
+    });
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [word]);
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    // One entry for the word, not five.
+    expect(within(list).getByRole("button", { name: /^Hello Helvetica/ })).toBeInTheDocument();
+    // T10-style disclosure: the merge says so.
+    expect(within(list).getByText(/combines 5 fragments of Helvetica/)).toBeInTheDocument();
+
+    // O-Pair-3: collapsed by default -- the individual glyphs are not listed yet.
+    expect(within(list).queryByText("H")).toBeNull();
+
+    await userEvent.click(
+      within(list).getByRole("button", { name: /Show the 5 fragments of "Hello"/ }),
+    );
+    const expanded = within(list).getByRole("list", { name: /Fragments of "Hello"/ });
+    // Each glyph appears once per occurrence: "l" twice.
+    expect(within(expanded).getAllByText("H")).toHaveLength(1);
+    expect(within(expanded).getAllByText("e")).toHaveLength(1);
+    expect(within(expanded).getAllByText("l")).toHaveLength(2);
+    expect(within(expanded).getAllByText("o")).toHaveLength(1);
+  });
+
+  it("lists merged runs before single runs", async () => {
+    const fragments = helloFragments();
+    const merged = makeRun({
+      runId: { opIndex: 7, operandPath: [1] },
+      text: "Hello",
+      fragmentCount: 5,
+      fragments,
+    });
+    const single = makeRun({ runId: { opIndex: 40, operandPath: [1] }, text: "solo" });
+    const mounted = mountEditor();
+    open = mounted.backend;
+    // Deliberately single-first on the wire, so the picker's own ordering is what is asserted.
+    mounted.backend.on("get_page_text_runs", () => [single, merged]);
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    const order = within(list)
+      .getAllByRole("button")
+      .map((button) => button.textContent ?? "")
+      .filter((text) => text.includes("Hello") || text.includes("solo"));
+    expect(order[0]).toContain("Hello");
+    expect(order[1]).toContain("solo");
+  });
+
+  it("sends the tail fragments with the edit so the write is one atomic pass", async () => {
+    const fragments = helloFragments();
+    const word = makeRun({
+      runId: { opIndex: 7, operandPath: [1] },
+      text: "Hello",
+      width: 30,
+      fragmentCount: 5,
+      fragments,
+    });
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [word]);
+    mounted.backend.on("edit_page_text", () => ({
+      path: "/books/a (edited 1).pdf",
+      inverse: { page: 0, opIndex: 7, operandPath: [1], oldBytes: [72], newBytes: [72] },
+      text: "Hello!",
+    }));
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    await userEvent.click(within(list).getByRole("button", { name: /^Hello Helvetica/ }));
+
+    // The form discloses the merge before the user applies it.
+    expect(
+      screen.getByText(/combines 5 fragments of Helvetica in one write/),
+    ).toBeInTheDocument();
+
+    const field = await screen.findByLabelText(/Replace Hello with/);
+    await userEvent.clear(field);
+    await userEvent.type(field, "Hello!");
+    await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
+
+    await waitFor(() => expect(mounted.backend.callsTo("edit_page_text")).toHaveLength(1));
+    const call = mounted.backend.callsTo("edit_page_text")[0]!;
+    // The head runs the edit; the four tails travel with it, each carrying the text the
+    // picker showed so the backend re-validates before clearing (T4/T18).
+    expect(call.expected).toBe("Hello");
+    expect(call.fragments).toEqual([
+      { runId: { opIndex: 8, operandPath: [1] }, text: "e" },
+      { runId: { opIndex: 9, operandPath: [1] }, text: "l" },
+      { runId: { opIndex: 10, operandPath: [1] }, text: "l" },
+      { runId: { opIndex: 11, operandPath: [1] }, text: "o" },
+    ]);
+  });
+
+  it("sends no fragments for an ordinary single run", async () => {
+    const run = makeRun();
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [run]);
+    mounted.backend.on("edit_page_text", () => ({
+      path: "/books/a (edited 1).pdf",
+      inverse: { page: 0, opIndex: 7, operandPath: [1], oldBytes: [104], newBytes: [106] },
+      text: "jello",
+    }));
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    await userEvent.click(within(list).getByRole("button", { name: /hello/ }));
+    const field = await screen.findByLabelText(/Replace hello with/);
+    await userEvent.clear(field);
+    await userEvent.type(field, "jello");
+    await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
+
+    await waitFor(() => expect(mounted.backend.callsTo("edit_page_text")).toHaveLength(1));
+    expect(mounted.backend.callsTo("edit_page_text")[0]!.fragments).toEqual([]);
+  });
+});
+

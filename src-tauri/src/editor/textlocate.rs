@@ -617,6 +617,183 @@ pub fn apply_text(
         old_bytes,
         new_bytes: new_bytes.to_vec(),
         font_swap: None,
+        also: Vec::new(),
+    })
+}
+
+/// One fragment's share of a merged write (P2.4.1 T18/T20).
+pub struct FragmentWrite {
+    /// The fragment's content-stream address.
+    pub id: RunId,
+    /// The text this fragment reads right now, re-validated before it is touched (T4).
+    pub expected: String,
+    /// The bytes to install. The head fragment carries the whole replacement; every
+    /// following fragment is cleared to empty so the run is shown once, not N times.
+    pub new_bytes: Vec<u8>,
+}
+
+/// A merged run's complete write: its fragments, and the font swap MECH-A decided on.
+pub struct MergedWrite<'a> {
+    /// The fragments, head first, in the order the picker presented them.
+    pub fragments: Vec<FragmentWrite>,
+    /// The standard-14 `/BaseFont` to switch the run to (MECH-A), or `None` to keep the run's
+    /// own font. One substitution per merged run, exactly as Stage 2 does for a single run.
+    pub substitute: Option<&'a str>,
+}
+
+/// Applies a merged run's edit in **one** decode -> mutate -> encode -> replace pass
+/// (P2.4.1 T18/T19/T20).
+///
+/// One pass is the whole point. Writing each fragment as its own edit would re-encode the
+/// page N times, and a failure between passes would leave a document holding the replacement
+/// *and* the fragments it replaced — the text counted twice. The font swap rides along in the
+/// same pass for the same reason: bytes and typeface must change together or not at all.
+///
+/// The `TJ` positioning numbers between the operands are deliberately untouched (T19): the pen
+/// advances that placed the glyphs do not depend on how many of them still carry text.
+///
+/// The inverse restores each fragment's original bytes to its own operand path and puts the
+/// original font name back, so one merged edit is one undo entry (T18).
+pub fn apply_merged(
+    document: &mut Document,
+    page_index: u32,
+    page_id: ObjectId,
+    write: &MergedWrite<'_>,
+) -> Result<ContentOperation, AppError> {
+    let head = write.fragments.first().ok_or(AppError::TextRunMismatch)?;
+    let mut content = decoded_content(document, page_id)?;
+
+    // Validate and collect every original string before mutating anything, so a mismatch on
+    // the last fragment leaves the page untouched rather than half rewritten.
+    let mut originals = Vec::with_capacity(write.fragments.len());
+    {
+        let fonts = document
+            .get_page_fonts(page_id)
+            .map_err(|error| AppError::Other(format!("could not read page fonts: {error}")))?;
+        for fragment in &write.fragments {
+            let operation = content
+                .operations
+                .get(fragment.id.op_index)
+                .ok_or(AppError::TextRunMismatch)?;
+            let old = string_at(operation, &fragment.id.operand_path)
+                .ok_or(AppError::TextRunMismatch)?
+                .to_vec();
+            // T4, per fragment: the bytes at this address must still read as what the user was
+            // shown. A merged run is re-validated fragment by fragment, so a document that
+            // changed under the picker refuses instead of writing the wrong operand.
+            let font_key = font_in_force(&content.operations, fragment.id.op_index)
+                .ok_or(AppError::TextRunMismatch)?;
+            let font = fonts
+                .get(&font_key)
+                .copied()
+                .ok_or(AppError::TextRunMismatch)?;
+            let encoding = font
+                .get_font_encoding(document)
+                .map_err(|_| AppError::TextRunMismatch)?;
+            let current = encoding
+                .bytes_to_string(&old)
+                .map_err(|_| AppError::TextRunMismatch)?;
+            if current != fragment.expected {
+                return Err(AppError::TextRunMismatch);
+            }
+            originals.push(old);
+        }
+    }
+
+    for fragment in &write.fragments {
+        let operation = content
+            .operations
+            .get_mut(fragment.id.op_index)
+            .ok_or(AppError::TextRunMismatch)?;
+        let slot =
+            string_at_mut(operation, &fragment.id.operand_path).ok_or(AppError::TextRunMismatch)?;
+        *slot = fragment.new_bytes.clone();
+    }
+
+    // The font swap, in the same pass. Every governing `Tf` the merged fragments read through
+    // is switched (a document may repeat `Tf F1 12` between fragments); each swap is recorded
+    // so undo restores the original name exactly where it was read.
+    let mut swaps: Vec<FontSwap> = Vec::new();
+    if let Some(base_font) = write.substitute {
+        ensure_substitute_resource(document, page_id, base_font)?;
+        let mut seen: Vec<usize> = Vec::new();
+        for fragment in &write.fragments {
+            let (tf_index, old_name) =
+                font_in_force_with_index(&content.operations, fragment.id.op_index)
+                    .ok_or(AppError::TextRunMismatch)?;
+            if seen.contains(&tf_index) {
+                continue;
+            }
+            seen.push(tf_index);
+            let operation = content
+                .operations
+                .get_mut(tf_index)
+                .ok_or(AppError::TextRunMismatch)?;
+            let slot = operation
+                .operands
+                .first_mut()
+                .ok_or(AppError::TextRunMismatch)?;
+            *slot = Object::Name(SUBSTITUTE_NAME.to_vec());
+            swaps.push(FontSwap {
+                op_index: tf_index,
+                operand_path: vec![0],
+                old_name,
+                new_name: SUBSTITUTE_NAME.to_vec(),
+                also: Vec::new(),
+            });
+        }
+    }
+
+    let encoded = content
+        .encode()
+        .map_err(|error| AppError::Other(format!("could not re-encode page content: {error}")))?;
+
+    // F2: the whole page becomes one stream (D2 keeps the original file's layout).
+    document
+        .change_page_content(page_id, encoded)
+        .map_err(|error| AppError::Other(format!("could not replace page content: {error}")))?;
+
+    let also: Vec<ContentOperation> = write
+        .fragments
+        .iter()
+        .zip(originals.iter())
+        .skip(1)
+        .map(|(fragment, old)| ContentOperation {
+            page: page_index,
+            op_index: fragment.id.op_index,
+            operand_path: fragment.id.operand_path.clone(),
+            old_bytes: old.clone(),
+            new_bytes: fragment.new_bytes.clone(),
+            font_swap: None,
+            also: Vec::new(),
+        })
+        .collect();
+
+    let font_swap = swaps.split_first().map(|(first, rest)| FontSwap {
+        op_index: first.op_index,
+        operand_path: first.operand_path.clone(),
+        old_name: first.old_name.clone(),
+        new_name: first.new_name.clone(),
+        also: rest
+            .iter()
+            .map(|swap| FontSwap {
+                op_index: swap.op_index,
+                operand_path: swap.operand_path.clone(),
+                old_name: swap.old_name.clone(),
+                new_name: swap.new_name.clone(),
+                also: Vec::new(),
+            })
+            .collect(),
+    });
+
+    Ok(ContentOperation {
+        page: page_index,
+        op_index: head.id.op_index,
+        operand_path: head.id.operand_path.clone(),
+        old_bytes: originals[0].clone(),
+        new_bytes: head.new_bytes.clone(),
+        font_swap,
+        also,
     })
 }
 
@@ -671,6 +848,7 @@ pub fn apply_font_swap(
         operand_path: vec![0],
         old_name,
         new_name: SUBSTITUTE_NAME.to_vec(),
+        also: Vec::new(),
     })
 }
 
@@ -777,6 +955,12 @@ pub struct ContentOperation {
     /// with the bytes so an undo restores the original font as well as the text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_swap: Option<FontSwap>,
+    /// The rest of a merged run's fragments (P2.4.1 T18). A merged edit writes one operand
+    /// with the replacement and clears each following fragment to empty; every one of those
+    /// writes is recorded here, so a single undo restores all their original bytes. Empty for
+    /// an ordinary single-operand edit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<ContentOperation>,
 }
 
 /// One run's switch from its original font resource to a standard-14 substitute.
@@ -795,6 +979,10 @@ pub struct FontSwap {
     pub old_name: Vec<u8>,
     /// Resource name the edit switched the run to (`FS1`).
     pub new_name: Vec<u8>,
+    /// Further `Tf` sites the same merged edit switched (P2.4.1 T18), when a page repeats
+    /// `Tf` between a run's fragments. Empty for the ordinary single-`Tf` case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<FontSwap>,
 }
 
 #[cfg(test)]

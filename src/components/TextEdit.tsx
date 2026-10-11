@@ -136,6 +136,103 @@ export function TextRunOverlay({
 }
 
 /**
+ * One entry in the picker list: a merged run, collapsed by default, expandable to its
+ * fragments (P2.4.1 O-Pair-3).
+ *
+ * The two levels exist because a merged run is usually exactly one logical run — a word
+ * broken up by the producer's kerning — and only occasionally a genuinely mixed-geometry
+ * line the user needs to pick apart. Showing all five glyphs of every word by default would
+ * bury the runs the user came to edit; showing none would hide the rare mixed case.
+ */
+function RunListItem({
+  run,
+  selected,
+  onSelect,
+}: {
+  run: PageTextRun;
+  selected: boolean;
+  onSelect: (run: PageTextRun) => void;
+}) {
+  const { selectedRun } = useEditor();
+  const [expanded, setExpanded] = useState(false);
+  const fragments = run.fragments ?? [];
+  const merged = run.fragmentCount > 1 && fragments.length > 0;
+
+  const label = (
+    <>
+      <span className="textrun-text">{run.text}</span>
+      <span className="textrun-font muted">
+        {run.fontName || run.fontKey}
+        {run.fontSize ? ` ${run.fontSize}pt` : ""}
+      </span>
+      {/* T10-style disclosure: a merged run says so, and how many fragments it joined, so a
+          single click never silently rewrites five operands. */}
+      {merged ? (
+        <span className="textrun-merged muted">
+          combines {run.fragmentCount} fragments of {run.fontName || run.fontKey}
+        </span>
+      ) : null}
+      {!run.admissibility.editable ? (
+        <span className="textrun-gate">{run.admissibility.gate}</span>
+      ) : null}
+    </>
+  );
+
+  return (
+    <li>
+      <div className="textrun-row">
+        <button
+          type="button"
+          className={run.admissibility.editable ? undefined : "refused"}
+          aria-pressed={selected}
+          title={
+            run.admissibility.editable
+              ? `Edit "${run.text}" (${run.fontName})`
+              : (run.admissibility.message ?? "This text cannot be edited")
+          }
+          onClick={() => onSelect(run)}
+        >
+          {label}
+        </button>
+        {merged ? (
+          <button
+            type="button"
+            className="textrun-expand"
+            aria-expanded={expanded}
+            aria-label={`${expanded ? "Hide" : "Show"} the ${run.fragmentCount} fragments of "${run.text}"`}
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? "▾" : "▸"}
+          </button>
+        ) : null}
+      </div>
+      {merged && expanded ? (
+        <ul className="textrun-fragments" aria-label={`Fragments of "${run.text}"`}>
+          {fragments.map((fragment, index) => (
+            <li key={`${fragment.runId.opIndex}:${fragment.runId.operandPath.join(".")}:${index}`}>
+              <button
+                type="button"
+                className={fragment.admissibility.editable ? undefined : "refused"}
+                aria-pressed={sameRun(selectedRun, fragment)}
+                title={
+                  fragment.admissibility.editable
+                    ? `Edit fragment "${fragment.text}"`
+                    : (fragment.admissibility.message ?? "This fragment cannot be edited")
+                }
+                onClick={() => onSelect(fragment)}
+              >
+                <span className="textrun-text">{fragment.text || "␣"}</span>
+                <span className="textrun-font muted">{fragment.fontName}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+/**
  * The form, the run list and the refusal text, in the editing pane.
  *
  * The list duplicates the overlay's targets on purpose: on a densely typeset page the boxes
@@ -197,6 +294,12 @@ export function TextEditPanel({
   }
 
   const editable = pageRuns.filter((run) => run.admissibility.editable);
+  // O-Pair-3: merged runs are listed first, then single runs. Stable within each group so the
+  // picker does not reshuffle between renders.
+  const orderedRuns = [
+    ...pageRuns.filter((run) => run.fragmentCount > 1),
+    ...pageRuns.filter((run) => run.fragmentCount <= 1),
+  ];
 
   return (
     <fieldset className="editor-textedit">
@@ -223,32 +326,18 @@ export function TextEditPanel({
 
           {pageRuns.length > 0 ? (
             <ul className="textrun-list" aria-label="Text runs on this page">
-              {pageRuns.map((run, index) => (
-                <li key={`${run.runId.opIndex}:${run.runId.operandPath.join(".")}:${index}`}>
-                  <button
-                    type="button"
-                    className={run.admissibility.editable ? undefined : "refused"}
-                    aria-pressed={sameRun(selectedRun, run)}
-                    title={
-                      run.admissibility.editable
-                        ? `Edit "${run.text}" (${run.fontName})`
-                        : (run.admissibility.message ?? "This text cannot be edited")
-                    }
-                    onClick={() => {
-                      selectRun(run);
-                      clearError();
-                    }}
-                  >
-                    <span className="textrun-text">{run.text}</span>
-                    <span className="textrun-font muted">
-                      {run.fontName || run.fontKey}
-                      {run.fontSize ? ` ${run.fontSize}pt` : ""}
-                    </span>
-                    {!run.admissibility.editable ? (
-                      <span className="textrun-gate">{run.admissibility.gate}</span>
-                    ) : null}
-                  </button>
-                </li>
+              {/* O-Pair-3: merged runs first — they are the runs that were broken up and are
+                  what the user most often came to fix — then the ordinary single runs. */}
+              {orderedRuns.map((run, index) => (
+                <RunListItem
+                  key={`${run.runId.opIndex}:${run.runId.operandPath.join(".")}:${index}`}
+                  run={run}
+                  selected={sameRun(selectedRun, run)}
+                  onSelect={(picked) => {
+                    selectRun(picked);
+                    clearError();
+                  }}
+                />
               ))}
             </ul>
           ) : null}
@@ -295,6 +384,15 @@ export function TextEditPanel({
                 />
                 Substitute a standard font when this run&rsquo;s font cannot set the text
               </label>
+              {/* T10-style disclosure for the merged case: the edit rewrites several
+                  operands at once, so say so before the user applies it. */}
+              {selectedRun.fragmentCount > 1 ? (
+                <p className="textedit-merged muted">
+                  This edit combines {selectedRun.fragmentCount} fragments of{' '}
+                  {selectedRun.fontName || selectedRun.fontKey} in one write; undo restores
+                  all of them together.
+                </p>
+              ) : null}
               <p className="muted">Writes a new file. The original is never changed.</p>
             </div>
           ) : null}

@@ -29,6 +29,7 @@ import type {
   AppError,
   DecryptOutcome,
   PageTextRun,
+  TextRunFragmentRef,
   ToolStyle,
 } from "../api/types";
 import { ANNOTATION_KINDS } from "../api/types";
@@ -450,6 +451,17 @@ export function EditorProvider({
       replacement: string,
     ): Promise<string | null> => {
       if (!documentId) return null;
+      // A merged run's tail fragments travel with the edit so the backend can clear them in
+      // the same pass (P2.4.1 T18). An ordinary run sends none.
+      const sameAddress = (a: PageTextRun["runId"], b: PageTextRun["runId"]) =>
+        a.opIndex === b.opIndex && a.operandPath.join(",") === b.operandPath.join(",");
+      const fragments: TextRunFragmentRef[] = (run.fragments ?? [])
+        // The head fragment `run` itself already carries; only the tail travels here (T18).
+        .filter((fragment) => !sameAddress(fragment.runId, run.runId))
+        .map((fragment) => ({
+          runId: fragment.runId,
+          text: fragment.text,
+        }));
       try {
         const result = await editPageText(
           documentId,
@@ -461,6 +473,7 @@ export function EditorProvider({
           run.fontName,
           run.fontSize,
           allowSubstitution,
+          fragments,
         );
         // T10: a substitution is never silent. Carry the backend's disclosure into the
         // toast, and clear it again on any edit that keeps the original font.
@@ -490,6 +503,7 @@ export function EditorProvider({
               run.fontName,
               run.fontSize,
               allowSubstitution,
+              fragments,
             ).then((again) => again.path);
           },
         });

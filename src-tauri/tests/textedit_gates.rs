@@ -122,6 +122,7 @@ fn edit_with_options(
         old_width,
         font_size: 24.0,
         allow_substitution,
+        fragments: Vec::new(),
         measure: &measure,
     };
     textedit::edit(document, &request)
@@ -612,9 +613,10 @@ fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
 /// §5 `fragmented-tj.pdf`: a per-glyph `TJ` array must pair by **position**, not text.
 ///
 /// This is the 0.4.0 defect in one assertion. lopdf addresses five operands; PDFium reports
-/// one box ("Hello"). Under text-equality pairing, none of the five matched and every one was
-/// refused `run-mismatch` — the "only occasional runs editable" report. Under geometric
-/// pairing each fragment's origin falls inside that box, so all five are editable and share it.
+/// one box ("Hello"). Under text-equality pairing none of the five matched and every one was
+/// refused `run-mismatch` — the "only occasional runs editable" report. Under geometric pairing
+/// each fragment's origin falls inside that box, and T18 then merges the five into ONE picker
+/// entry with one width.
 #[test]
 fn fragmented_tj_fragments_pair_by_origin_not_text() {
     if !pdfium_ready() {
@@ -624,42 +626,213 @@ fn fragmented_tj_fragments_pair_by_origin_not_text() {
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
 
-    // Five content-stream operands, all paired.
-    assert_eq!(runs.len(), 5, "one picker entry per operand");
-    let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
-    assert_eq!(texts, vec!["H", "e", "l", "l", "o"]);
-    for run in &runs {
-        assert!(
-            run.admissibility.editable,
-            "every fragment must pair and be editable: {run:?}"
-        );
-        assert_eq!(
-            run.pair_confidence,
-            Some(textedit::PairConfidence::Strong),
-            "each fragment's origin is inside the box on its baseline"
-        );
-        assert!(run.rect.is_some(), "a paired fragment has a box");
-    }
-    // All five fragments resolved to the *same* PDFium box: that shared box is what the
-    // merge phase (T18) folds them into one run through.
-    let rects: Vec<(f32, f32)> = runs
-        .iter()
-        .map(|r| {
-            let r = r.rect.unwrap();
-            (r.x0, r.x1)
-        })
-        .collect();
+    assert_eq!(runs.len(), 1, "the word is one entry, not five");
+    let word = &runs[0];
+    assert_eq!(word.text, "Hello", "the joined fragment text");
+    assert_eq!(word.fragment_count, 5, "five fragments folded in");
+    assert!(word.admissibility.editable);
+    assert_eq!(word.pair_confidence, Some(textedit::PairConfidence::Strong));
+    assert!(word.rect.is_some(), "the merged run has the union box");
     assert!(
-        rects.windows(2).all(|pair| pair[0] == pair[1]),
-        "one shared box: {rects:?}"
+        word.width.is_some_and(|width| width > 0.0),
+        "the merged run carries the union box's width, the O1 old width"
     );
 
-    // And the word edits end-to-end through a fragment's address (T4 unchanged).
+    // O-Pair-3: the second level lists the fragments, head first, each a single run.
+    assert_eq!(word.fragments.len(), 5);
+    let texts: Vec<&str> = word.fragments.iter().map(|f| f.text.as_str()).collect();
+    assert_eq!(texts, vec!["H", "e", "l", "l", "o"]);
+    for fragment in &word.fragments {
+        assert_eq!(fragment.fragment_count, 1);
+        assert!(fragment.fragments.is_empty(), "two levels only");
+        assert_eq!(
+            fragment.pair_confidence,
+            Some(textedit::PairConfidence::Strong)
+        );
+    }
+
+    // The merged run edits end-to-end in one atomic write (T18/T19).
     let mut document = load(&path);
-    let head = runs[0].run_id.clone();
-    let outcome = edit_with(&mut document, 0, head, "H", "J", 26.0, 5.0).unwrap();
-    assert_eq!(outcome.inverse.old_bytes, b"H");
-    assert_eq!(outcome.inverse.new_bytes, b"J");
+    // The head fragment holds only "H"; the replacement is the whole new word, written into
+    // the head and folded across the tail (T4 re-validates the head's own text).
+    let tail: Vec<textedit::FragmentRef> = word.fragments[1..]
+        .iter()
+        .map(|fragment| textedit::FragmentRef {
+            run_id: fragment.run_id.clone(),
+            text: fragment.text.clone(),
+        })
+        .collect();
+    let measure = |_text: &str| Ok(25.0_f32);
+    let request = textedit::EditRequest {
+        page: 0,
+        run_id: word.fragments[0].run_id.clone(),
+        expected: "H".to_string(),
+        replacement: "Hello!".to_string(),
+        old_width: 26.0,
+        font_size: 12.0,
+        allow_substitution: true,
+        fragments: tail,
+        measure: &measure,
+    };
+    let outcome = textedit::edit(&mut document, &request).unwrap();
+    assert_eq!(
+        outcome.inverse.old_bytes, b"H",
+        "the head fragment's original bytes"
+    );
+    assert_eq!(
+        outcome.inverse.also.len(),
+        4,
+        "one recorded write per fragment"
+    );
+}
+
+/// §5 `fragmented-mixed-fonts.pdf`: T19 — fragments never merge across a font or a size.
+///
+/// Two per-glyph runs on one baseline, "AB" at 12pt Helvetica and "CD" at 10pt Times, only
+/// a point apart. A merger that ignored the font or the size would weld them into one run that
+/// no single font could re-encode. They must stay two entries, each merged internally.
+#[test]
+fn fragments_never_merge_across_a_font_or_a_size() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("fragmented-mixed-fonts.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+
+    assert_eq!(
+        runs.len(),
+        2,
+        "one entry per font/size run, never one welded run"
+    );
+    let ab = runs
+        .iter()
+        .find(|run| run.text == "AB")
+        .expect("the 12pt run");
+    let cd = runs
+        .iter()
+        .find(|run| run.text == "CD")
+        .expect("the 10pt run");
+    assert_eq!(ab.font_key, "F1");
+    assert_eq!(cd.font_key, "F2");
+    assert_ne!(ab.font_key, cd.font_key);
+    assert_eq!(ab.fragment_count, 2, "its two glyphs merged internally");
+    assert_eq!(cd.fragment_count, 2, "its two glyphs merged internally");
+    // Distinct boxes: the merge did not reach across the seam.
+    assert_ne!(ab.rect.map(|r| (r.x0, r.x1)), cd.rect.map(|r| (r.x0, r.x1)));
+}
+
+/// §5 `fragmented-wider-merged.pdf`: the width gate quotes the **merged** width (O1/§4).
+///
+/// The merged run is the union of its fragments' boxes, so the old width the refusal reports
+/// is that union's advance — not any one glyph's — and a replacement longer than the union must
+/// be refused with both numbers.
+#[test]
+fn merged_width_refusal_quotes_both_widths() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("fragmented-wider-merged.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    assert_eq!(runs.len(), 1, "Hi merges into one entry");
+    let word = &runs[0];
+    assert_eq!(word.fragment_count, 2);
+
+    // The union width is the merged box's advance, comfortably wider than one glyph's.
+    let merged_width = word.width.expect("a paired merged run has a width");
+    assert!(
+        merged_width > 5.0,
+        "the union box is wider than a single glyph: {merged_width}"
+    );
+
+    // A replacement measured wider than the union is refused, quoting the merged old width.
+    let mut document = load(&path);
+    let error = edit_with(
+        &mut document,
+        0,
+        word.fragments[0].run_id.clone(),
+        "H",
+        "Hi there",
+        merged_width,
+        merged_width + 10.0,
+    )
+    .expect_err("an over-wide replacement must be refused");
+    assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("{:.1}", merged_width + 10.0)),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("{:.1}", merged_width)),
+        "{message}"
+    );
+    assert!(message.contains("fits-width"), "{message}");
+}
+
+/// §5 `fragmented-tj.pdf`: a merged edit writes **one** atomic pass and one undo (T18/T20).
+///
+/// The head fragment takes the replacement, the four tail fragments are cleared, the `TJ`
+/// numbers between them are left alone, and a single undo restores all five originals.
+#[test]
+fn a_merged_edit_is_one_atomic_write_and_one_undo() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("fragmented-tj.pdf");
+    let described = {
+        let document = load(&path);
+        textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap()
+    };
+    let word = &described[0];
+    let tail: Vec<textedit::FragmentRef> = word.fragments[1..]
+        .iter()
+        .map(|fragment| textedit::FragmentRef {
+            run_id: fragment.run_id.clone(),
+            text: fragment.text.clone(),
+        })
+        .collect();
+
+    let mut document = load(&path);
+    // Within the merged union width, so the width gate is not what this test exercises.
+    let measure = |_text: &str| Ok(10.0_f32);
+    let request = textedit::EditRequest {
+        page: 0,
+        run_id: word.fragments[0].run_id.clone(),
+        expected: "H".to_string(),
+        replacement: "Hello!".to_string(),
+        old_width: word.width.unwrap(),
+        font_size: word.font_size,
+        allow_substitution: true,
+        fragments: tail,
+        measure: &measure,
+    };
+    let outcome = textedit::edit(&mut document, &request).unwrap();
+
+    // ONE decode -> mutate -> encode pass: the head holds the whole replacement ...
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let after = textlocate::locate_runs(&document, page_id).unwrap();
+    assert_eq!(
+        after[0].text, "Hello!",
+        "the head fragment carries the whole word"
+    );
+    // ... and every tail fragment is empty, so the word reads once, not five times.
+    for fragment in &after[1..] {
+        assert_eq!(fragment.text, "", "tail fragments are cleared");
+    }
+    // One undo entry: the inverse records the head plus one write per tail fragment.
+    assert_eq!(outcome.inverse.also.len(), 4);
+
+    // The undo restores all five originals in one call.
+    textedit::revert(&mut document, &outcome.inverse).unwrap();
+    let restored = textlocate::locate_runs(&document, page_id).unwrap();
+    let texts: Vec<&str> = restored.iter().map(|run| run.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["H", "e", "l", "l", "o"],
+        "one undo restored every fragment"
+    );
 }
 
 /// §5 `fragmented-unpairable.pdf`: T21 — the refusal names the missing box.
@@ -672,11 +845,12 @@ fn an_unpaired_run_refuses_naming_the_missing_box() {
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
 
-    // The normal run paired; the size-0 run did not.
+    // The normal run merged and paired; the size-0 run did not.
     let paired = runs
         .iter()
-        .find(|run| run.text == "G")
-        .expect("the GHOST fragments");
+        .find(|run| run.text == "GHOST")
+        .expect("the GHOST run");
+    assert_eq!(paired.fragment_count, 5, "its five glyphs merged");
     assert!(paired.admissibility.editable);
     assert_eq!(
         paired.pair_confidence,
@@ -689,6 +863,10 @@ fn an_unpaired_run_refuses_naming_the_missing_box() {
         .expect("the size-0 run");
     assert!(!unpaired.admissibility.editable);
     assert!(unpaired.rect.is_none());
+    assert!(
+        unpaired.pair_confidence.is_none(),
+        "no box, so no pair confidence"
+    );
     assert_eq!(unpaired.admissibility.gate.as_deref(), Some("run-mismatch"));
     // T21: the message names the *reason*, not merely the gate.
     let message = unpaired

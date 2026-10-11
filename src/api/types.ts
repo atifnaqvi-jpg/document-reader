@@ -250,6 +250,17 @@ export interface PageTextRun {
   fragments?: PageTextRun[];
 }
 
+/**
+ * One tail fragment of a merged run, as the write path needs it (P2.4.1 T18).
+ *
+ * Carries the text the picker showed so the backend re-validates the fragment against the
+ * document (T4) before clearing it; a stale entry refuses rather than blanking the wrong run.
+ */
+export interface TextRunFragmentRef {
+  runId: TextRunId;
+  text: string;
+}
+
 /** The inverse of a text edit, for the session undo stack (P2.4 T5). */
 export interface ContentOperation {
   page: number;

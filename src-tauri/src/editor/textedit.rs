@@ -294,6 +294,21 @@ fn origin_tolerance(font_size: f32) -> f32 {
 /// The baseline agreement required to call a pair strong, in points (P2.4.1 T19/§3.3).
 const BASELINE_TOLERANCE: f32 = 0.5;
 
+/// The largest horizontal gap two fragments may have and still merge, as a fraction of the
+/// font size (P2.4.1 T19).
+///
+/// Relative, never an absolute constant: the same PDF carries 9pt body text and 24pt
+/// headings, and a fixed quarter-point would either split words in the headings or weld
+/// separate words together in the body. A quarter of an em is comfortably tighter than the
+/// space glyph (≈0.28em in Helvetica) and comfortably looser than the left side bearing plus a
+/// kerning pair.
+const MERGE_GAP_EM: f32 = 0.25;
+
+/// The gap below which two fragments on one baseline are joined (P2.4.1 T19).
+fn gap_tolerance(font_size: f32) -> f32 {
+    MERGE_GAP_EM * font_size
+}
+
 /// One lopdf run's match to a rendered box.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Pair {
@@ -366,6 +381,169 @@ fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Opt
         })
 }
 
+/// Whether two consecutive fragments may be merged into one run (P2.4.1 T19).
+///
+/// All four conditions are required, and the gap is relative to the font size: same font,
+/// same size, same baseline (0.5pt), and a gap no larger than `MERGE_GAP_EM * font_size`.
+/// Merging across a font or a size would produce a run that cannot be re-encoded with one
+/// font; merging across a line break would read as two lines welded into one.
+fn mergeable(head: &RawRun, next: &RawRun) -> bool {
+    head.font_key == next.font_key
+        && (head.font_size - next.font_size).abs() <= 0.1
+        && (head.origin.1 - next.origin.1).abs() <= BASELINE_TOLERANCE
+        && {
+            let gap = next.origin.0 - (head.origin.0 + head.advance);
+            gap <= gap_tolerance(head.font_size)
+        }
+}
+
+/// A group of consecutive fragments the picker presents as one run (P2.4.1 T18).
+struct RunGroup {
+    first: usize,
+    len: usize,
+}
+
+/// Groups consecutive paired fragments into merged runs (P2.4.1 T18/T19).
+///
+/// A group starts at any paired run and extends greedily while the next run is paired with
+/// **strong** confidence and satisfies [`mergeable`]. Weak pairs are deliberately left on
+/// their own: they are the pairs whose geometry is least certain, and folding two of them
+/// into one editable run would make the merged width — the number the width gate refuses on —
+/// more speculative than the single-run number it replaces.
+///
+/// The scan is ordered and strictly consecutive: a run that is not on the same baseline, or a
+/// run with no box at all, ends the group. That is what keeps a merge from reaching across a
+/// line break or past an address the picker refused.
+fn group_runs(runs: &[RawRun], pairs: &[Option<Pair>]) -> Vec<RunGroup> {
+    let mut groups = Vec::new();
+    let mut index = 0;
+    while index < runs.len() {
+        // An unpaired run is still *reported* — the picker must show that it exists and name
+        // why it cannot be edited (T21) — it simply cannot merge with anything.
+        let mut len = 1;
+        if pairs[index].is_some() {
+            while index + len < runs.len() {
+                let next = pairs[index + len];
+                if next.map(|pair| pair.confidence) != Some(PairConfidence::Strong) {
+                    break;
+                }
+                if !mergeable(&runs[index + len - 1], &runs[index + len]) {
+                    break;
+                }
+                len += 1;
+            }
+        }
+        groups.push(RunGroup { first: index, len });
+        index += len;
+    }
+    groups
+}
+
+/// The union of a group's rendered boxes.
+fn union_rect(
+    group: &RunGroup,
+    pairs: &[Option<Pair>],
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+) -> Option<crate::editor::geometry::PdfRect> {
+    let mut union: Option<crate::editor::geometry::PdfRect> = None;
+    for offset in 0..group.len {
+        let pair = pairs[group.first + offset]?;
+        let rect = rects.get(pair.rect)?;
+        let candidate = crate::editor::geometry::PdfRect {
+            x0: rect.x0,
+            y0: rect.y0,
+            x1: rect.x1,
+            y1: rect.y1,
+        };
+        union = Some(match union {
+            None => candidate,
+            Some(current) => crate::editor::geometry::PdfRect {
+                x0: current.x0.min(candidate.x0),
+                y0: current.y0.min(candidate.y0),
+                x1: current.x1.max(candidate.x1),
+                y1: current.y1.max(candidate.y1),
+            },
+        });
+    }
+    union
+}
+
+/// Describes one run or merged group (P2.4.1 T18/T20).
+fn describe_group(
+    document: &Document,
+    page: u32,
+    runs: &[RawRun],
+    pairs: &[Option<Pair>],
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+    group: &RunGroup,
+) -> Result<PageTextRun, AppError> {
+    // T20: every fragment is gated *before* it is merged, and the merged run inherits the
+    // first refusal any fragment met. A gate is never weakened by joining fragments.
+    let mut fragments = Vec::with_capacity(group.len);
+    let mut refused: Option<Admissibility> = None;
+    for offset in 0..group.len {
+        let run = &runs[group.first + offset];
+        let pair = pairs[group.first + offset];
+        let described = describe_single(document, page, run, pair, rects)?;
+        if !described.admissibility.editable && refused.is_none() {
+            refused = Some(described.admissibility.clone());
+        }
+        fragments.push(described);
+    }
+
+    let head = &fragments[0];
+    let joined: String = fragments
+        .iter()
+        .map(|fragment| fragment.text.as_str())
+        .collect();
+    let rect = union_rect(group, pairs, rects);
+
+    // A refusal anywhere in the group refuses the whole run, naming the same gate and reason
+    // as the fragment that failed. When the head paired but a later fragment did not, the
+    // merged run has no box either (`union_rect` returns `None`), so it is refused with the
+    // same T21 prose.
+    let admissibility = match refused {
+        Some(verdict) => verdict,
+        None if rect.is_none() => Admissibility::refused_with(Gate::RunMismatch, UNPAIRED_MESSAGE),
+        None => head.admissibility.clone(),
+    };
+
+    // The group's confidence is its weakest member. A merged run is only ever assembled from
+    // strong pairs, so for a group this is the head's confidence; for an unpaired singleton it
+    // is `None`.
+    let mut confidence = Some(PairConfidence::Strong);
+    for offset in 0..group.len {
+        match pairs[group.first + offset] {
+            None => confidence = None,
+            Some(pair) if pair.confidence == PairConfidence::Weak => {
+                if confidence.is_some() {
+                    confidence = Some(PairConfidence::Weak);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    Ok(PageTextRun {
+        run_id: head.run_id.clone(),
+        text: joined,
+        operator: head.operator.clone(),
+        font_key: head.font_key.clone(),
+        font_name: head.font_name.clone(),
+        font_size: head.font_size,
+        rect,
+        // O1 (§4): the width gate measures the *merged* box's advance, not any one fragment's,
+        // and the refusal quotes this as the old width.
+        width: rect.map(crate::editor::geometry::PdfRect::width),
+        admissibility,
+        pair_confidence: confidence,
+        fragment_count: group.len,
+        // O-Pair-3: only a genuinely merged run carries the second display level; a single
+        // run's own fields already describe its operand.
+        fragments: if group.len > 1 { fragments } else { Vec::new() },
+    })
+}
+
 /// Builds the picker's run list for a page, pairing lopdf addresses with PDFium geometry
 /// **by position** (P2.4.1 T17).
 ///
@@ -391,14 +569,15 @@ pub fn describe_runs(
     // consumed, so a shared box is not a conflict.
     let pairs: Vec<Option<Pair>> = runs.iter().map(|run| pair_run(run, pdfium_runs)).collect();
 
-    let mut described = Vec::with_capacity(runs.len());
-    for (index, run) in runs.iter().enumerate() {
-        described.push(describe_single(
+    let mut described = Vec::new();
+    for group in group_runs(&runs, &pairs) {
+        described.push(describe_group(
             document,
             page,
-            run,
-            pairs[index],
+            &runs,
+            &pairs,
             pdfium_runs,
+            &group,
         )?);
     }
 
@@ -454,23 +633,39 @@ fn describe_single(
     })
 }
 
-/// The request to edit one run.
+/// One further fragment of a merged run, as the picker knows it (P2.4.1 T18).
+///
+/// The head fragment travels as `EditRequest::run_id` + `expected`; every following fragment
+/// travels here, with the text the picker showed so the write path can re-validate it (T4).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FragmentRef {
+    pub run_id: RunId,
+    pub text: String,
+}
+
+/// The request to edit one run (or one merged run, with `fragments` filled).
 pub struct EditRequest<'a> {
     /// 0-based page index.
     pub page: u32,
-    /// The run the user picked, by content-stream address (T4).
+    /// The head run the user picked, by content-stream address (T4).
     pub run_id: RunId,
-    /// The text the user was shown. Re-validated against the bytes at write time (T4).
+    /// The head fragment's text the user was shown. Re-validated against the bytes at write
+    /// time (T4).
     pub expected: String,
     /// The replacement text.
     pub replacement: String,
-    /// The run's measured advance width in points (PDFium, read-only).
+    /// The run's measured advance width in points (PDFium, read-only). For a merged run this is
+    /// the **union** box's width (O1/§4).
     pub old_width: f32,
     /// The run's font size, so MECH-A can measure the substitute's width itself (T13).
     pub font_size: f32,
     /// The O-ST2-4 toggle: when false, a run whose font cannot set the replacement refuses
     /// (`SUBSTITUTE_REFUSED`) instead of being switched to a standard-14 font.
     pub allow_substitution: bool,
+    /// The remaining fragments of a merged run, head first after the head (P2.4.1 T18). Empty
+    /// for an ordinary single-operand edit.
+    pub fragments: Vec<FragmentRef>,
     pub measure: WidthMeasure<'a>,
 }
 
@@ -512,6 +707,22 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     // T4: the run at this address must still read as what the user edited.
     if run.text != request.expected {
         return Err(AppError::TextRunMismatch);
+    }
+
+    // T4 for the merged run's tail (P2.4.1 T18): the picker's fragment list and the document's
+    // must agree here too. The per-fragment byte check happens again in `apply_merged`, against
+    // the content actually being written; this earlier check keeps the *addresses* honest, so a
+    // stale picker entry cannot name an operand that has since become something else.
+    let page_id_for_fragments = page_id;
+    let all_runs = textlocate::locate_runs(document, page_id_for_fragments)?;
+    for fragment in &request.fragments {
+        let current = all_runs
+            .iter()
+            .find(|run| run.id == fragment.run_id)
+            .ok_or(AppError::TextRunMismatch)?;
+        if current.text != fragment.text {
+            return Err(AppError::TextRunMismatch);
+        }
     }
 
     // T3/T14 (a)/(b): re-run the invariant font gates against the freshly parsed run.
@@ -587,28 +798,30 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         return Err(error);
     }
 
-    // Byte replacement first, then the `/Fx` swap, so a failure in either leaves no
-    // half-done state visible: both mutate the same decoded content before it is written.
-    let mut inverse = textlocate::apply_text(
-        document,
-        request.page,
-        page_id,
-        &request.run_id,
-        &request.expected,
-        &new_bytes,
-    )?;
-
-    if substitution.is_some() {
-        let base_font = substitution.clone().unwrap_or_default();
-        let swap = textlocate::apply_font_swap(
-            document,
-            request.page,
-            page_id,
-            &request.run_id,
-            &base_font,
-        )?;
-        inverse.font_swap = Some(swap);
+    // Bytes first, then the `/Fx` swap, so a failure in either leaves no half-done state
+    // visible. A merged run (P2.4.1 T18) does both in ONE decode -> mutate -> encode pass: the
+    // head fragment carries the whole replacement, the rest are cleared to empty, and the swap
+    // rides along so bytes and typeface change together or not at all. An ordinary run is the
+    // one-fragment case of the same call.
+    let mut writes = vec![textlocate::FragmentWrite {
+        id: request.run_id.clone(),
+        expected: request.expected.clone(),
+        new_bytes: new_bytes.clone(),
+    }];
+    for fragment in &request.fragments {
+        writes.push(textlocate::FragmentWrite {
+            id: fragment.run_id.clone(),
+            expected: fragment.text.clone(),
+            // Empty: the run is shown once, not once per fragment. The `TJ` numbers between the
+            // operands are left in place (T19).
+            new_bytes: Vec::new(),
+        });
     }
+    let merged = textlocate::MergedWrite {
+        fragments: writes,
+        substitute: substitution.as_deref(),
+    };
+    let inverse = textlocate::apply_merged(document, request.page, page_id, &merged)?;
 
     Ok(EditOutcome {
         inverse,
@@ -621,38 +834,53 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
 ///
 /// `document` must currently be in the post-edit state; the inverse's `page` and address
 /// identify the run, and `new_bytes` is what should be there now.
+///
+/// A merged edit (P2.4.1 T18) recorded its remaining fragments in `also` and any further `Tf`
+/// swaps in `font_swap.also`; all of them are restored here, so one merged edit is one undo. A
+/// stale inverse — one whose recorded bytes are not what the document now holds — refuses
+/// rather than replaying an edit the user did not make.
 pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(), AppError> {
     let page_id = page_id(document, operation.page)?;
     let mut content = textlocate::decoded_content(document, page_id)?;
 
-    let operation_at = content
-        .operations
-        .get(operation.op_index)
-        .ok_or(AppError::TextRunMismatch)?;
-    let current =
-        string_at(operation_at, &operation.operand_path).ok_or(AppError::TextRunMismatch)?;
-    if current != operation.new_bytes.as_slice() {
-        // Something else changed these bytes since; replaying the inverse would undo an
-        // edit the user did not make.
-        return Err(AppError::TextRunMismatch);
+    // Every write the edit made, head first.
+    let writes: Vec<&ContentOperation> = std::iter::once(operation)
+        .chain(operation.also.iter())
+        .collect();
+
+    for write in &writes {
+        let current = content
+            .operations
+            .get(write.op_index)
+            .and_then(|op| string_at(op, &write.operand_path))
+            .ok_or(AppError::TextRunMismatch)?;
+        if current != write.new_bytes.as_slice() {
+            // Something else changed these bytes since; replaying the inverse would undo an
+            // edit the user did not make.
+            return Err(AppError::TextRunMismatch);
+        }
     }
 
     let encoded = {
-        let slot = string_at_mut(
-            content
-                .operations
-                .get_mut(operation.op_index)
-                .ok_or(AppError::TextRunMismatch)?,
-            &operation.operand_path,
-        )
-        .ok_or(AppError::TextRunMismatch)?;
-        *slot = operation.old_bytes.clone();
+        for write in &writes {
+            let slot = string_at_mut(
+                content
+                    .operations
+                    .get_mut(write.op_index)
+                    .ok_or(AppError::TextRunMismatch)?,
+                &write.operand_path,
+            )
+            .ok_or(AppError::TextRunMismatch)?;
+            *slot = write.old_bytes.clone();
+        }
 
-        // Undo the font swap alongside the bytes (Stage 2 T10/T16): leaving the substitute
-        // in place while restoring the text would silently keep the changed typeface.
+        // Undo the font swaps alongside the bytes (Stage 2 T10/T16): leaving a substitute in
+        // place while restoring the text would silently keep the changed typeface.
         if let Some(swap) = &operation.font_swap {
-            let slot = operation_at_mut(&mut content, swap).ok_or(AppError::TextRunMismatch)?;
-            *slot = swap.old_name.clone();
+            for swap in std::iter::once(swap).chain(swap.also.iter()) {
+                let slot = operation_at_mut(&mut content, swap).ok_or(AppError::TextRunMismatch)?;
+                *slot = swap.old_name.clone();
+            }
         }
 
         content.encode().map_err(|error| {
@@ -732,6 +960,7 @@ mod tests {
             old_width,
             font_size: 24.0,
             allow_substitution: true,
+            fragments: Vec::new(),
             measure,
         }
     }
