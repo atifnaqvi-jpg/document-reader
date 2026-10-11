@@ -5,6 +5,7 @@ your own documents — nothing leaves your machine.
 
 - 📐 [Architecture design (draft)](docs/ARCHITECTURE.md) — components, modules, roadmap.
 - ✅ [Frozen decisions (v1.0)](docs/DECISIONS.md) — resolves the architecture open questions. **Read this first.**
+- 🎛️ [UX specification](docs/UX-DESIGN.md) — surfaces, states, and `UX-###` requirements derived from the shipped build; feeds phase designs.
 
 ## Privacy
 
