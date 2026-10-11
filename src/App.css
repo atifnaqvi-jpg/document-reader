@@ -679,7 +679,8 @@ button:disabled {
   padding: 0 0.25rem;
 }
 
-.textrun-merged {
+.textrun-merged,
+.textrun-weak {
   font-size: 0.75rem;
   font-style: italic;
 }

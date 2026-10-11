@@ -965,6 +965,106 @@ mod tests {
         }
     }
 
+    /// A test run at a given origin, size and font, for the merge predicates.
+    fn test_run(text: &str, x: f32, size: f32, font: &str) -> RawRun {
+        RawRun {
+            id: RunId {
+                op_index: 0,
+                operand_path: vec![0],
+            },
+            bytes: text.as_bytes().to_vec(),
+            text: text.to_string(),
+            font_key: font.as_bytes().to_vec(),
+            operator: "Tj".to_string(),
+            origin: (x, 700.0),
+            font_size: size,
+            advance: text.chars().count() as f32 * 0.5 * size,
+        }
+    }
+
+    #[test]
+    fn merges_fragments_on_one_baseline_within_a_quarter_em() {
+        // "He" then "llo", the second starting exactly where the first ends.
+        let head = test_run("He", 72.0, 12.0, "F1");
+        let next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        assert!(mergeable(&head, &next));
+    }
+
+    #[test]
+    fn never_merges_across_a_font_or_a_size() {
+        let head = test_run("AB", 72.0, 12.0, "F1");
+        // Same position and size, different font: the merged run could not be encoded with
+        // one font (T19).
+        let other_font = test_run("CD", 72.0 + head.advance, 12.0, "F2");
+        assert!(!mergeable(&head, &other_font));
+        // Same font and position, different size: a heading is not a body word.
+        let other_size = test_run("CD", 72.0 + head.advance, 10.0, "F1");
+        assert!(!mergeable(&head, &other_size));
+    }
+
+    #[test]
+    fn never_merges_across_a_line_break() {
+        let head = test_run("AB", 72.0, 12.0, "F1");
+        let mut next = test_run("CD", 72.0 + head.advance, 12.0, "F1");
+        next.origin.1 = head.origin.1 + 12.0; // next line
+        assert!(!mergeable(&head, &next));
+    }
+
+    #[test]
+    fn merges_body_words_but_not_heading_words_at_the_same_absolute_gap() {
+        // The whole reason the threshold is relative: a 3pt gap is inside a 24pt heading's
+        // letter-spacing but a whole extra word at 9pt. An absolute constant would get one of
+        // these wrong whichever value it picked.
+        let body_head = test_run("foo", 72.0, 9.0, "F1");
+        let body_next = test_run("bar", 72.0 + body_head.advance + 3.0, 9.0, "F1");
+        // 3pt gap vs tolerance 0.25*9 = 2.25pt: too far, the words stay separate.
+        assert!(!mergeable(&body_head, &body_next));
+
+        let head_head = test_run("Fo", 72.0, 24.0, "F1");
+        let head_next = test_run("o", 72.0 + head_head.advance + 3.0, 24.0, "F1");
+        // 3pt gap vs tolerance 0.25*24 = 6pt: fine, the heading's glyphs merge.
+        assert!(mergeable(&head_head, &head_next));
+    }
+
+    #[test]
+    fn groups_merge_strongly_paired_consecutive_runs_only() {
+        let runs = vec![
+            test_run("He", 72.0, 12.0, "F1"),
+            test_run("llo", 78.0, 12.0, "F1"),
+            test_run("far", 200.0, 12.0, "F1"),
+        ];
+        let strong = |rect: usize| {
+            Some(Pair {
+                rect,
+                confidence: PairConfidence::Strong,
+            })
+        };
+        let groups = group_runs(&runs, &[strong(0), strong(0), strong(1)]);
+        // Two groups: "Hello" (2 fragments) and "far" (1), because the gap to "far" is far
+        // past a quarter em.
+        assert_eq!(groups.len(), 2);
+        assert_eq!((groups[0].first, groups[0].len), (0, 2));
+        assert_eq!((groups[1].first, groups[1].len), (2, 1));
+    }
+
+    #[test]
+    fn a_weak_pair_is_never_merged_and_an_unpaired_run_stays_visible() {
+        let runs = vec![
+            test_run("He", 72.0, 12.0, "F1"),
+            test_run("llo", 78.0, 12.0, "F1"),
+            test_run("solo", 200.0, 12.0, "F1"),
+        ];
+        let weak = Some(Pair {
+            rect: 0,
+            confidence: PairConfidence::Weak,
+        });
+        let groups = group_runs(&runs, &[weak, weak, None]);
+        // One group per run: the weak pair is not merged, and the unpaired run is still
+        // reported as a singleton so the picker can name its refusal (T21).
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().all(|group| group.len == 1));
+    }
+
     #[test]
     fn edits_a_simple_font_run_when_it_fits() {
         let mut document = testpdf::simple_winansi();

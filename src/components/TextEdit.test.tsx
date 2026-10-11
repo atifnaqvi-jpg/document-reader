@@ -502,6 +502,23 @@ describe("P2.4.1 merged runs: one entry, expandable fragments, one atomic write"
     ]);
   });
 
+  it("flags a weakly paired run as matched to the nearest box (T21)", async () => {
+    // T21: a weak pair is still offered — refusing it would be the 0.4.0 defect — but it says
+    // it matched the nearest box rather than a containing one, so the user knows why the write
+    // path will re-check it.
+    const run = makeRun({ pairConfidence: "weak" });
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [run]);
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    expect(within(list).getByText("nearest box")).toBeInTheDocument();
+    // Still editable: a weak pair is geometry, not a refusal.
+    const button = within(list).getByRole("button", { name: /hello/ });
+    expect(button).not.toHaveClass("refused");
+  });
+
   it("sends no fragments for an ordinary single run", async () => {
     const run = makeRun();
     const mounted = mountEditor();

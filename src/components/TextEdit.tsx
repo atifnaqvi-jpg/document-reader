@@ -165,6 +165,14 @@ function RunListItem({
         {run.fontName || run.fontKey}
         {run.fontSize ? ` ${run.fontSize}pt` : ""}
       </span>
+      {/* T21: a weak pair is flagged, not hidden. Its box is nearest-only rather than a
+          containing rect, so the write path re-checks it — but it is still offered, because
+          refusing it would be the 0.4.0 defect again. */}
+      {run.pairConfidence === "weak" ? (
+        <span className="textrun-weak muted" title="matched to the nearest box, not a containing one">
+          nearest box
+        </span>
+      ) : null}
       {/* T10-style disclosure: a merged run says so, and how many fragments it joined, so a
           single click never silently rewrites five operands. */}
       {merged ? (
