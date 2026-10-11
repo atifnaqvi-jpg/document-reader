@@ -497,7 +497,8 @@ pub fn fragmented_wider_merged() -> Document {
 
 // --- Stage 2: embedded-subset fixtures (T11) ----------------------------------
 
-/// A minimal, valid TrueType program whose `cmap` maps exactly `glyphs`.
+/// A minimal, valid TrueType program whose `cmap` maps exactly `glyphs`, each with an explicit
+/// `hmtx` `advanceWidth`.
 ///
 /// Stage 2's T11 coverage check reads the *actual* glyph set of an embedded program, so
 /// the fixtures need real, parseable program bytes. Rather than commit a system font
@@ -505,7 +506,12 @@ pub fn fragmented_wider_merged() -> Document {
 /// hand-synthesised sfnt: `head`, `hhea`, `maxp`, `hmtx`, `cmap` (format 4), `loca` and
 /// `glyf` — the tables `ttf-parser` reads, and no more. Coverage is exact, so a "subset
 /// lacks the glyph" case is real rather than a name convention.
-pub fn true_type_program(glyphs: &[char]) -> Vec<u8> {
+///
+/// The P2.4.2 chain-break fixtures need the metric to be *larger* than the `0.5em`
+/// per-character approximation the 0.4.1 code fell back to, so a chain that genuinely
+/// continues is measurably broken by the approximation. `600`/1000 is a hair
+/// under `0.5em`; `1000`/1000 clears it by a wide margin.
+pub fn true_type_program_with_advance(glyphs: &[char], advance_width: u16) -> Vec<u8> {
     fn u16be(value: u16) -> [u8; 2] {
         value.to_be_bytes()
     }
@@ -610,7 +616,11 @@ pub fn true_type_program(glyphs: &[char]) -> Vec<u8> {
     maxp.extend_from_slice(&u16be(num_glyphs));
 
     let hmtx: Vec<u8> = (0..num_glyphs)
-        .flat_map(|_| vec![0x02, 0x58, 0x00, 0x00]) // advanceWidth 600, lsb 0
+        .flat_map(|_| {
+            let mut entry = advance_width.to_be_bytes().to_vec();
+            entry.extend_from_slice(&[0x00, 0x00]); // lsb 0
+            entry
+        })
         .collect();
     let loca: Vec<u8> = (0..=num_glyphs).flat_map(|_| u32be(0)).collect();
 
@@ -664,38 +674,7 @@ pub fn embedded_subset_page(run_text: &str, program_glyphs: &[char]) -> Document
     let mut document = Document::with_version("1.4");
     let pages_id = document.new_object_id();
 
-    let program = true_type_program(program_glyphs);
-    let program_id = document.add_object(Stream::new(dictionary! {}, program));
-
-    // Widths are nominal; coverage/metrics tests use the AFM substitute or a fixed
-    // measurement, never this array.
-    let first: i64 = 32;
-    let last: i64 = 255;
-    let widths: Vec<Object> = (first..=last).map(|_| Object::Integer(600)).collect();
-
-    let descriptor_id = document.add_object(dictionary! {
-        "Type" => "FontDescriptor",
-        "FontName" => "ABCDEF+FixtureSubset",
-        "Flags" => 32,
-        "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
-        "ItalicAngle" => 0,
-        "Ascent" => 800,
-        "Descent" => -200,
-        "CapHeight" => 700,
-        "StemV" => 80,
-        "FontFile2" => program_id,
-    });
-
-    let font_id = document.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "TrueType",
-        "BaseFont" => "ABCDEF+FixtureSubset",
-        "Encoding" => "WinAnsiEncoding",
-        "FirstChar" => first,
-        "LastChar" => last,
-        "Widths" => widths,
-        "FontDescriptor" => descriptor_id,
-    });
+    let font_id = embedded_subset_font(&mut document, program_glyphs, 600);
 
     let resources_id = document.add_object(dictionary! {
         "Font" => dictionary! { "F1" => font_id },
@@ -710,6 +689,234 @@ pub fn embedded_subset_page(run_text: &str, program_glyphs: &[char]) -> Document
         "Resources" => resources_id,
     });
 
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// Adds the embedded-subset `/F1` font dictionary to `document` and returns its object id.
+///
+/// `advance_width` is written into the program's `hmtx`, so a fixture can choose a face whose
+/// glyph advance differs from the `0.5em` per-character approximation (P2.4.2 Phase A).
+fn embedded_subset_font(
+    document: &mut Document,
+    program_glyphs: &[char],
+    advance_width: u16,
+) -> lopdf::ObjectId {
+    let program = true_type_program_with_advance(program_glyphs, advance_width);
+    let program_id = document.add_object(Stream::new(dictionary! {}, program));
+
+    // Widths are nominal; coverage/metrics tests use the AFM substitute or a fixed
+    // measurement, never this array.
+    let first: i64 = 32;
+    let last: i64 = 255;
+    let widths: Vec<Object> = (first..=last)
+        .map(|_| Object::Integer(i64::from(advance_width)))
+        .collect();
+
+    let descriptor_id = document.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "ABCDEF+FixtureSubset",
+        "Flags" => 32,
+        "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
+        "ItalicAngle" => 0,
+        "Ascent" => 800,
+        "Descent" => -200,
+        "CapHeight" => 700,
+        "StemV" => 80,
+        "FontFile2" => program_id,
+    });
+
+    document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "ABCDEF+FixtureSubset",
+        "Encoding" => "WinAnsiEncoding",
+        "FirstChar" => first,
+        "LastChar" => last,
+        "Widths" => widths,
+        "FontDescriptor" => descriptor_id,
+    })
+}
+
+// --- P2.4.2 Phase A: chain-break and space-kern fixtures (§3) -----------------
+
+/// Emits one `TJ` line whose fragments are separate strings, with a kerning number after each.
+///
+/// A single `TJ` array is deliberate: PDFium joins the operands of one text object into **one**
+/// box, so a line whose producer used a `TJ` per kerning group is exactly one PDFium box while
+/// lopdf sees one operand per fragment. That is the shape both the `Sci|ence` orphan and the
+/// space-kern gap need — the orphan's only plausible box is the whole line, which is the bug.
+///
+/// Each tuple is a fragment's text and the kerning number (thousandths of an em, positive shifts
+/// the pen *left*) that follows it; the last fragment's number is ignored.
+fn push_tj_array(
+    operations: &mut Vec<Operation>,
+    size: i64,
+    x: i64,
+    y: i64,
+    parts: &[(&str, i64)],
+) {
+    operations.push(Operation::new("BT", vec![]));
+    operations.push(Operation::new("Tf", vec!["F1".into(), size.into()]));
+    operations.push(Operation::new(
+        "Tm",
+        vec![1.into(), 0.into(), 0.into(), 1.into(), x.into(), y.into()],
+    ));
+    let mut array = Vec::new();
+    for (index, (text, kern)) in parts.iter().enumerate() {
+        array.push(Object::string_literal(*text));
+        if index + 1 < parts.len() {
+            array.push(Object::Integer(*kern));
+        }
+    }
+    operations.push(Operation::new("TJ", vec![Object::Array(array)]));
+    operations.push(Operation::new("ET", vec![]));
+}
+
+/// §3 `chain-break-orphan.pdf`: a line whose tail fragment sits exactly where the head's
+/// **exact** glyph advances end, so only the 0.4.1 `0.5em` approximation could sever it.
+///
+/// The embedded face's advance is `1000/1000 = 1.0em` per glyph, while the 0.4.1 approximation
+/// assumed `0.5em`. `Sci` therefore measures `3.0em` exactly and `ence` begins at `x0 + 3.0em` —
+/// a zero gap in *file* metrics. The old code computed `x0 + 1.5em` for the head, giving the tail
+/// a gap of `1.5em` (18pt at 12pt) that no `0.25em` bound could cross, severing `Sci|ence`. With
+/// in-file metrics the gap is zero and the line is one run again (P2.4.2 Phase A). All glyphs are
+/// present in the program, so the font gates pass and the picker offers the word.
+pub fn chain_break_orphan() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let glyphs: Vec<char> = "Science".chars().collect();
+    let font_id = embedded_subset_font(&mut document, &glyphs, 1000);
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    // 12pt face, 1.0em advance -> each glyph is 12pt wide. `Sci` is 36pt, so `ence` starts at
+    // 108pt with a zero seam.
+    let mut operations = Vec::new();
+    push_tj_array(&mut operations, 12, 72, 700, &[("Sci", 0), ("ence", 0)]);
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// §3 `space-kern-gap.pdf`: an inter-word gap carried as **kerning**, not a space glyph.
+///
+/// `foo` and `bar` are two strings in one `TJ` array with no `0x20` between them; the kern widens
+/// the seam to `0.4em` (4.8pt at 12pt) — past the `0.25em` bound, inside the `0.5em` one. PDFium
+/// reconstructs the line as `foo bar`, so the widened gap applies and the two merge (P2.4.2
+/// O-Chain-2). The companion case — the same `0.4em` seam with **no** space in the reconstructed
+/// text — is asserted in the unit test `the_widened_gap_needs_a_real_space_at_the_seam`.
+pub fn space_kern_gap() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let glyphs: Vec<char> = "fobar".chars().collect();
+    // 0.6em advances: `foo` = 21.6pt at 12pt. A -400 kern adds 4.8pt before `bar`.
+    let font_id = embedded_subset_font(&mut document, &glyphs, 600);
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let mut operations = Vec::new();
+    push_tj_array(&mut operations, 12, 72, 700, &[("foo", -400), ("bar", 0)]);
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// §3 `wider-replacement-orphan.pdf`: the user's exact 0.4.1 failure, in one fixture.
+///
+/// A `TJ` line `DataScien|ce` whose seam is wide enough (`0.6em`) to break the chain leaves the
+/// tail `ce` an orphan — with no box of its own, so it pairs to the **whole line's** box, whose
+/// width is several times the tail's own ~24pt span. Under 0.4.1 the width gate took the *box*
+/// width as the old width, so a ~110pt replacement to that 14pt-class tail passed the gate and
+/// was written into the tail operand alone. This fixture exists so the regression is caught: the
+/// tail must be *box-suspicious* (flagged weak, never merged) and its quota must be its own
+/// measured span, so the same ~110pt replacement **hard-refuses** quoting both widths (T22).
+pub fn wider_replacement_orphan() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let glyphs: Vec<char> = "DataScience".chars().collect();
+    // 1.0em advances at 12pt: the head `DataScien` is 108pt, the tail `ce` is 24pt.
+    let font_id = embedded_subset_font(&mut document, &glyphs, 1000);
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    // A -600 kern adds a 7.2pt (0.6em) seam, past even the widened 0.5em bound, so the tail is a
+    // chain-break orphan while the whole line is one PDFium box.
+    let mut operations = Vec::new();
+    push_tj_array(
+        &mut operations,
+        12,
+        72,
+        700,
+        &[("DataScien", -600), ("ce", 0)],
+    );
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
     document.objects.insert(
         pages_id,
         Object::Dictionary(dictionary! {

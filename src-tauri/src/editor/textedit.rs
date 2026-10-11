@@ -304,9 +304,53 @@ const BASELINE_TOLERANCE: f32 = 0.5;
 /// kerning pair.
 const MERGE_GAP_EM: f32 = 0.25;
 
-/// The gap below which two fragments on one baseline are joined (P2.4.1 T19).
-fn gap_tolerance(font_size: f32) -> f32 {
-    MERGE_GAP_EM * font_size
+/// The widened gap two fragments may have and still merge **when PDFium's own text shows a
+/// real space at that boundary** (P2.4.2 O-Chain-2).
+///
+/// Word and PowerPoint exports often carry an inter-word space as a *kerning shift* rather
+/// than a space glyph: the bytes read `foo` then `bar` with no `0x20` between them, while the
+/// rendered line plainly reads `foo bar`. PDFium reconstructs that gap as a space; when it
+/// does, the two fragments are one word-space apart and a half-em is the honest bound. When it
+/// does not, the quarter-em bound above still applies, so a genuinely large kern is not welded
+/// into one run.
+const MERGE_GAP_SPACE_EM: f32 = 0.5;
+
+/// The overlap past which two fragments are *not* the same chain, as a fraction of the font
+/// size (P2.4.2 O-Chain-2's overlap guard).
+///
+/// Two fragments on one baseline should never overlap by more than a hair of side bearing.
+/// A negative gap beyond this means the run's measured advance overshot its ink — a
+/// mis-measure rather than a real adjacency — so the chain breaks there instead of joining two
+/// runs whose written bytes would step on each other.
+const MERGE_OVERLAP_EM: f32 = 0.05;
+
+/// The size-equality tolerance, in points, for two fragments on one baseline (P2.4.2).
+const SIZE_TOLERANCE_PT: f32 = 0.2;
+
+/// The size-equality tolerance as a fraction of the size — the larger of the two rules applies
+/// (P2.4.2: `|Δ| ≤ max(0.2pt, 1% of size)`).
+const SIZE_TOLERANCE_FRACTION: f32 = 0.01;
+
+/// Whether two `Tf` sizes are the same fragment's (P2.4.2, relative rule).
+///
+/// The flat 0.1pt rule of P2.4.1 broke chains over rendering-scale rounding on a large face:
+/// a 48pt run measured `48.0` in one operand and `48.05` in the next is the same run, and a
+/// tenth of a point would split it. One percent of the size (or a fifth of a point, whichever
+/// is larger) tracks the eye instead of the fourth decimal.
+fn sizes_match(a: f32, b: f32) -> bool {
+    let tolerance = SIZE_TOLERANCE_PT.max(SIZE_TOLERANCE_FRACTION * a.abs().max(b.abs()));
+    (a - b).abs() <= tolerance
+}
+
+/// The gap below which two fragments on one baseline are joined (P2.4.1 T19 / P2.4.2
+/// O-Chain-2).
+fn gap_tolerance(font_size: f32, space_at_boundary: bool) -> f32 {
+    let em = if space_at_boundary {
+        MERGE_GAP_SPACE_EM
+    } else {
+        MERGE_GAP_EM
+    };
+    em * font_size
 }
 
 /// One lopdf run's match to a rendered box.
@@ -384,19 +428,53 @@ fn pair_run(run: &RawRun, rects: &[crate::editor::runmetrics::PdfiumRun]) -> Opt
         })
 }
 
-/// Whether two consecutive fragments may be merged into one run (P2.4.1 T19).
+/// True when the reconstructed text of two fragments shows a real space at their seam.
 ///
-/// All four conditions are required, and the gap is relative to the font size: same font,
-/// same size, same baseline (0.5pt), and a gap no larger than `MERGE_GAP_EM * font_size`.
-/// Merging across a font or a size would produce a run that cannot be re-encoded with one
-/// font; merging across a line break would read as two lines welded into one.
-fn mergeable(head: &RawRun, next: &RawRun) -> bool {
+/// PDFium joins the operands of a kerned word into its box (T17), so when the two fragments
+/// came from **different** PDFium boxes the seam is genuinely a break, not a kern; only a
+/// shared box can hide a space. When they share a box, that box's own text is searched for a
+/// space — the one signal that turns the widened `0.5em` gap on (P2.4.2 O-Chain-2). The space is
+/// looked for as PDFium reports text, not as the operands read, because a producer that emitted
+/// a space as kerning has no `0x20` byte to find.
+fn space_at_boundary(
+    head_index: usize,
+    next_index: usize,
+    pairs: &[Option<Pair>],
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+) -> bool {
+    let (Some(head_pair), Some(next_pair)) = (pairs[head_index], pairs[next_index]) else {
+        return false;
+    };
+    if head_pair.rect != next_pair.rect {
+        return false;
+    }
+    rects
+        .get(head_pair.rect)
+        .is_some_and(|rect| rect.text.contains(' '))
+}
+
+/// Whether two consecutive fragments may be merged into one run (P2.4.1 T19 / P2.4.2).
+///
+/// All conditions are required: same font, a size that agrees within the *relative* tolerance
+/// ([`sizes_match`]), the same baseline (0.5pt), and a horizontal gap that is
+///
+/// * at most `0.5em` when PDFium's reconstructed text carries a real space at the seam, else
+///   at most `0.25em` ([`gap_tolerance`]); and
+/// * no more overlapping than `-0.05em` ([`MERGE_OVERLAP_EM`]) — a larger overlap is a
+///   mis-measure, and joining across it would let two fragments' bytes collide.
+///
+/// The gap is measured from the fragments' own **exact in-file advances** (`advance_exact`,
+/// P2.4.2 Phase A) when both have them, falling back to the approximation only when a font
+/// offers no metric at all. That is the chain-break fix: the 0.4.1 approximation inflated the
+/// head's advance and pushed the seam negative.
+fn mergeable(head: &RawRun, next: &RawRun, space: bool) -> bool {
     head.font_key == next.font_key
-        && (head.font_size - next.font_size).abs() <= 0.1
+        && sizes_match(head.font_size, next.font_size)
         && (head.origin.1 - next.origin.1).abs() <= BASELINE_TOLERANCE
         && {
-            let gap = next.origin.0 - (head.origin.0 + head.advance);
-            gap <= gap_tolerance(head.font_size)
+            let advance = head.advance_exact.unwrap_or(head.advance);
+            let gap = next.origin.0 - (head.origin.0 + advance);
+            gap <= gap_tolerance(head.font_size, space) && gap >= -MERGE_OVERLAP_EM * head.font_size
         }
 }
 
@@ -417,7 +495,11 @@ struct RunGroup {
 /// The scan is ordered and strictly consecutive: a run that is not on the same baseline, or a
 /// run with no box at all, ends the group. That is what keeps a merge from reaching across a
 /// line break or past an address the picker refused.
-fn group_runs(runs: &[RawRun], pairs: &[Option<Pair>]) -> Vec<RunGroup> {
+fn group_runs(
+    runs: &[RawRun],
+    pairs: &[Option<Pair>],
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+) -> Vec<RunGroup> {
     let mut groups = Vec::new();
     let mut index = 0;
     while index < runs.len() {
@@ -430,7 +512,10 @@ fn group_runs(runs: &[RawRun], pairs: &[Option<Pair>]) -> Vec<RunGroup> {
                 if next.map(|pair| pair.confidence) != Some(PairConfidence::Strong) {
                     break;
                 }
-                if !mergeable(&runs[index + len - 1], &runs[index + len]) {
+                // O-Chain-2: the widened gap is allowed only when PDFium's reconstructed text
+                // has a real space at this seam. A space can only hide inside a *shared* box.
+                let space = space_at_boundary(index + len - 1, index + len, pairs, rects);
+                if !mergeable(&runs[index + len - 1], &runs[index + len], space) {
                     break;
                 }
                 len += 1;
@@ -573,7 +658,7 @@ pub fn describe_runs(
     let pairs: Vec<Option<Pair>> = runs.iter().map(|run| pair_run(run, pdfium_runs)).collect();
 
     let mut described = Vec::new();
-    for group in group_runs(&runs, &pairs) {
+    for group in group_runs(&runs, &pairs, pdfium_runs) {
         described.push(describe_group(
             document,
             page,
@@ -970,6 +1055,7 @@ mod tests {
 
     /// A test run at a given origin, size and font, for the merge predicates.
     fn test_run(text: &str, x: f32, size: f32, font: &str) -> RawRun {
+        let approximation = text.chars().count() as f32 * 0.5 * size;
         RawRun {
             id: RunId {
                 op_index: 0,
@@ -981,7 +1067,10 @@ mod tests {
             operator: "Tj".to_string(),
             origin: (x, 700.0),
             font_size: size,
-            advance: text.chars().count() as f32 * 0.5 * size,
+            advance: approximation,
+            // The approximation doubles as the exact metric here, so a unit test that does not
+            // care about the metric source behaves as before (P2.4.2 Phase A).
+            advance_exact: Some(approximation),
         }
     }
 
@@ -990,7 +1079,7 @@ mod tests {
         // "He" then "llo", the second starting exactly where the first ends.
         let head = test_run("He", 72.0, 12.0, "F1");
         let next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
-        assert!(mergeable(&head, &next));
+        assert!(mergeable(&head, &next, false));
     }
 
     #[test]
@@ -999,10 +1088,10 @@ mod tests {
         // Same position and size, different font: the merged run could not be encoded with
         // one font (T19).
         let other_font = test_run("CD", 72.0 + head.advance, 12.0, "F2");
-        assert!(!mergeable(&head, &other_font));
+        assert!(!mergeable(&head, &other_font, false));
         // Same font and position, different size: a heading is not a body word.
         let other_size = test_run("CD", 72.0 + head.advance, 10.0, "F1");
-        assert!(!mergeable(&head, &other_size));
+        assert!(!mergeable(&head, &other_size, false));
     }
 
     #[test]
@@ -1010,7 +1099,7 @@ mod tests {
         let head = test_run("AB", 72.0, 12.0, "F1");
         let mut next = test_run("CD", 72.0 + head.advance, 12.0, "F1");
         next.origin.1 = head.origin.1 + 12.0; // next line
-        assert!(!mergeable(&head, &next));
+        assert!(!mergeable(&head, &next, false));
     }
 
     #[test]
@@ -1021,12 +1110,56 @@ mod tests {
         let body_head = test_run("foo", 72.0, 9.0, "F1");
         let body_next = test_run("bar", 72.0 + body_head.advance + 3.0, 9.0, "F1");
         // 3pt gap vs tolerance 0.25*9 = 2.25pt: too far, the words stay separate.
-        assert!(!mergeable(&body_head, &body_next));
+        assert!(!mergeable(&body_head, &body_next, false));
 
         let head_head = test_run("Fo", 72.0, 24.0, "F1");
         let head_next = test_run("o", 72.0 + head_head.advance + 3.0, 24.0, "F1");
         // 3pt gap vs tolerance 0.25*24 = 6pt: fine, the heading's glyphs merge.
-        assert!(mergeable(&head_head, &head_next));
+        assert!(mergeable(&head_head, &head_next, false));
+    }
+
+    /// P2.4.2 O-Chain-2: the widened `0.5em` gap applies **only** when PDFium's reconstructed
+    /// text carries a real space at the seam; without the space flag it never does.
+    #[test]
+    fn the_widened_gap_needs_a_real_space_at_the_seam() {
+        // A 4pt gap at 12pt: 0.33em, past the 0.25em bound but inside the 0.5em one.
+        let head = test_run("foo", 72.0, 12.0, "F1");
+        let next = test_run("bar", 72.0 + head.advance + 4.0, 12.0, "F1");
+        assert!(
+            !mergeable(&head, &next, false),
+            "no space at the seam, so the quarter-em bound still applies"
+        );
+        assert!(
+            mergeable(&head, &next, true),
+            "PDFium shows a space there, so the seam is one word-space apart"
+        );
+    }
+
+    /// P2.4.2: a relative size rule, not a flat tenth of a point. A large face rounded to a
+    /// different hundredth between two operands is still one run.
+    #[test]
+    fn size_equality_is_relative_not_a_flat_tenth_of_a_point() {
+        assert!(sizes_match(48.0, 48.05), "1% of 48pt tolerates 0.05pt");
+        assert!(
+            !sizes_match(9.0, 9.3),
+            "but 0.3pt at 9pt is a different size"
+        );
+        // The floor: below the 1% band the flat 0.2pt applies.
+        assert!(sizes_match(8.0, 8.15));
+        assert!(!sizes_match(8.0, 8.3));
+    }
+
+    /// P2.4.2 overlap guard: a negative gap past `-0.05em` is a mis-measure, not a seam, and
+    /// must break the chain rather than weld two colliding fragments together.
+    #[test]
+    fn a_large_overlap_breaks_the_chain() {
+        let head = test_run("AB", 72.0, 12.0, "F1");
+        // Inside the 0.05em (0.6pt) overlap: still one chain.
+        let touching = test_run("CD", 72.0 + head.advance - 0.3, 12.0, "F1");
+        assert!(mergeable(&head, &touching, false));
+        // Past it: the head's advance overshot, so do not join.
+        let overlapping = test_run("CD", 72.0 + head.advance - 2.0, 12.0, "F1");
+        assert!(!mergeable(&head, &overlapping, false));
     }
 
     #[test]
@@ -1064,11 +1197,30 @@ mod tests {
         );
     }
 
+    /// Two boxes for the grouping tests, both with space-free reconstructed text so the
+    /// widened O-Chain-2 gap does not apply.
+    fn group_boxes() -> Vec<crate::editor::runmetrics::PdfiumRun> {
+        let box_at = |text: &str, x0: f32| crate::editor::runmetrics::PdfiumRun {
+            text: text.to_string(),
+            font_name: "Helvetica".to_string(),
+            font_size: 12.0,
+            x0,
+            y0: 700.0,
+            x1: x0 + 20.0,
+            y1: 712.0,
+            width: 20.0,
+        };
+        vec![box_at("Hello", 72.0), box_at("far", 200.0)]
+    }
+
     #[test]
     fn groups_merge_strongly_paired_consecutive_runs_only() {
+        let head = test_run("He", 72.0, 12.0, "F1");
+        // Placed exactly where the head ends, so the seam is a genuine adjacency, not an
+        // overlap (P2.4.2's overlap guard).
         let runs = vec![
-            test_run("He", 72.0, 12.0, "F1"),
-            test_run("llo", 78.0, 12.0, "F1"),
+            head.clone(),
+            test_run("llo", 72.0 + head.advance, 12.0, "F1"),
             test_run("far", 200.0, 12.0, "F1"),
         ];
         let strong = |rect: usize| {
@@ -1077,7 +1229,7 @@ mod tests {
                 confidence: PairConfidence::Strong,
             })
         };
-        let groups = group_runs(&runs, &[strong(0), strong(0), strong(1)]);
+        let groups = group_runs(&runs, &[strong(0), strong(0), strong(1)], &group_boxes());
         // Two groups: "Hello" (2 fragments) and "far" (1), because the gap to "far" is far
         // past a quarter em.
         assert_eq!(groups.len(), 2);
@@ -1096,7 +1248,7 @@ mod tests {
             rect: 0,
             confidence: PairConfidence::Weak,
         });
-        let groups = group_runs(&runs, &[weak, weak, None]);
+        let groups = group_runs(&runs, &[weak, weak, None], &group_boxes());
         // One group per run: the weak pair is not merged, and the unpaired run is still
         // reported as a singleton so the picker can name its refusal (T21).
         assert_eq!(groups.len(), 3);

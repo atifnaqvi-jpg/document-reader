@@ -15,7 +15,6 @@
 
 use lopdf::{content::Operation, Document, Object, ObjectId};
 
-use crate::editor::afm;
 use crate::model::AppError;
 
 /// Bounds a page's decompressed content (P2.4 T3e / F3).
@@ -66,9 +65,16 @@ pub struct RawRun {
     /// (T19) precisely because one page carries both 9pt body text and 24pt headings.
     pub font_size: f32,
     /// The advance this operand occupies, in points. For a standard-14 font it is the AFM
-    /// width; otherwise an approximation (see [`fragment_advance`]). Merging uses it to
-    /// measure the gap to the next fragment; the width gate uses PDFium's rect instead.
+    /// width; for an embedded font, the exact `hmtx` width (P2.4.2 Phase A); only a font with
+    /// no in-file metric at all falls back to an approximation (see [`fragment_advance`]).
+    /// Merging uses it to measure the gap to the next fragment; the width gate uses PDFium's
+    /// rect instead.
     pub advance: f32,
+    /// The advance measured from the font's **own in-file metrics**, or `None` when this font
+    /// offers none (P2.4.2 Phase A). Kept next to [`RawRun::advance`] because the width quota
+    /// (T22) must be a real measurement, never the approximation — a run whose quota is not
+    /// measurable refuses rather than trusting a box.
+    pub advance_exact: Option<f32>,
 }
 
 impl RawRun {
@@ -202,20 +208,18 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
         let Ok(encoding) = font.get_font_encoding(document) else {
             continue;
         };
-        let base_font = font_info(document, page_id, &font_key).and_then(|info| info.base_font);
+        // P2.4.2 Phase A: the run's advance is measured from the font's own metrics when it has
+        // any (AFM for standard-14, `hmtx` for an embedded program), so the merge gap is exact
+        // rather than a per-character guess. The same source supplies the width quota (T22).
+        let metrics = crate::editor::substitute::FontMetrics::resolve(document, page_id, &font_key);
 
         // Where each operand showed: an ordinary `Tj` shows at the current matrix origin,
         // but fragments inside one `TJ` array advance along the line as their kerning
         // numbers and glyph widths dictate (T17). Both are needed for merging: a per-glyph
         // `TJ` array is a sequence of adjacent fragments, and only the advancing pen tells
         // them apart from a word break.
-        let per_path = tj_fragment_origins(
-            operation,
-            walker.origin(),
-            walker.size,
-            base_font.as_deref(),
-            &encoding,
-        );
+        let per_path =
+            tj_fragment_origins(operation, walker.origin(), walker.size, &metrics, &encoding);
 
         for path in paths {
             let Some(bytes) = string_at(operation, &path) else {
@@ -234,6 +238,11 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                 .map(|(_, origin)| *origin)
                 .unwrap_or_else(|| walker.origin());
 
+            // The exact in-file advance, or `None` when this font offers no metric. The
+            // approximation exists only to keep the walk finite; `advance_exact` is what the
+            // width quota trusts (T22).
+            let advance_exact = metrics.advance(&text, walker.size);
+
             runs.push(RawRun {
                 id: RunId {
                     op_index,
@@ -245,7 +254,8 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                 operator: operation.operator.clone(),
                 origin,
                 font_size: walker.size,
-                advance: fragment_advance(base_font.as_deref(), &text, walker.size),
+                advance: fragment_advance(&metrics, &text, walker.size),
+                advance_exact,
             });
         }
     }
@@ -265,7 +275,7 @@ fn tj_fragment_origins(
     operation: &Operation,
     start: (f32, f32),
     font_size: f32,
-    base_font: Option<&str>,
+    metrics: &crate::editor::substitute::FontMetrics,
     encoding: &lopdf::Encoding,
 ) -> Vec<(Vec<usize>, (f32, f32))> {
     if operation.operator != "TJ" {
@@ -284,7 +294,7 @@ fn tj_fragment_origins(
                     origins.push((vec![index, inner], (pen_x, start.1)));
                     let width = encoding
                         .bytes_to_string(bytes)
-                        .map(|text| fragment_advance(base_font, &text, font_size))
+                        .map(|text| fragment_advance(metrics, &text, font_size))
                         .unwrap_or(0.0);
                     pen_x += width;
                 }
@@ -303,18 +313,20 @@ fn tj_fragment_origins(
 /// The width a fragment occupies, used to walk *within* a `TJ` array and to measure the gap
 /// between two fragments.
 ///
-/// A standard-14 font answers exactly from the AFM tables. Any other font falls back to a
-/// per-character approximation: this number only ever decides whether two fragments sit
-/// shoulder to shoulder on one line, and the width gate -- the thing correctness depends on --
-/// uses PDFium's measured rect instead.
-pub fn fragment_advance(base_font: Option<&str>, text: &str, font_size: f32) -> f32 {
-    if let Some(base) = base_font {
-        let stripped = crate::editor::substitute::strip_subset_prefix(base);
-        if let Some(width) = afm::text_width(stripped, text, font_size) {
-            return width;
-        }
-    }
-    text.chars().count() as f32 * 0.5 * font_size
+/// A standard-14 font answers exactly from the AFM tables. An embedded font answers from its
+/// own `hmtx` via [`crate::editor::substitute::FontMetrics`] (P2.4.2 Phase A) — the same in-file
+/// metrics the width quota uses, so a chain is never broken by a fabricated width. Only a font
+/// with **no** in-file metric at all falls back to the per-character approximation; that number
+/// then decides nothing but whether two fragments sit shoulder to shoulder on one line, and the
+/// width gate -- the thing correctness depends on -- uses the run's measured span, never this.
+pub fn fragment_advance(
+    metrics: &crate::editor::substitute::FontMetrics,
+    text: &str,
+    font_size: f32,
+) -> f32 {
+    metrics
+        .advance(text, font_size)
+        .unwrap_or_else(|| text.chars().count() as f32 * 0.5 * font_size)
 }
 
 /// The identity text matrix `[a b c d e f]`.

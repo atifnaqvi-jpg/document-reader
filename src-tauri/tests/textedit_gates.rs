@@ -903,6 +903,89 @@ fn a_run_rect_converts_through_the_shared_geometry() {
     );
 }
 
+// --- P2.4.2 Phase A: exact in-file metrics for the merge chain ----------------
+
+/// §3 `chain-break-orphan.pdf`: a tail fragment sitting exactly where the head's **in-file**
+/// advances end must merge, where the 0.4.1 `0.5em` approximation would have severed it.
+///
+/// The embedded face's glyph advance is `1.0em`, twice the per-character approximation the old
+/// code fell back to. Under the approximation the head `Sci` measured `1.5em` and the tail was a
+/// `1.5em` gap away — a chain break. With the program's own `hmtx` metrics the gap is zero and the
+/// line is one run (P2.4.2 Phase A).
+#[test]
+fn chain_break_orphan_merges_once_exact_metrics_run() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("chain-break-orphan.pdf");
+    let document = load(&path);
+
+    // The metrics really do come from the file: `Sci` at 12pt in a 1.0em face is 36pt, not the
+    // 18pt the `0.5em` approximation would give.
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let raw = textlocate::locate_runs(&document, page_id).unwrap();
+    let head = raw
+        .iter()
+        .find(|run| run.text == "Sci")
+        .expect("the Sci fragment");
+    let exact = head
+        .advance_exact
+        .expect("an embedded font has in-file metrics");
+    assert!(
+        (exact - 36.0).abs() < 0.01,
+        "Sci in a 1.0em face at 12pt is 36pt, got {exact}"
+    );
+    assert!(
+        (head.advance - 36.0).abs() < 0.01,
+        "the walk and the quota share the same exact metric"
+    );
+
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0)).unwrap();
+    assert_eq!(runs.len(), 1, "the whole line is one entry, no orphan tail");
+    let word = &runs[0];
+    assert_eq!(word.text, "Science", "the joined line");
+    assert_eq!(
+        word.fragment_count, 2,
+        "head and tail folded into one run, not split"
+    );
+    assert!(word.admissibility.editable, "the font gates pass");
+}
+
+/// §3 `space-kern-gap.pdf`: an inter-word gap carried as kerning merges when, and only when,
+/// PDFium's reconstructed text shows the space (P2.4.2 O-Chain-2).
+#[test]
+fn space_kern_gap_merges_a_kerned_word_break() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("space-kern-gap.pdf");
+    let runs = pdfium_runs(&path, 0);
+    // PDFium reconstructs the space the producer carried as kerning; without that signal the
+    // 0.4em seam would be past the quarter-em bound and the words would stay apart.
+    let rendered = runs
+        .iter()
+        .find(|run| run.text.contains(' '))
+        .expect("PDFium must reconstruct the kerned space; the fixture depends on it (O-Chain-2)");
+    assert!(
+        rendered.text.contains("foo") && rendered.text.contains("bar"),
+        "both words sit in the one box PDFium joins: {}",
+        rendered.text
+    );
+
+    let document = load(&path);
+    let described = textedit::describe_runs(&document, 0, &runs).unwrap();
+    assert_eq!(
+        described.len(),
+        1,
+        "foo and bar merge across the kerned space"
+    );
+    // The joined text is the *operands'* bytes: the space lived in the kern, not in a glyph, so
+    // the merged run reads "foobar" while PDFium's box showed "foo bar". That is honest — the
+    // operands have no `0x20` to join — and the widened gap is still what let the seam merge.
+    assert_eq!(described[0].text, "foobar");
+    assert_eq!(described[0].fragment_count, 2);
+}
+
 // --- T16 / R5: the edited copy is re-indexed, and search finds the NEW text ----------
 
 /// T16 extends T6: a substituting edit changes the page's text, so the copy's FTS5 rows

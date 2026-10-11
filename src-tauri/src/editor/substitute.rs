@@ -119,7 +119,7 @@ fn original_covers(
 /// A `/FontDescriptor /FontFile2` (TrueType) or `/FontFile3` (OpenType) stream is the only
 /// place an embedded simple font keeps its glyphs. `/FontFile` (Type 1) is not a TrueType
 /// program and `ttf-parser` cannot read it, so it is deliberately not returned.
-fn embedded_font_program(
+pub(crate) fn embedded_font_program(
     document: &Document,
     page_id: ObjectId,
     font_key: &[u8],
@@ -225,6 +225,89 @@ pub fn substitute_width(base_font: &str, text: &str, font_size: f32) -> Option<f
     afm::text_width(base_font, text, font_size)
 }
 
+/// A font's *in-file* metric source, for exact advance measurement (P2.4.2 Phase A / O-ST2-2).
+///
+/// The 0.4.1 merge predicate measured fragment gaps with `fragment_advance`, which for a
+/// non-standard font with no AFM table fell back to `chars * 0.5em`. That over-estimate — real
+/// glyphs in a proportional face average closer to `0.5em` only for the narrowest letters —
+/// inflated `head.advance`, pushed the next fragment's computed gap negative, and **broke the
+/// merge chain** at exactly the boundary the user's `Sci|ence` line showed. The fix is the one
+/// the design froze: read the width out of the font file the run already carries.
+///
+/// The variants are ordered by authority, and [`FontMetrics::advance`] walks them in that order:
+///
+/// * [`FontMetrics::Afm`] — a standard-14 font answers from the pinned AFM tables. No program
+///   involved; the standard-14 metric *is* the constant table.
+/// * [`FontMetrics::TrueType`] — an embedded simple font's program, parsed with `ttf-parser`
+///   (the same parser [`plan`] already uses for coverage — reused, never a second parse path).
+/// * [`FontMetrics::Nominal`] — no program could be read or parsed. This is **not** a silent
+///   approximation: [`FontMetrics::advance`] returns `None`, and the caller treats that as "no
+///   metric" rather than a width (T22's refuse-when-nothing-is-measurable direction).
+pub enum FontMetrics {
+    /// A standard-14 font measured from the pinned AFM tables.
+    Afm { base_font: String },
+    /// An embedded font measured from its own `hmtx`, via the program `ttf-parser` reads.
+    TrueType { program: Vec<u8> },
+    /// No usable metric source: the caller will be handed `None` rather than a guess.
+    Nominal,
+}
+
+impl FontMetrics {
+    /// Resolves the best available metric source for one run font.
+    ///
+    /// The AFM table is tried first because a standard-14 run has no program at all; an
+    /// embedded subset with a real `FontFile2`/`FontFile3` is next. A run whose font is
+    /// neither (a non-embedded, non-standard-14 face) gets [`FontMetrics::Nominal`].
+    pub fn resolve(document: &Document, page_id: ObjectId, font_key: &[u8]) -> FontMetrics {
+        if let Some(info) = crate::editor::textlocate::font_info(document, page_id, font_key) {
+            if let Some(base_font) = info.base_font.as_deref() {
+                let stripped = strip_subset_prefix(base_font);
+                if afm::widths_for(stripped).is_some() {
+                    return FontMetrics::Afm {
+                        base_font: stripped.to_string(),
+                    };
+                }
+            }
+        }
+        if let Some(program) = embedded_font_program(document, page_id, font_key) {
+            return FontMetrics::TrueType { program };
+        }
+        FontMetrics::Nominal
+    }
+
+    /// The exact advance width of `text` in points, or `None` when no in-file metric exists.
+    ///
+    /// `None` is load-bearing (T22): callers must *refuse* rather than substitute a width, so a
+    /// run that cannot be measured is never quoted a quota the renderer will disagree with.
+    pub fn advance(&self, text: &str, font_size: f32) -> Option<f32> {
+        match self {
+            FontMetrics::Afm { base_font } => afm::text_width(base_font, text, font_size),
+            FontMetrics::TrueType { program } => true_type_advance(program, text, font_size),
+            FontMetrics::Nominal => None,
+        }
+    }
+}
+
+/// Sums the `hmtx` advances of `text` in an embedded TrueType program.
+///
+/// A character the program does not map (no `cmap` entry) makes the whole measurement `None`:
+/// the run's own font genuinely cannot set that text, so an advance for it would be fiction.
+/// Widths are font units scaled by `font_size / unitsPerEm`, exactly as a viewer lays them out.
+fn true_type_advance(program: &[u8], text: &str, font_size: f32) -> Option<f32> {
+    let face = ttf_parser::Face::parse(program, 0).ok()?;
+    let units_per_em = f32::from(face.units_per_em());
+    if units_per_em <= 0.0 {
+        return None;
+    }
+    let mut units: f32 = 0.0;
+    for ch in text.chars() {
+        let glyph = face.glyph_index(ch)?;
+        let advance = face.glyph_hor_advance(glyph)?;
+        units += f32::from(advance);
+    }
+    Some(units * font_size / units_per_em)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +407,53 @@ mod tests {
         assert!(
             error.to_string().contains("add a text annotation"),
             "{error}"
+        );
+    }
+
+    /// O-ST2-2 / P2.4.2 Phase A: the metric source is the font file, not an approximation. A
+    /// standard-14 font answers from the AFM tables; an embedded subset answers from its own
+    /// `hmtx`; a font with neither is `Nominal` and its `advance` is `None` (never a guess).
+    #[test]
+    fn font_metrics_come_from_the_font_file_never_an_approximation() {
+        // A standard-14 font: AFM, exact, and `Sci` at 12pt is Helvetica's 3-glyph width.
+        let helvetica = testpdf::simple_winansi();
+        let page_id = textlocate::page_id(&helvetica, 0).unwrap();
+        let metrics = FontMetrics::resolve(&helvetica, page_id, b"F1");
+        match &metrics {
+            FontMetrics::Afm { base_font } => assert_eq!(base_font, "Helvetica"),
+            other => panic!("expected AFM metrics, got a different source"),
+        }
+        let afm_width = metrics
+            .advance("Sci", 12.0)
+            .expect("AFM text is measurable");
+        // Helvetica S=667, c=500, i=222 /1000 em, at 12pt.
+        let expected = (667.0 + 500.0 + 222.0) * 12.0 / 1000.0;
+        assert!(
+            (afm_width - expected).abs() < 0.01,
+            "{afm_width} vs {expected}"
+        );
+
+        // An embedded subset: hmtx, and a `None` for a character the program does not map.
+        let glyphs: Vec<char> = "Sci".chars().collect();
+        let subset = testpdf::embedded_subset_page("Sci", &glyphs);
+        let page_id = textlocate::page_id(&subset, 0).unwrap();
+        let metrics = FontMetrics::resolve(&subset, page_id, b"F1");
+        match &metrics {
+            FontMetrics::TrueType { .. } => {}
+            _ => panic!("an embedded program must be measured from its own hmtx"),
+        }
+        // The fixture program's advance is 600/1000 em per glyph, at 24pt the default run size.
+        let hmtx_width = metrics
+            .advance("Sci", 24.0)
+            .expect("mapped glyphs are measurable");
+        let expected = 3.0 * 600.0 * 24.0 / 1000.0;
+        assert!(
+            (hmtx_width - expected).abs() < 0.01,
+            "{hmtx_width} vs {expected}"
+        );
+        assert!(
+            metrics.advance("Z", 24.0).is_none(),
+            "an unmapped glyph has no advance, so the caller refuses rather than guessing"
         );
     }
 

@@ -96,6 +96,19 @@ fn main() {
             "fragmented-wider-merged.pdf",
             testpdf::bytes(&testpdf::fragmented_wider_merged()),
         ),
+        // P2.4.2 §3: chain-break + space-kern + wider-replacement.
+        (
+            "chain-break-orphan.pdf",
+            testpdf::bytes(&testpdf::chain_break_orphan()),
+        ),
+        (
+            "space-kern-gap.pdf",
+            testpdf::bytes(&testpdf::space_kern_gap()),
+        ),
+        (
+            "wider-replacement-orphan.pdf",
+            testpdf::bytes(&testpdf::wider_replacement_orphan()),
+        ),
     ];
 
     for (name, bytes) in fixtures {
