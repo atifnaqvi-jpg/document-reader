@@ -1393,6 +1393,132 @@ fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
 }
 
 // --- P2.4.4 T24: grid-walk spans from the rendered parent object ---------------
+
+/// §3 T24-A: the user's real Maastricht brochure, page 1, end to end.
+///
+/// Line 1 is a 22-operand `TJ` in `ABCDEE+Monaco` — a face with **no** usable in-file metric
+/// (its `/FontFile2` is Flate-compressed, so `substitute::stream_bytes` hands `ttf-parser` bytes
+/// that do not parse). The lopdf walk therefore charges `0.5em`/glyph against a real `0.6em`
+/// face and its per-fragment pens drift ~1.5pt/char, ~6pt by `ence `. Before T24 that drifting
+/// anchor mis-located the tail's grid chars, the chain broke, and the picker offered a
+/// `box_suspicious` `Weak` singleton. T24 re-derives each fragment's span by *character
+/// alignment* inside the object's own grid window, so the pens never decide a span.
+///
+/// Ground truth from the rendered page (probed): the object's box is x 47.043..379.008,
+/// baseline band y0 438.02 y1 454.19; the grid's loose span runs 45.888..388.008 = **342.12pt**.
+/// The box's `y0` sits 3.39pt *below* the 441.41 baseline because `versity` has a descender —
+/// which is why `rendered_baseline` (T24) reads the baseline from the grid, not the box edge.
+#[test]
+fn t24_real_maastricht_line_one_is_one_editable_run() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("real-maastricht-brochure.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 1, &pdfium_runs(&path, 1), &char_grid(&path, 1))
+        .unwrap();
+
+    let line = runs
+        .iter()
+        .find(|run| run.text.contains("Data Science"))
+        .expect("the brochure's first line is described");
+
+    // ONE run, not 22 singletons: the whole line folded together.
+    assert_eq!(
+        line.text, "5 month University level Data Science ",
+        "the joined line text"
+    );
+    assert_eq!(
+        line.fragment_count, 22,
+        "all 22 TJ operands folded in (the design doc's '23' counted the box's trailing \\r\\n)"
+    );
+    assert!(
+        line.admissibility.editable,
+        "the line is editable: {:?}",
+        line.admissibility
+    );
+    assert!(
+        !line.box_suspicious,
+        "a genuinely merged line is not box-suspicious"
+    );
+    assert_eq!(
+        line.pair_confidence,
+        Some(textedit::PairConfidence::Strong),
+        "the descender-depth baseline is read from the grid, so the pair is strong"
+    );
+    let quota = line.width.expect("the merged line has a measured quota");
+    assert!(
+        (quota - 342.0).abs() < 1.0,
+        "the quota is the true rendered span (342.0pt), not a drifting anchor: {quota}"
+    );
+
+    // A narrower replacement fits the line's quota and is written.
+    let short = "Data Science";
+    let short_width = measured_width(short, line.font_size);
+    assert!(short_width <= quota, "{short_width} <= {quota}");
+    let mut document = load(&path);
+    let tail: Vec<textedit::FragmentRef> = line.fragments[1..]
+        .iter()
+        .map(|fragment| textedit::FragmentRef {
+            run_id: fragment.run_id.clone(),
+            text: fragment.text.clone(),
+        })
+        .collect();
+    let measure = move |_text: &str| Ok(short_width);
+    let request = textedit::EditRequest {
+        page: 1,
+        run_id: line.fragments[0].run_id.clone(),
+        expected: line.fragments[0].text.clone(),
+        replacement: short.to_string(),
+        old_width: quota,
+        font_size: line.font_size,
+        allow_substitution: true,
+        fragments: tail,
+        measure: &measure,
+    };
+    textedit::edit(&mut document, &request)
+        .expect("a narrower replacement fits the merged line's span");
+
+    // A wider replacement hard-refuses, quoting both measured widths (O1).
+    let wide = "5 month University level Data Science and Engineering ";
+    let wide_width = measured_width(wide, line.font_size);
+    assert!(wide_width > quota, "{wide_width} > {quota}");
+    let mut document = load(&path);
+    let tail: Vec<textedit::FragmentRef> = line.fragments[1..]
+        .iter()
+        .map(|fragment| textedit::FragmentRef {
+            run_id: fragment.run_id.clone(),
+            text: fragment.text.clone(),
+        })
+        .collect();
+    let measure = move |_text: &str| Ok(wide_width);
+    let request = textedit::EditRequest {
+        page: 1,
+        run_id: line.fragments[0].run_id.clone(),
+        expected: line.fragments[0].text.clone(),
+        replacement: wide.to_string(),
+        old_width: quota,
+        font_size: line.font_size,
+        allow_substitution: true,
+        fragments: tail,
+        measure: &measure,
+    };
+    let error = textedit::edit(&mut document, &request)
+        .expect_err("a line-wide replacement must hard-refuse");
+    assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+    let message = error.to_string();
+    assert!(message.contains("fits-width"), "{message}");
+    assert!(
+        message.contains(&format!("{wide_width:.1}pt")),
+        "quotes the replacement width: {message}"
+    );
+    assert!(
+        message.contains(&format!("{quota:.1}pt")),
+        "quotes the line's own rendered span: {message}"
+    );
+    assert!(message.contains("add a text annotation"), "{message}");
+}
+
 /// §3 T24-B: a synthetic 22-element `TJ` in a metrics-less wide-glyph face.
 ///
 /// The Maastricht line's shape, rebuilt without the 385KB file: `ABCDEE+Monaco` (a
