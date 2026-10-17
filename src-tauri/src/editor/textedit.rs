@@ -809,6 +809,24 @@ fn mergeable(
         && {
             let gap = measured_gap(head, next, head_span, next_span);
             gap <= gap_tolerance(head.font_size, space) && gap >= -MERGE_OVERLAP_EM * head.font_size
+                || {
+                    // P2.5 T25: both fragments already carry char-grid spans (P2.4.4 T24) and
+                    // sit on one exact baseline — the grid re-adjudicated this seam when it
+                    // refit the fragments with per-character advances. Re-measuring the seam
+                    // with the font's own (absent) metrics returns a phantom gap far outside
+                    // any window — the Maastricht `an` bug measured 55pt between two glyphs
+                    // PDFium drew 6.5pt apart — so the remaining question is whether the chain
+                    // still runs rightward: the next span must not sit left of the head's.
+                    // Only a metrics-less seam takes this exit: a measurable seam is already
+                    // adjudicated by the classic window above (the Maastricht font publishes
+                    // no metrics; the T22 orphan's embedded subset does, and its deliberate
+                    // kern keeps its protection).
+                    head.advance_exact.is_none()
+                        && match (head_span, next_span) {
+                            (Some(head_span), Some(next_span)) => next_span.x0 >= head_span.x0,
+                            _ => false,
+                        }
+                }
         }
 }
 
@@ -843,7 +861,38 @@ fn group_runs(
         if pairs[index].is_some() {
             while index + len < runs.len() {
                 let next = pairs[index + len];
-                if next.map(|pair| pair.confidence) != Some(PairConfidence::Strong) {
+                let head_span = pairs[index + len - 1].and_then(|pair| pair.span);
+                let ready = match next {
+                    Some(pair) => match pair.confidence {
+                        PairConfidence::Strong => true,
+                        // P2.5 T25: a fragment the grid paired only `Weak`ly may still extend
+                        // the chain when the grid's own evidence is complete — it located the
+                        // fragment's text inside its smallest box, contiguously after the
+                        // head's span. On a metrics-less font this is the *only* pairing the
+                        // tail of a line gets (the Maastricht `an`), and refusing it strands
+                        // the user's text as an editable singleton mid-line.
+                        PairConfidence::Weak => {
+                            // The T22 orphan — a tail the grid paired to a line-sized box
+                            // when the font *has* metrics — keeps O1's protection: its Weak
+                            // demotion is the refusal the width gate stands on, so a
+                            // measurable head never extends onto it. On a metrics-less font
+                            // (no font metrics at all) the grid chain is the only measurement
+                            // there is, and refusing it strands the user's text (T25).
+                            runs[index + len - 1].advance_exact.is_none()
+                                && pair.smallest_containing
+                                && match (head_span, pair.span) {
+                                    (Some(head_span), Some(span)) => {
+                                        span.first > head_span.first
+                                            && (head_span.last + 1..=head_span.last + 2)
+                                                .contains(&span.first)
+                                    }
+                                    _ => false,
+                                }
+                        }
+                    },
+                    None => false,
+                };
+                if !ready {
                     break;
                 }
                 // O-Chain-2: the widened gap is allowed only when PDFium's reconstructed text
@@ -899,6 +948,39 @@ fn measured_span(document: &Document, page: u32, run: &RawRun) -> Option<f32> {
 ///
 /// The union of the group's *box* is never used: a box may be a whole line the group only
 /// occupies part of, which is the 0.4.1 hole.
+
+/// True when the group's union box is wide because **the group's own chain** left fragments
+/// behind in it (P2.5 T25).
+///
+/// A metrics-less line keeps its `Strong` prefix together while the grid paired its tail only
+/// weakly (or not at all); the renderer still drew that tail in the box, so the box outruns
+/// the group by exactly the text still to come from the same operation. The fragments after
+/// the group — up to the end of the operation, stopping at the next `Strong`-paired fragment
+/// (a chain that stopped on merit is the classic T22 case and keeps its refusal) — identify
+/// the case: when each is unpaired or a `Weak` pair, the box is the line the group belongs to,
+/// not a neighbour's ink.
+fn shared_box_is_own_chain(
+    runs: &[RawRun],
+    pairs: &[Option<Pair>],
+    group: &RunGroup,
+) -> bool {
+    let last = group.first + group.len;
+    let own_tail: Vec<_> = runs[last..]
+        .iter()
+        .zip(pairs[last..].iter())
+        .take_while(|(run, _)| run.id.op_index == runs[group.first].id.op_index)
+        .collect();
+    // A group the operation *ends* with has no tail to explain a line-sized box: whatever the
+    // box is, it is not the group's chain continuing — the suspicion stands (T22 orphan).
+    if own_tail.is_empty() {
+        return false;
+    }
+    own_tail.iter().all(|(_, pair)| match pair {
+        None => true,
+        Some(pair) => pair.confidence == PairConfidence::Weak,
+    })
+}
+
 fn group_span(
     document: &Document,
     page: u32,
@@ -1028,8 +1110,18 @@ fn describe_group(
     // flagged weak, its quota its own span, so a replacement too wide for the run refuses quoting
     // that span rather than the line.
     let span = group_span(document, page, runs, pairs, group);
-    let box_width = rect.map(crate::editor::geometry::PdfRect::width);
     let head_pair = pairs[group.first];
+    let box_width = if head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong)
+        && shared_box_is_own_chain(runs, pairs, group)
+    {
+        // P2.5 T25: the union box is the group's own line even though the renderer parked tail
+        // fragments the merge gates left outside on top of it. Feeding the line-sized union to
+        // the quota would flag the merged run suspicious (and demote it to weak) for ink that
+        // is not a neighbouring line's — so the box never enters the quota comparison.
+        None
+    } else {
+        rect.map(crate::editor::geometry::PdfRect::width)
+    };
     let group_strong = head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong);
     let smallest_containing = head_pair.is_some_and(|pair| pair.smallest_containing);
     let (width, box_suspicious) =
@@ -1128,7 +1220,9 @@ pub fn describe_runs(
         // P2.4.2 T22: a merged group whose union box is line-sized for its own span is not a
         // merge — its fragments do not fill the box they share, so the box is a line the group
         // only occupies part of. Split into singletons, each measured by its own span.
-        if group.len > 1 && group_box_suspicious(document, page, &runs, &pairs, pdfium_runs, &group)
+        if group.len > 1
+            && group_box_suspicious(document, page, &runs, &pairs, pdfium_runs, &group)
+            && !shared_box_is_own_chain(&runs, &pairs, &group)
         {
             for offset in 0..group.len {
                 let singleton = RunGroup {

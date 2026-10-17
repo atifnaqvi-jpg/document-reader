@@ -1596,3 +1596,43 @@ fn t24_generated_space_is_skipped_when_aligning_fragments() {
         "Data (36pt) + Sci (27pt): the generated space was skipped, not charged"
     );
 }
+
+/// T25 regression guard: the brochure's page-3 "missing data …" line must be ONE merged,
+/// editable run (the blue-text bug).
+#[test]
+fn t25_maastricht_missing_word_line_is_one_editable_run() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("real-maastricht-brochure.pdf");
+    let document = load(&path);
+    let page = 2u32;
+    let runs = textedit::describe_runs(&document, page, &pdfium_runs(&path, page), &char_grid(&path, page))
+        .unwrap();
+    for r in &runs {
+        // The user's broken pick was an *editable* `an` singleton the picker offered mid-line.
+        // Other operations on the page do contain non-editable `an` fragments (different
+        // chains), so only the editable shape is this bug.
+        assert!(
+            !(r.text == "an" && r.admissibility.editable),
+            "the 'an' singleton (the user's broken pick) must be gone"
+        );
+    }
+
+    let line = runs
+        .iter()
+        .find(|r| r.text.contains("missing data"))
+        .expect("the line's strong chain is offered as one merged run");
+    // The merged run is editable, genuinely merged, and carries the previously stranded `an`
+    // fragment the user could only reach as a broken singleton. (The tail after it —
+    // "d basic reporting tools," — lives in unpaired fragments of the same operation, which
+    // T21 intentionally reports as single runs; that is next ticket's territory, not the
+    // phantom-singleton regression T25 pins down.)
+    assert!(line.admissibility.editable, "the line is editable");
+    assert!(line.fragment_count > 1, "the line is merged, not a singleton");
+    assert!(
+        line.text.contains("statistics an"),
+        "the stranded `an` is merged into the line: {:?}",
+        line.text
+    );
+}
