@@ -715,8 +715,31 @@ fn embedded_subset_font(
     program_glyphs: &[char],
     advance_width: u16,
 ) -> lopdf::ObjectId {
+    embedded_subset_font_with(document, program_glyphs, advance_width, false, "ABCDEF+FixtureSubset")
+}
+
+/// Like [`embedded_subset_font`], but with a **FlateDecode-compressed** `FontFile2` program and a
+/// caller-chosen `/BaseFont` (P2.4.4 T24-B).
+///
+/// This is the Maastricht font's real shape. The program is a genuine TrueType face with uniform
+/// `0.6em` advances, and PDFium decompresses and renders it normally — but `substitute`'s
+/// `stream_bytes` hands `ttf-parser` the *compressed* bytes, which do not parse, so
+/// `FontMetrics::resolve` yields `Nominal` and the run has no in-file metric. That is the whole
+/// `0.5em`-approximation class `docs/P2.4.4-tj-gridwalk-DESIGN.md` §1 describes as "A′: no
+/// `FontFile*`" — measured precisely, it is a *compressed* program, not an absent one.
+fn embedded_subset_font_with(
+    document: &mut Document,
+    program_glyphs: &[char],
+    advance_width: u16,
+    compress: bool,
+    base_font: &str,
+) -> lopdf::ObjectId {
     let program = true_type_program_with_advance(program_glyphs, advance_width);
-    let program_id = document.add_object(Stream::new(dictionary! {}, program));
+    let mut stream = Stream::new(dictionary! {}, program);
+    if compress {
+        stream.compress().expect("a generated program compresses");
+    }
+    let program_id = document.add_object(stream);
 
     // Widths are nominal; coverage/metrics tests use the AFM substitute or a fixed
     // measurement, never this array.
@@ -728,7 +751,7 @@ fn embedded_subset_font(
 
     let descriptor_id = document.add_object(dictionary! {
         "Type" => "FontDescriptor",
-        "FontName" => "ABCDEF+FixtureSubset",
+        "FontName" => base_font,
         "Flags" => 32,
         "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
         "ItalicAngle" => 0,
@@ -742,7 +765,7 @@ fn embedded_subset_font(
     document.add_object(dictionary! {
         "Type" => "Font",
         "Subtype" => "TrueType",
-        "BaseFont" => "ABCDEF+FixtureSubset",
+        "BaseFont" => base_font,
         "Encoding" => "WinAnsiEncoding",
         "FirstChar" => first,
         "LastChar" => last,
@@ -1052,6 +1075,153 @@ pub fn wider_replacement_orphan() -> Document {
         700,
         &[("DataScien", -600), ("ce", 0)],
     );
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// §3 `tj-grid-walk.pdf` (T24-B): the Maastricht line-1 shape as a **synthetic** regression.
+///
+/// Twenty-two `TJ` operands spell `"5 month University level Data Science "` in a
+/// **metrics-less** subset font (class A′: no `/FontFile*`, a non-standard-14 name) whose
+/// glyphs really advance `0.6em`. The lopdf walk has no metric to read, so
+/// [`super::textlocate::fragment_advance`] charges its `0.5em` approximation and every
+/// fragment's computed origin drifts further left of the rendered page as the line runs on —
+/// by `ence ` the error is ~0.1 em × 38 chars ≈ 6pt. That drift is what T23a's origin-anchored
+/// walk tripped over: a long operand matched the wrong grid characters, the seam gaps came out
+/// garbage, and the chain broke into 22 singletons.
+///
+/// T24 re-derives each fragment's span from the characters *it* occupies inside the object's own
+/// char window, by character alignment — a quantity with no pen in it — so the drift is gone and
+/// the line is one merged run whose quota is the true rendered span (38 glyphs × 0.6em at 15pt
+/// = 342pt). The fixture is platform-independent: it reproduces by construction (wide glyphs in
+/// a metrics-less font), not by an x86/arm difference.
+pub fn tj_grid_walk() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    // A genuine 0.6em face with a **FlateDecode-compressed** `/FontFile2` and the Maastricht
+    // `/BaseFont` name. PDFium renders the program (uniform 9pt loose boxes at 15pt), while
+    // `FontMetrics::resolve` reads no metric — the exact A′ shape the drift needs.
+    let font_id = embedded_subset_font_with(
+        &mut document,
+        &"5 monthUniversitylevelDataScience".chars().collect::<Vec<_>>(),
+        600,
+        true,
+        "ABCDEE+Monaco",
+    );
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let mut operations = Vec::new();
+    // The real line's 22 operands, kerning included, so the drift accumulates exactly as it does
+    // in the field document.
+    push_tj_array(
+        &mut operations,
+        15,
+        46,
+        700,
+        &[
+            ("5", -7),
+            (" ", 8),
+            ("m", -7),
+            ("o", -7),
+            ("n", -7),
+            ("th ", 24),
+            ("U", -7),
+            ("n", -7),
+            ("i", -7),
+            ("versity ", 24),
+            ("l", -7),
+            ("e", -7),
+            ("v", -7),
+            ("el ", 24),
+            ("D", -7),
+            ("a", -7),
+            ("t", -7),
+            ("a ", 24),
+            ("S", -7),
+            ("c", -7),
+            ("i", -7),
+            ("ence ", 0),
+        ],
+    );
+
+    let content_id = document.add_object(page_body(operations));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// §3 `tj-kern-seam.pdf` (T24-C): a kern seam wide enough for PDFium to **synthesise** a space.
+///
+/// Two operands, `Data` and `Sci`, in a metrics-less `0.6em` face, separated by a `-600` kern
+/// (a 0.6em seam). PDFium reconstructs that seam as a *generated* space — a grid character that
+/// occupies a slot but no operand's bytes — so the object's text reads `"Data Sci"` while the
+/// operands read `"Data"` and `"Sci"`.
+///
+/// T24's character walk must skip that generated character when it hands the operands their
+/// characters: assigning it to either fragment would shift the rest of the line by one and
+/// mis-measure both. The fixture pins that `Data` keeps exactly its four rendered characters and
+/// `Sci` its three, and that the two still merge across the seam.
+pub fn tj_kern_seam() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    // The same compressed-program A′ font as T24-B, so PDFium renders a real face while the file
+    // offers no metric and synthesises the seam as a space.
+    let font_id = embedded_subset_font_with(
+        &mut document,
+        &"DataSci".chars().collect::<Vec<_>>(),
+        600,
+        true,
+        "ABCDEE+Monaco",
+    );
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let mut operations = Vec::new();
+    push_tj_array(&mut operations, 15, 46, 700, &[("Data", -400), ("Sci", 0)]);
 
     let content_id = document.add_object(page_body(operations));
     let page_id = document.add_object(dictionary! {

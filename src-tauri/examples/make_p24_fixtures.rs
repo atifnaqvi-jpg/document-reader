@@ -118,6 +118,15 @@ fn main() {
             "unmeasurable-chain-break.pdf",
             testpdf::bytes(&testpdf::unmeasurable_chain_break()),
         ),
+        // P2.4.4 §3: T24's grid-walk regression + generated-char alignment.
+        (
+            "tj-grid-walk.pdf",
+            testpdf::bytes(&testpdf::tj_grid_walk()),
+        ),
+        (
+            "tj-kern-seam.pdf",
+            testpdf::bytes(&testpdf::tj_kern_seam()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

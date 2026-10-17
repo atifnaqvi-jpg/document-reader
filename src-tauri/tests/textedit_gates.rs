@@ -1391,3 +1391,82 @@ fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
     );
     assert!(message.contains("add a text annotation"), "{message}");
 }
+
+// --- P2.4.4 T24: grid-walk spans from the rendered parent object ---------------
+/// §3 T24-B: a synthetic 22-element `TJ` in a metrics-less wide-glyph face.
+///
+/// The Maastricht line's shape, rebuilt without the 385KB file: `ABCDEE+Monaco` (a
+/// Flate-compressed `/FontFile2`, so `FontMetrics::resolve` yields `Nominal`) with real `0.6em`
+/// advances over the same 22 operands and kerns. The `0.5em` approximation drifts ~6pt by
+/// `ence ` — by construction, on any architecture. Before T24 the chain fragmented; T24's
+/// character-aligned spans merge it into one run whose quota is the true span (38 glyphs x
+/// 0.6em at 15pt = 342pt).
+#[test]
+fn t24_synthetic_wide_glyph_tj_merges_via_character_alignment() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("tj-grid-walk.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
+
+    assert_eq!(runs.len(), 1, "the 22 operands are one run, not 22 singletons");
+    let line = &runs[0];
+    assert_eq!(line.text, "5 month University level Data Science ");
+    assert_eq!(line.fragment_count, 22, "every operand folded in");
+    assert!(line.admissibility.editable);
+    assert!(!line.box_suspicious, "a genuinely merged line is not suspicious");
+    assert_eq!(
+        line.pair_confidence,
+        Some(textedit::PairConfidence::Strong)
+    );
+    assert_eq!(
+        line.width,
+        Some(342.0),
+        "the quota is the true rendered span, not the drifting 337.5pt approximate one"
+    );
+}
+
+/// §3 T24-C: a kern seam wide enough for PDFium to synthesise a space.
+///
+/// Two operands, `Data` and `Sci`, separated by a `-400` kern in the same metrics-less `0.6em`
+/// face. PDFium reconstructs the seam as a **generated** space (grid index 4, `gen=true`, width
+/// 0) while the operands read `Data`/`Sci`. T24's character walk must *skip* that generated
+/// character: assigning it to either fragment would shift the rest of the line by one and
+/// mis-measure both. With it skipped, the two fragments keep exactly their own rendered chars
+/// (4 and 3), their spans are exact, and they merge across the seam.
+#[test]
+fn t24_generated_space_is_skipped_when_aligning_fragments() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("tj-kern-seam.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
+
+    assert_eq!(runs.len(), 1, "Data + Sci merge across the generated seam");
+    let line = &runs[0];
+    assert_eq!(line.text, "DataSci", "the joined operand text");
+    assert_eq!(line.fragment_count, 2, "both operands folded in");
+
+    // The seam really is a PDFium-generated space: a grid character that occupies a slot but no
+    // operand's bytes. Asserting it here keeps the fixture honest about what it exercises.
+    let grid = char_grid(&path, 0);
+    let generated = grid
+        .chars
+        .iter()
+        .filter(|character| character.generated && character.x0 > 82.0 && character.x0 < 90.0)
+        .count();
+    assert_eq!(generated, 1, "PDFium synthesised exactly one seam space");
+
+    // The merged span is the sum of the two fragments' own rendered glyph runs — 4 glyphs and 3
+    // glyphs of 0.6em at 15pt (9pt a glyph): 36 + 27 = 63. A mis-assigned generated character
+    // would shift one fragment's window by a glyph and this sum would not come out exact.
+    assert_eq!(
+        line.width,
+        Some(63.0),
+        "Data (36pt) + Sci (27pt): the generated space was skipped, not charged"
+    );
+}

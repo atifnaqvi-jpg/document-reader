@@ -450,6 +450,18 @@ fn locate_span(
     grid.locate(&run.text, from, band, window_left)
 }
 
+/// Reads one baseline per box, once, for a whole page (P2.4.4 T24).
+///
+/// [`pair_run`] is called once per lopdf run, and each call compares against every box. Deriving
+/// the box's rendered baseline from the character grid is a scan of the grid, so it is done once
+/// here and handed in rather than recomputed per run.
+fn box_baselines(
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+    grid: &PdfiumCharGrid,
+) -> Vec<f32> {
+    rects.iter().map(|rect| rendered_baseline(rect, grid)).collect()
+}
+
 /// Matches one lopdf run to a PDFium box by **geometry** (P2.4.1 T17), and walks its text in
 /// the character grid for its own measured span (P2.4.3 T23a).
 ///
@@ -457,9 +469,13 @@ fn locate_span(
 /// differently — PDFium joins a per-glyph `TJ` array into one run, lopdf splits it into one
 /// run per operand — so matching on the reconstructed string fails for exactly the documents
 /// this hotfix exists for. Position on the page does not care how either side split the line.
+///
+/// `baselines` carries each box's **rendered** baseline (P2.4.4 T24), read from the grid rather
+/// than assumed to be the box's bottom edge, so a line with a descender still pairs strong.
 fn pair_run(
     run: &RawRun,
     rects: &[crate::editor::runmetrics::PdfiumRun],
+    baselines: &[f32],
     grid: &PdfiumCharGrid,
 ) -> Option<Pair> {
     let tol = origin_tolerance(run.font_size);
@@ -476,7 +492,8 @@ fn pair_run(
         if !contains {
             continue;
         }
-        let baseline_delta = (run.origin.1 - rect.y0).abs();
+        let baseline = baselines.get(index).copied().unwrap_or(rect.y0);
+        let baseline_delta = (run.origin.1 - baseline).abs();
         let strong = baseline_delta <= BASELINE_TOLERANCE;
         // Prefer strong over weak, then the smallest baseline delta, then the leftmost box —
         // and, per §3 step 2, exact text equality as the *final* tiebreaker when two boxes
@@ -527,6 +544,165 @@ fn pair_run(
                 .and_then(|box_| locate_span(run, box_, grid)),
             smallest_containing: smallest_containing(run, rect, rects, tol),
         })
+}
+
+/// Locates one PDFium text object's **character window** in the grid (P2.4.4 T24).
+///
+/// The window is the contiguous range of grid indices whose non-generated characters spell the
+/// object's own text, searched inside the object's box — the same baseline band and x-window
+/// pairing uses ([`PdfiumCharGrid::locate`]). It is the coordinate system T24 assigns fragments
+/// in: a fragment's true span is the union of the window's characters its decoded text occupies,
+/// never the drifting text-space pen.
+///
+/// `locate` normalises whitespace on both sides, so a trailing space the object actually drew is
+/// trimmed from its match. The window therefore extends forward over any further non-generated
+/// character still inside the box (the pen has not left it) — that is where the trailing space
+/// lives, and a fragment that ends in a space must be able to claim it.
+fn object_window(
+    rect: &crate::editor::runmetrics::PdfiumRun,
+    grid: &PdfiumCharGrid,
+) -> Option<(usize, usize)> {
+    let tol = origin_tolerance(rect.font_size);
+    let band = (rect.y0 - tol, rect.y1 + tol);
+    let span = grid.locate(&rect.text, 0, band, rect.x0 - tol)?;
+    let mut last = span.last;
+    while let Some(next) = grid.chars.get(last + 1) {
+        if next.generated || next.unicode.is_none() {
+            break;
+        }
+        if !(band.0..=band.1).contains(&next.origin_y) || next.x0 > rect.x1 + tol {
+            break;
+        }
+        last += 1;
+    }
+    Some((span.first, last))
+}
+
+/// Assigns every fragment the union of its object's characters, by character alignment (T24).
+///
+/// Each lopdf fragment is one operand of a `TJ`/`Tj` the producer emitted, so its decoded text is
+/// a slice of the object's text: within one object the fragments are consecutive and their texts
+/// concatenate to PDFium's reconstruction. The walk therefore takes the object's window and hands
+/// each fragment, in order, exactly as many characters as its decoded text has — the same ToUnicode
+/// CMap decoded both sides, so the lengths agree — and measures the fragment's span as the union of
+/// those characters' advance boxes.
+///
+/// This is the T24 fix: the previous span anchored the walk on the run's **text-space origin**,
+/// which a metrics-less font drifts left cumulatively, so a long fragment matched the wrong grid
+/// characters. Aligning on the object's own characters removes the drifting quantity entirely.
+///
+/// PDFium-generated characters (a synthesised space at a kern seam, a `\r\n`) occupy grid slots but
+/// no operand's bytes, so they are skipped and never assigned. A fragment whose characters do not
+/// match the grid's in order — the two CMaps disagree for that operand — keeps the T23a
+/// `locate_span` result: the safe direction, and no behaviour change for the mismatched fragment.
+/// The cursor advances past the characters the attempt consumed either way, so a single mismatch
+/// cannot knock every later fragment out of alignment.
+fn assign_object_spans(
+    runs: &[RawRun],
+    pairs: &mut [Option<Pair>],
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+    grid: &PdfiumCharGrid,
+) {
+    for (rect_index, rect) in rects.iter().enumerate() {
+        let members: Vec<usize> = (0..runs.len())
+            .filter(|index| pairs[*index].is_some_and(|pair| pair.rect == rect_index))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let Some((first, last)) = object_window(rect, grid) else {
+            continue;
+        };
+
+        // The window's assignable slots: characters that occupy bytes (generated ones do not).
+        let slots: Vec<usize> = (first..=last)
+            .filter(|index| {
+                let ch = &grid.chars[*index];
+                ch.unicode.is_some() && !ch.generated
+            })
+            .collect();
+
+        let mut cursor = 0_usize;
+        for &run_index in &members {
+            let expected: Vec<char> = runs[run_index].text.chars().collect();
+            if expected.is_empty() || cursor + expected.len() > slots.len() {
+                continue;
+            }
+            let assigned = &slots[cursor..cursor + expected.len()];
+            cursor += expected.len();
+
+            let identified = assigned
+                .iter()
+                .zip(expected.iter())
+                .all(|(index, ch)| grid.chars[*index].unicode == Some(*ch));
+            if !identified {
+                continue;
+            }
+            let x0 = assigned
+                .iter()
+                .map(|index| grid.chars[*index].x0)
+                .fold(f32::INFINITY, f32::min);
+            let x1 = assigned
+                .iter()
+                .map(|index| grid.chars[*index].x1)
+                .fold(f32::NEG_INFINITY, f32::max);
+            if let Some(pair) = pairs[run_index].as_mut() {
+                pair.span = Some(CharSpan {
+                    first: assigned[0],
+                    last: *assigned.last().expect("expected is non-empty"),
+                    x0,
+                    x1,
+                });
+            }
+        }
+    }
+}
+
+/// The baseline PDFium rendered a box's text on, read from the character grid (P2.4.4 T24).
+///
+/// A box's `y0` is its **bottom edge**, and for any line containing a descender (`y`, `g`, `p`)
+/// that edge sits *below* the baseline by the descender depth — `3.39pt` on the Maastricht line
+/// at 15pt, because `versity` has a `y`. The baseline a pair must agree with is not that edge:
+/// it is the pen origin PDFium reports for the line's characters, and every character on one
+/// baseline shares it exactly (P2.4.3 T23a's grid). Reading it from the grid is the same
+/// rendered-oracle rule T23/T24 use for spans.
+///
+/// Before this, `rect.y0` stood in for the baseline, which is exact only for a descender-free
+/// line. On a line with a descender every fragment paired *weak* — the baseline "disagreement"
+/// was the descender — and [`group_runs`] merges strong pairs only, so the line could not merge
+/// however exact its spans were. When the grid carries nothing in the box's window the bottom
+/// edge still stands in, so an in-memory test with an empty grid behaves exactly as before.
+fn rendered_baseline(rect: &crate::editor::runmetrics::PdfiumRun, grid: &PdfiumCharGrid) -> f32 {
+    let tol = origin_tolerance(rect.font_size);
+    // The modal pen origin of the box's own characters. Characters from the line above or below
+    // sit in a different band and are excluded, so one line yields one baseline.
+    let mut counts: Vec<(f32, usize)> = Vec::new();
+    for ch in &grid.chars {
+        if ch.generated || ch.unicode.is_none() {
+            continue;
+        }
+        if ch.x0 < rect.x0 - tol || ch.x0 > rect.x1 + tol {
+            continue;
+        }
+        if !(rect.y0 - tol..=rect.y1 + tol).contains(&ch.origin_y) {
+            continue;
+        }
+        match counts.iter_mut().find(|(value, _)| (*value - ch.origin_y).abs() < 0.01) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((ch.origin_y, 1)),
+        }
+    }
+    counts
+        .into_iter()
+        .reduce(|best, current| {
+            if current.1 > best.1 || (current.1 == best.1 && current.0 < best.0) {
+                current
+            } else {
+                best
+            }
+        })
+        .map(|(value, _)| value)
+        .unwrap_or(rect.y0)
 }
 
 /// True when `index` is the **smallest** box that contains the run's text-space origin.
@@ -934,10 +1110,18 @@ pub fn describe_runs(
     // Pair every run independently: several lopdf fragments may legitimately sit inside one
     // PDFium box, which is precisely the fragmentation this phase exists for. Nothing is
     // consumed, so a shared box is not a conflict.
-    let pairs: Vec<Option<Pair>> = runs
+    let baselines = box_baselines(pdfium_runs, grid);
+    let mut pairs: Vec<Option<Pair>> = runs
         .iter()
-        .map(|run| pair_run(run, pdfium_runs, grid))
+        .map(|run| pair_run(run, pdfium_runs, &baselines, grid))
         .collect();
+
+    // P2.4.4 T24: re-derive each fragment's span from the characters *it* occupies inside its
+    // paired object, by character alignment. This replaces the drifting text-space anchor for
+    // every fragment whose object window can be located and whose characters match; a fragment
+    // that fails either check keeps the T23a `locate_span` result. Only `Pair::span` changes —
+    // every predicate that consumes it is untouched.
+    assign_object_spans(&runs, &mut pairs, pdfium_runs, grid);
 
     let mut described = Vec::new();
     for group in group_runs(&runs, &pairs, pdfium_runs) {
@@ -1573,7 +1757,7 @@ mod tests {
             text: String::new(),
             chars: Vec::new(),
         };
-        let pair = pair_run(&run, &rects, &grid).expect("a containing box pairs");
+        let pair = pair_run(&run, &rects, &box_baselines(&rects, &grid), &grid).expect("a containing box pairs");
         assert_eq!(pair.rect, 1, "exact text breaks the tie");
 
         // Geometry first: a box whose baseline is nearer wins even though its text differs,
@@ -1582,10 +1766,178 @@ mod tests {
         exact_but_far.y0 = 700.2;
         exact_but_far.y1 = 712.2;
         let rects = vec![exact_but_far, box_at("other", 72.0)];
-        let pair = pair_run(&run, &rects, &grid).expect("a containing box pairs");
+        let pair = pair_run(&run, &rects, &box_baselines(&rects, &grid), &grid).expect("a containing box pairs");
         assert_eq!(
             pair.rect, 1,
             "the nearer baseline wins even though its text differs"
+        );
+    }
+
+    /// Builds one grid character at `x` with the given advance width, on `baseline` (P2.4.4).
+    fn grid_char(ch: char, x: f32, width: f32, baseline: f32, generated: bool) -> crate::editor::runmetrics::PdfiumChar {
+        crate::editor::runmetrics::PdfiumChar {
+            unicode: Some(ch),
+            generated,
+            x0: x,
+            y0: baseline - 3.0,
+            x1: x + width,
+            y1: baseline + 9.0,
+            ink_x0: x,
+            ink_y0: baseline,
+            ink_x1: x + width,
+            ink_y1: baseline + 9.0,
+            origin_x: x,
+            origin_y: baseline,
+            font_size: 12.0,
+        }
+    }
+
+    /// A PDFium box for the pairing tests, at the module level so a T24 test can use it too.
+    fn test_box(text: &str, x0: f32) -> crate::editor::runmetrics::PdfiumRun {
+        crate::editor::runmetrics::PdfiumRun {
+            text: text.to_string(),
+            font_name: "Helvetica".to_string(),
+            font_size: 12.0,
+            x0,
+            y0: 700.0,
+            x1: x0 + 20.0,
+            y1: 712.0,
+            width: 20.0,
+        }
+    }
+
+    /// A box whose bottom edge sits below its baseline by a descender depth — the Maastricht
+    /// shape, where `versity`'s `y` pushes `y0` 3.39pt under the pen origin.
+    #[test]
+    fn rendered_baseline_reads_the_grid_pen_not_the_box_bottom() {
+        let grid = crate::editor::runmetrics::PdfiumCharGrid {
+            text: "y".to_string(),
+            chars: vec![grid_char('y', 72.0, 7.2, 700.0, false)],
+        };
+        let mut rect = test_box("y", 72.0);
+        // The box bottom is 3.4pt below the baseline (a descender), so `rect.y0` alone would
+        // *never* equal the run's origin and every pair would be weak.
+        rect.y0 = 696.6;
+        rect.y1 = 712.0;
+        rect.x1 = 79.2;
+        assert_eq!(
+            rendered_baseline(&rect, &grid),
+            700.0,
+            "the baseline comes from the characters, not the descender-depth bottom edge"
+        );
+
+        // With no grid in the box's window the bottom edge still stands in, so an in-memory
+        // test with an empty grid is unchanged.
+        let empty = crate::editor::runmetrics::PdfiumCharGrid {
+            text: String::new(),
+            chars: Vec::new(),
+        };
+        assert_eq!(rendered_baseline(&rect, &empty), 696.6);
+    }
+
+    /// A descender line's pair is strong **only** because the baseline is read from the grid.
+    #[test]
+    fn a_descender_line_pairs_strongly_once_the_baseline_comes_from_the_grid() {
+        let grid = crate::editor::runmetrics::PdfiumCharGrid {
+            text: "y".to_string(),
+            chars: vec![grid_char('y', 72.0, 7.2, 700.0, false)],
+        };
+        let run = test_run("y", 72.0, 12.0, "F1");
+        let mut rect = test_box("y", 72.0);
+        rect.y0 = 696.6; // 3.4pt descender depth
+        rect.y1 = 712.0;
+        rect.x1 = 79.2;
+        let rects = vec![rect];
+        let pair = pair_run(&run, &rects, &box_baselines(&rects, &grid), &grid)
+            .expect("the box contains the origin");
+        assert_eq!(
+            pair.confidence,
+            PairConfidence::Strong,
+            "the grid baseline is the run's origin"
+        );
+    }
+
+    /// T24: fragments inside one object take their spans by **character alignment**, skipping
+    /// the generated seam space, and a mis-identified fragment is left on its fallback span.
+    #[test]
+    fn assign_object_spans_aligns_characters_and_skips_generated_ones() {
+        // Grid: "Data| (generated) |Sci" in a 0.6em face at 15pt (9pt a glyph), on the baseline.
+        let mut chars = Vec::new();
+        let mut x = 46.0_f32;
+        for ch in "Data".chars() {
+            chars.push(grid_char(ch, x, 9.0_f32, 700.0, false));
+            x += 9.0;
+        }
+        // The kern seam PDFium synthesises: zero width, occupies a slot, no operand owns it.
+        chars.push(grid_char(' ', x, 0.0, 700.0, true));
+        for ch in "Sci".chars() {
+            chars.push(grid_char(ch, x, 9.0_f32, 700.0, false));
+            x += 9.0;
+        }
+        let grid = crate::editor::runmetrics::PdfiumCharGrid {
+            text: "Data Sci".to_string(),
+            chars,
+        };
+
+        let head = test_run("Data", 46.0, 15.0, "F1");
+        let tail = test_run("Sci", 85.0, 15.0, "F1");
+        let runs = vec![head, tail];
+        let mut rect = test_box("Data Sci", 46.0);
+        rect.font_size = 15.0;
+        rect.x1 = 109.0;
+        let rects = vec![rect];
+        let pair = Pair {
+            rect: 0,
+            confidence: PairConfidence::Strong,
+            span: None,
+            smallest_containing: true,
+        };
+        let mut pairs = vec![Some(pair), Some(pair)];
+
+        assign_object_spans(&runs, &mut pairs, &rects, &grid);
+
+        let head_span = pairs[0].unwrap().span.expect("head span assigned");
+        let tail_span = pairs[1].unwrap().span.expect("tail span assigned");
+        assert_eq!(
+            (head_span.first, head_span.last),
+            (0, 3),
+            "Data keeps its own four characters"
+        );
+        assert_eq!(
+            (tail_span.first, tail_span.last),
+            (5, 7),
+            "Sci starts after the generated seam (index 4), not on it"
+        );
+        assert_eq!(head_span.x0, 46.0);
+        assert_eq!(head_span.x1, 82.0, "Data is 4 x 9pt");
+        assert_eq!(tail_span.x0, 82.0, "Sci renders from the seam onward");
+        assert_eq!(tail_span.x1, 109.0, "Sci is 3 x 9pt");
+
+        // A fragment whose characters do not match the window keeps its fallback span: give the
+        // tail text that is not in the grid and confirm its span is left untouched.
+        let stray = test_run("Xyz", 85.0, 15.0, "F1");
+        let runs = vec![runs[0].clone(), stray];
+        let fallback = CharSpan {
+            first: 0,
+            last: 0,
+            x0: 1.0,
+            x1: 2.0,
+        };
+        let mut pairs = vec![
+            Some(Pair {
+                span: Some(fallback),
+                ..pair
+            }),
+            Some(Pair {
+                span: Some(fallback),
+                ..pair
+            }),
+        ];
+        assign_object_spans(&runs, &mut pairs, &rects, &grid);
+        assert_eq!(
+            pairs[1].unwrap().span,
+            Some(fallback),
+            "a char-identity mismatch falls back, never mis-assigns"
         );
     }
 
