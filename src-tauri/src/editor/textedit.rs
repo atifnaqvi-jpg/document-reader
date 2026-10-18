@@ -629,15 +629,20 @@ fn assign_object_spans(
                 continue;
             }
             let assigned = &slots[cursor..cursor + expected.len()];
-            cursor += expected.len();
 
             let identified = assigned
                 .iter()
                 .zip(expected.iter())
                 .all(|(index, ch)| grid.chars[*index].unicode == Some(*ch));
             if !identified {
+                // The fragment's text is not at this cursor: it was drawn before this box
+                // opened (an operand straddling from the preceding box), so it consumes none
+                // of *this* box's characters. Advancing anyway would shift every later member
+                // by its length and leave them unmeasured — the Maastricht `Fundamental `
+                // bug, where one straddling `ce. ` hid the whole next operand.
                 continue;
             }
+            cursor += expected.len();
             let x0 = assigned
                 .iter()
                 .map(|index| grid.chars[*index].x0)
@@ -655,6 +660,180 @@ fn assign_object_spans(
                 });
             }
         }
+    }
+}
+
+/// Re-derives spans for operations whose per-box alignment came out out-of-order (P2.5 T25b).
+///
+/// T24 aligns a box's members against that box's character window, which is exact only while
+/// every operand of the box's operation stayed inside it. On a metrics-less face the producer
+/// emits one `TJ` whose operands run past their box into the next one on the line, so a
+/// line-sized box's window can also hold characters the operation never drew; an operand then
+/// takes a span from the wrong part of the line. `Fundamental ` went unmeasured that way, and
+/// the `concepts of pro` pick ended at the wrong glyph.
+///
+/// The operation is the reliable unit: its operands are consecutive in the content stream
+/// *and* on the page, so their concatenated text locates in the grid as one contiguous run.
+/// Only operations that are straddled are rewritten — their per-box spans are either missing
+/// or not strictly increasing — so every ordinary line keeps T24's exact per-box result.
+fn resync_straddled_op_spans(
+    runs: &[RawRun],
+    pairs: &mut [Option<Pair>],
+    rects: &[crate::editor::runmetrics::PdfiumRun],
+    grid: &PdfiumCharGrid,
+) {
+    let mut index = 0_usize;
+    while index < runs.len() {
+        let op_index = runs[index].id.op_index;
+        let mut end = index;
+        while end < runs.len() && runs[end].id.op_index == op_index {
+            end += 1;
+        }
+        // A font with metrics measures its own seams exactly and T24 anchors each operand to
+        // the box it was drawn in, so a straddle cannot misplace an operand there.
+        if runs[index].advance_exact.is_some() || end - index < 2 {
+            index = end;
+            continue;
+        }
+        let ordered = runs[index..end]
+            .iter()
+            .zip(&pairs[index..end])
+            .all(|(_, pair)| match pair {
+                None => true,
+                Some(pair) => match pair.span {
+                    None => false,
+                    Some(span) => span.x1 >= span.x0,
+                },
+            });
+        let monotonic = pairs[index..end]
+            .iter()
+            .filter_map(|pair| pair.and_then(|pair| pair.span))
+            .zip(
+                pairs[index..end]
+                    .iter()
+                    .filter_map(|pair| pair.and_then(|pair| pair.span))
+                    .skip(1),
+            )
+            .all(|(head, next)| next.x0 >= head.x0);
+        if ordered && monotonic {
+            index = end;
+            continue;
+        }
+
+        let text: String = runs[index..end]
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        let Some(anchor) = (index..end).find(|run_index| pairs[*run_index].is_some()) else {
+            index = end;
+            continue;
+        };
+        let Some((rect, font_size)) = pairs[anchor]
+            .and_then(|pair| rects.get(pair.rect))
+            .map(|rect| (rect, runs[anchor].font_size))
+        else {
+            index = end;
+            continue;
+        };
+        if text.trim().is_empty() {
+            index = end;
+            continue;
+        }
+        let band = grid_band(rect, font_size);
+        // The window opens where the operation starts drawing, not where its box starts: a
+        // line-sized box reaches back to the line's margin, and locating from there would find
+        // an earlier occurrence of the same text. A leading whitespace operand has no ink to
+        // place it, so the first inked operand anchors.
+        let Some(op_left) = (index..end)
+            .find(|run_index| {
+                !runs[*run_index].text.trim().is_empty()
+                    && runs[*run_index].origin.0 >= rect.x0 - origin_tolerance(font_size)
+            })
+            .map(|run_index| runs[run_index].origin.0)
+        else {
+            index = end;
+            continue;
+        };
+        let window_left = op_left - origin_tolerance(font_size);
+        let from = grid
+            .chars
+            .iter()
+            .position(|ch| (band.0..=band.1).contains(&ch.origin_y) && ch.origin_x >= window_left)
+            .unwrap_or(0);
+        let Some(span) = grid.locate(&text, from, band, window_left) else {
+            index = end;
+            continue;
+        };
+
+        // Generated characters (a synthesised seam space, a line break) occupy grid slots but
+        // no operand's bytes, so they are skipped — the same rule T24 applies.
+        let mut slots: Vec<usize> = (span.first..=span.last)
+            .filter(|slot| {
+                let ch = &grid.chars[*slot];
+                ch.unicode.is_some() && !ch.generated
+            })
+            .collect();
+        // `locate` trims the needle's trailing whitespace, so an operation ending in a space
+        // operand locates only through its last visible glyph. That operand still needs its
+        // slot or the group's width falls back to the line-sized box.
+        let trailing = text
+            .chars()
+            .rev()
+            .take_while(|ch| ch.is_whitespace())
+            .count();
+        let total: usize = runs[index..end]
+            .iter()
+            .map(|run| run.text.chars().count())
+            .sum();
+        let (tail_lo, tail_hi) = grid_band(rect, font_size * 2.0);
+        let mut next = span.last + 1;
+        let mut added = 0;
+        while added < trailing.min(total.saturating_sub(slots.len())) && next < grid.chars.len() {
+            let ch = &grid.chars[next];
+            if !(tail_lo..=tail_hi).contains(&ch.origin_y) {
+                break;
+            }
+            if ch.unicode.is_some() && !ch.generated {
+                slots.push(next);
+                added += 1;
+            }
+            next += 1;
+        }
+
+        let mut cursor = 0_usize;
+        for run_index in index..end {
+            let expected: Vec<char> = runs[run_index].text.chars().collect();
+            if expected.is_empty() || cursor + expected.len() > slots.len() {
+                continue;
+            }
+            let assigned = &slots[cursor..cursor + expected.len()];
+            let identified = assigned
+                .iter()
+                .zip(expected.iter())
+                .all(|(slot, ch)| grid.chars[*slot].unicode == Some(*ch));
+            if !identified {
+                continue;
+            }
+            cursor += expected.len();
+            let x0 = assigned
+                .iter()
+                .map(|slot| grid.chars[*slot].x0)
+                .fold(f32::INFINITY, f32::min);
+            let x1 = assigned
+                .iter()
+                .map(|slot| grid.chars[*slot].x1)
+                .fold(f32::NEG_INFINITY, f32::max);
+            if let Some(pair) = pairs[run_index].as_mut() {
+                pair.span = Some(CharSpan {
+                    first: assigned[0],
+                    last: *assigned.last().expect("expected is non-empty"),
+                    x0,
+                    x1,
+                });
+            }
+        }
+
+        index = end;
     }
 }
 
@@ -1214,6 +1393,12 @@ pub fn describe_runs(
     // that fails either check keeps the T23a `locate_span` result. Only `Pair::span` changes —
     // every predicate that consumes it is untouched.
     assign_object_spans(&runs, &mut pairs, pdfium_runs, grid);
+
+    // P2.5 T25b: a line-sized box's character window can hold more than the operation that
+    // drew into it, so the per-box walk may hand an operand characters that sit elsewhere on
+    // the line. Operands of one operation are drawn consecutively, so their spans must run
+    // rightward; when they do not, the operation's own located window is the authority.
+    resync_straddled_op_spans(&runs, &mut pairs, pdfium_runs, grid);
 
     let mut described = Vec::new();
     for group in group_runs(&runs, &pairs, pdfium_runs) {

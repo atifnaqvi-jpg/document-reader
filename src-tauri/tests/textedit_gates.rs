@@ -1636,3 +1636,57 @@ fn t25_maastricht_missing_word_line_is_one_editable_run() {
         line.text
     );
 }
+
+/// T25 a/b regression guard: the brochure's page-3 syllabus line
+/// "programming in Data Science. Fundamental concepts of …" must be ONE editable run.
+///
+/// Both defects shared one cause: the line's boxes are line-sized, so T24's per-box character
+/// walk handed operands characters from elsewhere on the line. `Fundamental ` came out with no
+/// span (invisible to the editable pick, leaving "concepts of pro" as its own pick) and the
+/// `concepts of pro` pick ended at the wrong glyph. The operation-level resync is what makes
+/// the spans run rightward again; without it this line splits at the `ce. `/`Fu` seam.
+#[test]
+fn t25_maastricht_syllabus_line_is_one_editable_run() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("real-maastricht-brochure.pdf");
+    let document = load(&path);
+    let page = 2u32;
+    let runs = textedit::describe_runs(
+        &document,
+        page,
+        &pdfium_runs(&path, page),
+        &char_grid(&path, page),
+    )
+    .unwrap();
+
+    let line = runs
+        .iter()
+        .find(|r| r.text.contains("Fundamental concepts"))
+        .expect("the syllabus line is one merged run across the Fundamental seam");
+    assert!(line.admissibility.editable, "the line is editable");
+    assert!(
+        line.text
+            .starts_with("programming in Data Science. Fundamental "),
+        "the line starts at the operation's first operand: {:?}",
+        line.text
+    );
+    assert!(
+        line.text.contains("concepts of programming"),
+        "`concepts` follows `Fundamental ` in the same run: {:?}",
+        line.text
+    );
+    assert!(
+        line.width.is_some_and(|width| width > 400.0),
+        "the run is measured by its own glyph span, not a fragment box: {:?}",
+        line.width
+    );
+    // The broken pick was `concepts of pro` alone, with `Fundamental ` unreachable.
+    assert!(
+        !runs
+            .iter()
+            .any(|r| r.admissibility.editable && r.text.trim() == "concepts of pro"),
+        "the truncated `concepts of pro` pick must be gone"
+    );
+}
