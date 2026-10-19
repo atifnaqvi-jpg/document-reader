@@ -40,6 +40,9 @@ pub enum Gate {
     FitsWidth,
     /// (f) the content-stream run no longer matches the run the user picked (T4).
     RunMismatch,
+    /// (g) the selected runs are not one contiguous, same-style span on one baseline
+    /// (P2.6 T26).
+    SelectionRange,
 }
 
 impl Gate {
@@ -52,6 +55,7 @@ impl Gate {
             Gate::NotSubset => "not-subset",
             Gate::FitsWidth => "fits-width",
             Gate::RunMismatch => "run-mismatch",
+            Gate::SelectionRange => "selection-range",
         }
     }
 
@@ -65,6 +69,10 @@ impl Gate {
             Gate::EncodingRoundTrip => {
                 "this run's font encoding cannot reproduce its own bytes, so an edit \
                  could corrupt it; add a text annotation instead"
+            }
+            Gate::SelectionRange => {
+                "these runs are not one unbroken line of the same typeface, so they cannot \
+                 be replaced together; select a single run instead"
             }
             Gate::NotSubset => {
                 "this run's font is an embedded subset with only the glyphs the \
@@ -459,7 +467,10 @@ fn box_baselines(
     rects: &[crate::editor::runmetrics::PdfiumRun],
     grid: &PdfiumCharGrid,
 ) -> Vec<f32> {
-    rects.iter().map(|rect| rendered_baseline(rect, grid)).collect()
+    rects
+        .iter()
+        .map(|rect| rendered_baseline(rect, grid))
+        .collect()
 }
 
 /// Matches one lopdf run to a PDFium box by **geometry** (P2.4.1 T17), and walks its text in
@@ -689,9 +700,11 @@ fn resync_straddled_op_spans(
         while end < runs.len() && runs[end].id.op_index == op_index {
             end += 1;
         }
-        // A font with metrics measures its own seams exactly and T24 anchors each operand to
-        // the box it was drawn in, so a straddle cannot misplace an operand there.
-        if runs[index].advance_exact.is_some() || end - index < 2 {
+        // The test below is the whole gate. Having metrics does not make T24's per-box
+        // assignment exact: a `TJ` operand that runs past its box can still be matched to a
+        // later box's characters — the Maastricht `o` of `operating` took the span of an `o`
+        // 94pt to its left even though its font published `/Widths`.
+        if end - index < 2 {
             index = end;
             continue;
         }
@@ -866,7 +879,10 @@ fn rendered_baseline(rect: &crate::editor::runmetrics::PdfiumRun, grid: &PdfiumC
         if !(rect.y0 - tol..=rect.y1 + tol).contains(&ch.origin_y) {
             continue;
         }
-        match counts.iter_mut().find(|(value, _)| (*value - ch.origin_y).abs() < 0.01) {
+        match counts
+            .iter_mut()
+            .find(|(value, _)| (*value - ch.origin_y).abs() < 0.01)
+        {
             Some((_, count)) => *count += 1,
             None => counts.push((ch.origin_y, 1)),
         }
@@ -935,6 +951,65 @@ fn space_at_boundary(
         .is_some_and(|rect| rect.text.contains(' '))
 }
 
+/// Whether a kerning seam between two fragments is a **word space** (P2.6 T26 item 4).
+///
+/// `space_at_boundary` can only see a space inside a *shared* box, which is exactly the case a
+/// kern seam is not: PDFium reconstructs the space as a **generated** character precisely
+/// because no single run drew one. This reads the character grid instead — the equivalent of
+/// Acrobat's `ExplicitSpaceChars` reading-order repair.
+///
+/// A seam is a word space when the grid holds a generated space in the one slot between the
+/// head's last character and the next fragment's first, and that generated character carries no
+/// advance of its own. PDFium reports a kern-reconstructed space that way when it renders the
+/// page as `foo bar`; `-400` and `-600` kerns are indistinguishable in the content stream, so
+/// the renderer's reconstruction is the only evidence there is.
+///
+/// Several things this deliberately does **not** treat as a word space:
+/// * a generated `\r\n` — a line break, not a space between words;
+/// * a generated space with a non-zero advance — PDFium keeps a kern seam at zero advance, so
+///   a positive advance would be a space it laid out itself, and inserting one would double it;
+/// * a *narrow* seam. A compressed face whose glyphs advance unevenly also makes PDFium emit
+///   generated spaces between letters of one word (`m o n th`); the word-space signal is the
+///   gap size, so the seam must be at least a quarter em, the same bound O-Chain-2 uses for a
+///   kerned word break;
+/// * a seam either operand already brackets with whitespace, which would otherwise double it.
+fn seam_is_word_space(
+    head_index: usize,
+    next_index: usize,
+    runs: &[RawRun],
+    pairs: &[Option<Pair>],
+    grid: &crate::editor::runmetrics::PdfiumCharGrid,
+) -> bool {
+    let (Some(head_span), Some(next_span)) = (
+        pairs[head_index].and_then(|pair| pair.span),
+        pairs[next_index].and_then(|pair| pair.span),
+    ) else {
+        return false;
+    };
+    if next_span.first <= head_span.last {
+        return false;
+    }
+    // Only the slots strictly between the two spans can hold the seam. Requiring exactly one
+    // keeps a run of generated characters from being collapsed into a single space.
+    let between = &grid.chars[head_span.last + 1..next_span.first];
+    if !(between.len() == 1
+        && between[0].generated
+        && between[0].unicode == Some(' ')
+        && (between[0].x1 - between[0].x0).abs() < 0.01)
+    {
+        return false;
+    }
+    if runs[head_index].text.ends_with(char::is_whitespace)
+        || runs[next_index].text.starts_with(char::is_whitespace)
+    {
+        return false;
+    }
+    // The seam's advance is the gap between the two measured spans.
+    let seam = next_span.x0 - head_span.x1;
+    let em = runs[head_index].font_size.max(f32::EPSILON);
+    seam >= 0.25 * em
+}
+
 /// The gap between two consecutive fragments in points, measured the most exact way available
 /// (P2.4.3 T23b).
 ///
@@ -982,12 +1057,22 @@ fn mergeable(
     head_span: Option<CharSpan>,
     next_span: Option<CharSpan>,
 ) -> bool {
-    head.font_key == next.font_key
+    head.style_class == next.style_class
         && sizes_match(head.font_size, next.font_size)
         && (head.origin.1 - next.origin.1).abs() <= BASELINE_TOLERANCE
         && {
             let gap = measured_gap(head, next, head_span, next_span);
             gap <= gap_tolerance(head.font_size, space) && gap >= -MERGE_OVERLAP_EM * head.font_size
+                // P2.6 T26 reading order: a `TJ` kern moves the pen without appearing in
+                // `/Widths`, so the measured seam shows a *negative* gap that is not a
+                // mis-measure — the Maastricht `T`/`est` seam is exactly its `-1.227pt` kern.
+                // When the grid also places the next glyph in the very next slot, the two are
+                // one laid-out line. Bounded by the same window as a positive gap, so a real
+                // overlap still refuses, and never applied to a positive gap, where the
+                // classic window is already the whole answer.
+                || (gap < 0.0
+                    && gap >= -gap_tolerance(head.font_size, space)
+                    && reads_on_from_grid(head_span, next_span))
                 || {
                     // P2.5 T25: both fragments already carry char-grid spans (P2.4.4 T24) and
                     // sit on one exact baseline — the grid re-adjudicated this seam when it
@@ -1000,19 +1085,55 @@ fn mergeable(
                     // adjudicated by the classic window above (the Maastricht font publishes
                     // no metrics; the T22 orphan's embedded subset does, and its deliberate
                     // kern keeps its protection).
+                    // P2.6 T26: bounded by one em. The escape exists for a grid that
+                    // mis-measures a seam, not for a seam that is genuinely far apart — the
+                    // bullet column of a list sits ~1.5em left of its text, and joining it
+                    // would make the marker part of the user's sentence.
                     head.advance_exact.is_none()
                         && match (head_span, next_span) {
-                            (Some(head_span), Some(next_span)) => next_span.x0 >= head_span.x0,
+                            (Some(head_span), Some(next_span)) => {
+                                next_span.x0 >= head_span.x0
+                                    && next_span.x0 - head_span.x1 <= head.font_size
+                            }
                             _ => false,
                         }
                 }
         }
 }
 
+/// True when the character grid places the next fragment's first glyph immediately after the
+/// head's last one — at most one slot between them, which is the generated space PDFium
+/// inserts at a kern (P2.6 T26).
+fn reads_on_from_grid(head_span: Option<CharSpan>, next_span: Option<CharSpan>) -> bool {
+    match (head_span, next_span) {
+        (Some(head_span), Some(next_span)) => {
+            next_span.first > head_span.first
+                && next_span.first <= head_span.last + 2
+                && next_span.x0 >= head_span.x0
+                && next_span.x1 > head_span.x1
+        }
+        _ => false,
+    }
+}
+
 /// A group of consecutive fragments the picker presents as one run (P2.4.1 T18).
 struct RunGroup {
     first: usize,
     len: usize,
+    /// For each seam after the head, whether PDFium reconstructed a **word space** there
+    /// (P2.6 T26 item 4). `len - 1` entries, indexed by the fragment to the left of the seam.
+    /// Empty means "no seam carries a space", the ordinary case.
+    seams: Vec<bool>,
+}
+
+impl RunGroup {
+    fn new(first: usize, len: usize) -> Self {
+        Self {
+            first,
+            len,
+            seams: Vec::new(),
+        }
+    }
 }
 
 /// Groups consecutive paired fragments into merged runs (P2.4.1 T18/T19 / P2.4.2 T22).
@@ -1030,6 +1151,7 @@ fn group_runs(
     runs: &[RawRun],
     pairs: &[Option<Pair>],
     rects: &[crate::editor::runmetrics::PdfiumRun],
+    grid: &crate::editor::runmetrics::PdfiumCharGrid,
 ) -> Vec<RunGroup> {
     let mut groups = Vec::new();
     let mut index = 0;
@@ -1037,6 +1159,7 @@ fn group_runs(
         // An unpaired run is still *reported* — the picker must show that it exists and name
         // why it cannot be edited (T21) — it simply cannot merge with anything.
         let mut len = 1;
+        let mut seams: Vec<bool> = Vec::new();
         if pairs[index].is_some() {
             while index + len < runs.len() {
                 let next = pairs[index + len];
@@ -1075,24 +1198,38 @@ fn group_runs(
                     break;
                 }
                 // O-Chain-2: the widened gap is allowed only when PDFium's reconstructed text
-                // has a real space at this seam. A space can only hide inside a *shared* box.
-                let space = space_at_boundary(index + len - 1, index + len, pairs, rects);
+                // has a real space at this seam. That space hides in a *shared* box for a
+                // producer that drew it as a `0x20`; at a kern seam there is no shared box, so
+                // the grid's generated space is the equivalent evidence (T26 item 4).
+                // Two distinct questions, and keeping them apart matters. `widened` says the
+                // seam may use the wide gap window (O-Chain-2); `word_space` says the page
+                // shows two words here, which also earns a separator and the seam's width.
+                // The shared-box predicate is true all over an ordinary line -- one PDFium box
+                // per line contains a space somewhere -- so it must never add a separator.
+                let widened = space_at_boundary(index + len - 1, index + len, pairs, rects);
+                let word_space =
+                    seam_is_word_space(index + len - 1, index + len, runs, pairs, grid);
                 // P2.4.3 T23b: the gap is char-grid measured when both spans are available.
                 let head_span = pairs[index + len - 1].and_then(|pair| pair.span);
                 let next_span = next.and_then(|pair| pair.span);
                 if !mergeable(
                     &runs[index + len - 1],
                     &runs[index + len],
-                    space,
+                    widened || word_space,
                     head_span,
                     next_span,
                 ) {
                     break;
                 }
+                seams.push(word_space);
                 len += 1;
             }
         }
-        groups.push(RunGroup { first: index, len });
+        groups.push(RunGroup {
+            first: index,
+            len,
+            seams,
+        });
         index += len;
     }
     groups
@@ -1138,11 +1275,7 @@ fn measured_span(document: &Document, page: u32, run: &RawRun) -> Option<f32> {
 /// (a chain that stopped on merit is the classic T22 case and keeps its refusal) — identify
 /// the case: when each is unpaired or a `Weak` pair, the box is the line the group belongs to,
 /// not a neighbour's ink.
-fn shared_box_is_own_chain(
-    runs: &[RawRun],
-    pairs: &[Option<Pair>],
-    group: &RunGroup,
-) -> bool {
+fn shared_box_is_own_chain(runs: &[RawRun], pairs: &[Option<Pair>], group: &RunGroup) -> bool {
     let last = group.first + group.len;
     let own_tail: Vec<_> = runs[last..]
         .iter()
@@ -1185,6 +1318,16 @@ fn group_span(
         match pairs[group.first + offset].and_then(|pair| pair.span) {
             Some(span) => {
                 grid_span += span.width();
+                // P2.6 T26 item 4: consecutive spans abut, so summing them drops the seam
+                // itself. When PDFium reconstructed a word space at this seam, the page's own
+                // advance across it is real width the quota must include -- otherwise the gate
+                // measures a narrower line than the reader sees and accepts a replacement the
+                // page cannot hold.
+                if offset > 0 && group.seams.get(offset - 1).copied().unwrap_or(false) {
+                    if let Some(head) = pairs[group.first + offset - 1].and_then(|pair| pair.span) {
+                        grid_span += span.x0 - head.x1;
+                    }
+                }
                 grid_measurable = true;
             }
             None => grid_complete = false,
@@ -1265,9 +1408,21 @@ fn describe_group(
     }
 
     let head = &fragments[0];
+    // P2.6 T26 item 4: a seam PDFium reconstructed as a word space is shown as one. The
+    // fragments' bytes have no `0x20` there (the space lived in the kern), but the page reads
+    // as two words, and the picker must agree with the page. Only the display text gains the
+    // separator -- `EditRequest::expected` stays the operands' bytes, because that is what the
+    // write path will find in the content stream and re-validate.
     let joined: String = fragments
         .iter()
-        .map(|fragment| fragment.text.as_str())
+        .enumerate()
+        .map(|(offset, fragment)| {
+            if offset > 0 && group.seams.get(offset - 1).copied().unwrap_or(false) {
+                format!(" {}", fragment.text)
+            } else {
+                fragment.text.clone()
+            }
+        })
         .collect();
     let rect = union_rect(group, pairs, rects);
 
@@ -1401,7 +1556,7 @@ pub fn describe_runs(
     resync_straddled_op_spans(&runs, &mut pairs, pdfium_runs, grid);
 
     let mut described = Vec::new();
-    for group in group_runs(&runs, &pairs, pdfium_runs) {
+    for group in group_runs(&runs, &pairs, pdfium_runs, grid) {
         // P2.4.2 T22: a merged group whose union box is line-sized for its own span is not a
         // merge — its fragments do not fill the box they share, so the box is a line the group
         // only occupies part of. Split into singletons, each measured by its own span.
@@ -1410,10 +1565,7 @@ pub fn describe_runs(
             && !shared_box_is_own_chain(&runs, &pairs, &group)
         {
             for offset in 0..group.len {
-                let singleton = RunGroup {
-                    first: group.first + offset,
-                    len: 1,
-                };
+                let singleton = RunGroup::new(group.first + offset, 1);
                 described.push(describe_group(
                     document,
                     page,
@@ -1605,6 +1757,9 @@ pub struct EditRequest<'a> {
     /// The remaining fragments of a merged run, head first after the head (P2.4.1 T18). Empty
     /// for an ordinary single-operand edit.
     pub fragments: Vec<FragmentRef>,
+    /// Further whole runs the user selected alongside the head (P2.6 T26). Empty for an
+    /// ordinary pick. Their fragments (if they are merged runs) must be in `fragments`.
+    pub range: Vec<FragmentRef>,
     pub measure: WidthMeasure<'a>,
 }
 
@@ -1663,6 +1818,11 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
             return Err(AppError::TextRunMismatch);
         }
     }
+
+    // P2.6 T26: a selection is a range of runs. Validate it as one span before anything else
+    // is measured, so a mixed-style or non-contiguous selection refuses with its own reason
+    // instead of being written as a single run's replacement.
+    let range_writes = validate_run_range(&all_runs, run, request)?;
 
     // T3/T14 (a)/(b): re-run the invariant font gates against the freshly parsed run.
     let gates = resolve_gates(document, request.page, run)?;
@@ -1756,6 +1916,9 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
             new_bytes: Vec::new(),
         });
     }
+    for fragment in range_writes {
+        writes.push(fragment);
+    }
     let merged = textlocate::MergedWrite {
         fragments: writes,
         substitute: substitution.as_deref(),
@@ -1767,6 +1930,58 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         substitution,
         note,
     })
+}
+
+/// Turns a selected **range of runs** into the tail writes that clear it, or refuses
+/// `selection-range` (P2.6 T26).
+///
+/// The range is one span when it is consecutive in the content stream, one style at one
+/// size, on one baseline, and running rightward. Those are the same conditions [`mergeable`]
+/// asks of two fragments, applied to whole runs; a range that fails any of them is a
+/// multi-line or mixed-typeface selection, and replacing it with one run's text would silently
+/// delete text the user meant to keep.
+///
+/// A range run's own fragments are already in `request.fragments` when it is a merged run, so
+/// clearing the range run's head here is enough: its tail fragments were cleared with the
+/// head's merged tail.
+fn validate_run_range(
+    all_runs: &[textlocate::RawRun],
+    head: &textlocate::RawRun,
+    request: &EditRequest<'_>,
+) -> Result<Vec<textlocate::FragmentWrite>, AppError> {
+    if request.range.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut previous = head;
+    let mut writes = Vec::with_capacity(request.range.len());
+    for reference in &request.range {
+        let next = all_runs
+            .iter()
+            .find(|run| run.id == reference.run_id)
+            .ok_or(AppError::TextRunMismatch)?;
+        if next.text != reference.text {
+            return Err(AppError::TextRunMismatch);
+        }
+        let consecutive = if next.id.op_index == previous.id.op_index {
+            next.id.operand_path > previous.id.operand_path
+        } else {
+            next.id.op_index > previous.id.op_index
+        };
+        let same_style = next.style_class == previous.style_class
+            && sizes_match(next.font_size, previous.font_size);
+        let same_baseline = (next.origin.1 - previous.origin.1).abs() <= BASELINE_TOLERANCE;
+        let rightward = next.origin.0 >= previous.origin.0;
+        if !(consecutive && same_style && same_baseline && rightward) {
+            return Err(refuse(Gate::SelectionRange));
+        }
+        writes.push(textlocate::FragmentWrite {
+            id: next.id.clone(),
+            expected: next.text.clone(),
+            new_bytes: Vec::new(),
+        });
+        previous = next;
+    }
+    Ok(writes)
 }
 
 /// Reverses a text edit from its recorded inverse (T5), re-validating first.
@@ -1900,6 +2115,7 @@ mod tests {
             font_size: 24.0,
             allow_substitution: true,
             fragments: Vec::new(),
+            range: Vec::new(),
             measure,
         }
     }
@@ -1922,6 +2138,9 @@ mod tests {
             // The approximation doubles as the exact metric here, so a unit test that does not
             // care about the metric source behaves as before (P2.4.2 Phase A).
             advance_exact: Some(approximation),
+            // Tests name the font by its style class, so a "different resource, same class"
+            // case is expressed by passing the same `font` twice (P2.6 T26).
+            style_class: font.to_string(),
         }
     }
 
@@ -1931,6 +2150,28 @@ mod tests {
         let head = test_run("He", 72.0, 12.0, "F1");
         let next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
         assert!(mergeable(&head, &next, false, None, None));
+    }
+
+    /// P2.6 T26: two *resources* that name the same face are one style, so a producer's
+    /// mid-word resource switch does not split the line. The Maastricht brochure does exactly
+    /// this (`F4`/`F5`, both Times at 14.064pt).
+    #[test]
+    fn merges_across_resources_that_name_the_same_face() {
+        let head = test_run("Scien", 72.0, 12.0, "Times-Roman");
+        let next = test_run("tific", 72.0 + head.advance, 12.0, "Times-Roman");
+        let mut other_resource = next.clone();
+        other_resource.font_key = b"F9".to_vec();
+        assert!(mergeable(&head, &other_resource, false, None, None));
+    }
+
+    /// A real style change still splits: bold is not roman, and a serif is not a sans.
+    #[test]
+    fn never_merges_across_a_style_change() {
+        let head = test_run("Scien", 72.0, 12.0, "Times-Roman");
+        let bold = test_run("tific", 72.0 + head.advance, 12.0, "Times-Bold");
+        assert!(!mergeable(&head, &bold, false, None, None));
+        let sans = test_run("tific", 72.0 + head.advance, 12.0, "Helvetica");
+        assert!(!mergeable(&head, &sans, false, None, None));
     }
 
     #[test]
@@ -2036,7 +2277,8 @@ mod tests {
             text: String::new(),
             chars: Vec::new(),
         };
-        let pair = pair_run(&run, &rects, &box_baselines(&rects, &grid), &grid).expect("a containing box pairs");
+        let pair = pair_run(&run, &rects, &box_baselines(&rects, &grid), &grid)
+            .expect("a containing box pairs");
         assert_eq!(pair.rect, 1, "exact text breaks the tie");
 
         // Geometry first: a box whose baseline is nearer wins even though its text differs,
@@ -2045,7 +2287,8 @@ mod tests {
         exact_but_far.y0 = 700.2;
         exact_but_far.y1 = 712.2;
         let rects = vec![exact_but_far, box_at("other", 72.0)];
-        let pair = pair_run(&run, &rects, &box_baselines(&rects, &grid), &grid).expect("a containing box pairs");
+        let pair = pair_run(&run, &rects, &box_baselines(&rects, &grid), &grid)
+            .expect("a containing box pairs");
         assert_eq!(
             pair.rect, 1,
             "the nearer baseline wins even though its text differs"
@@ -2053,7 +2296,13 @@ mod tests {
     }
 
     /// Builds one grid character at `x` with the given advance width, on `baseline` (P2.4.4).
-    fn grid_char(ch: char, x: f32, width: f32, baseline: f32, generated: bool) -> crate::editor::runmetrics::PdfiumChar {
+    fn grid_char(
+        ch: char,
+        x: f32,
+        width: f32,
+        baseline: f32,
+        generated: bool,
+    ) -> crate::editor::runmetrics::PdfiumChar {
         crate::editor::runmetrics::PdfiumChar {
             unicode: Some(ch),
             generated,
@@ -2264,12 +2513,164 @@ mod tests {
             })
         };
         let boxes = group_boxes(&document, &runs);
-        let groups = group_runs(&runs, &[strong(0), strong(0), strong(2)], &boxes);
+        let groups = group_runs(
+            &runs,
+            &[strong(0), strong(0), strong(2)],
+            &boxes,
+            &empty_grid(),
+        );
         // Two groups: "Hello" (2 fragments) and "far" (1), because the gap to "far" is far
         // past a quarter em.
         assert_eq!(groups.len(), 2);
         assert_eq!((groups[0].first, groups[0].len), (0, 2));
         assert_eq!((groups[1].first, groups[1].len), (2, 1));
+    }
+
+    /// A grid with no characters: the seam predicate then never sees a generated space, so a
+    /// unit test that is not about kern seams keeps the pre-item-4 behaviour.
+    fn empty_grid() -> crate::editor::runmetrics::PdfiumCharGrid {
+        crate::editor::runmetrics::PdfiumCharGrid {
+            text: String::new(),
+            chars: Vec::new(),
+        }
+    }
+
+    /// P2.6 T26 item 4: the kerned word break. `Some -400 Word` at 15pt puts a zero-advance
+    /// generated space between the two operands and advances the pen 6pt across the seam.
+    #[test]
+    fn a_kerned_word_break_reads_as_a_space() {
+        let runs = vec![
+            test_run("Some", 46.0, 15.0, "F1"),
+            test_run("Word", 91.0, 15.0, "F1"),
+        ];
+        let span = |first, last, x0, x1| {
+            Some(Pair {
+                rect: 0,
+                confidence: PairConfidence::Strong,
+                span: Some(CharSpan {
+                    first,
+                    last,
+                    x0,
+                    x1,
+                }),
+                smallest_containing: true,
+            })
+        };
+        let pairs = [span(0, 3, 46.0, 85.18), span(5, 8, 91.18, 127.01)];
+        let grid = crate::editor::runmetrics::PdfiumCharGrid {
+            text: "Some Word".to_string(),
+            chars: vec![
+                grid_char('S', 46.0, 10.01, 712.0, false),
+                grid_char('o', 56.01, 8.34, 712.0, false),
+                grid_char('m', 64.35, 12.49, 712.0, false),
+                grid_char('e', 76.84, 8.34, 712.0, false),
+                grid_char(' ', 91.18, 0.00, 712.0, true),
+                grid_char('W', 91.18, 14.16, 712.0, false),
+                grid_char('o', 105.34, 8.34, 712.0, false),
+                grid_char('r', 113.68, 5.00, 712.0, false),
+                grid_char('d', 118.68, 8.33, 712.0, false),
+            ],
+        };
+        assert!(seam_is_word_space(0, 1, &runs, &pairs, &grid));
+    }
+
+    /// The counter-cases the predicate exists to reject. Each is a variant of the kern seam,
+    /// so a change that widens the test is caught here rather than on a real document.
+    #[test]
+    fn a_seam_is_a_word_space_only_at_a_wide_generated_gap() {
+        let runs = vec![
+            test_run("Some", 46.0, 15.0, "F1"),
+            test_run("Word", 91.0, 15.0, "F1"),
+        ];
+        let pair = |span: CharSpan| {
+            Some(Pair {
+                rect: 0,
+                confidence: PairConfidence::Strong,
+                span: Some(span),
+                smallest_containing: true,
+            })
+        };
+        let head = CharSpan {
+            first: 0,
+            last: 3,
+            x0: 46.0,
+            x1: 85.18,
+        };
+        let tail = CharSpan {
+            first: 5,
+            last: 8,
+            x0: 91.18,
+            x1: 127.01,
+        };
+        let grid = |between: crate::editor::runmetrics::PdfiumChar| {
+            crate::editor::runmetrics::PdfiumCharGrid {
+                text: String::new(),
+                chars: vec![
+                    grid_char('S', 46.0, 10.01, 712.0, false),
+                    grid_char('o', 56.01, 8.34, 712.0, false),
+                    grid_char('m', 64.35, 12.49, 712.0, false),
+                    grid_char('e', 76.84, 8.34, 712.0, false),
+                    between,
+                    grid_char('W', 91.18, 14.16, 712.0, false),
+                ],
+            }
+        };
+
+        // The seam itself: a zero-advance generated space, 6pt wide.
+        assert!(seam_is_word_space(
+            0,
+            1,
+            &runs,
+            &[pair(head), pair(tail)],
+            &grid(grid_char(' ', 91.18, 0.00, 712.0, true))
+        ));
+
+        // A line break is not a word space.
+        assert!(!seam_is_word_space(
+            0,
+            1,
+            &runs,
+            &[pair(head), pair(tail)],
+            &grid(grid_char('\r', 91.18, 0.00, 712.0, true))
+        ));
+
+        // A space PDFium *laid out* (non-zero advance) is already a real glyph; inserting one
+        // would double it.
+        assert!(!seam_is_word_space(
+            0,
+            1,
+            &runs,
+            &[pair(head), pair(tail)],
+            &grid(grid_char(' ', 85.18, 6.00, 712.0, true))
+        ));
+
+        // A narrow seam: the compressed-face artifact (`m o n th`), not a word break.
+        let narrow_tail = CharSpan {
+            first: 5,
+            last: 8,
+            x0: 86.18,
+            x1: 122.01,
+        };
+        assert!(!seam_is_word_space(
+            0,
+            1,
+            &runs,
+            &[pair(head), pair(narrow_tail)],
+            &grid(grid_char(' ', 86.18, 0.00, 712.0, true))
+        ));
+
+        // Bytes that already carry the whitespace: the separator is not doubled.
+        let padded = vec![
+            test_run("Some ", 46.0, 15.0, "F1"),
+            test_run("Word", 91.0, 15.0, "F1"),
+        ];
+        assert!(!seam_is_word_space(
+            0,
+            1,
+            &padded,
+            &[pair(head), pair(tail)],
+            &grid(grid_char(' ', 91.18, 0.00, 712.0, true))
+        ));
     }
 
     #[test]
@@ -2287,7 +2688,7 @@ mod tests {
             smallest_containing: true,
         });
         let boxes = group_boxes(&document, &runs);
-        let groups = group_runs(&runs, &[weak, weak, None], &boxes);
+        let groups = group_runs(&runs, &[weak, weak, None], &boxes, &empty_grid());
         // One group per run: the weak pair is not merged, and the unpaired run is still
         // reported as a singleton so the picker can name its refusal (T21).
         assert_eq!(groups.len(), 3);
@@ -2312,7 +2713,7 @@ mod tests {
             })
         };
         let pairs = [strong(0), strong(0)];
-        let group = RunGroup { first: 0, len: 2 };
+        let group = RunGroup::new(0, 2);
 
         // A word box the two fragments tile: not suspicious.
         let mut tiled = group_boxes(&document, &runs);
@@ -2582,6 +2983,79 @@ mod tests {
         // At small widths the 0.5pt floor dominates.
         assert!(width_refusal(10.0, 10.4).is_none());
         assert!(width_refusal(10.0, 10.6).is_some());
+    }
+
+    /// P2.6 T26: a selection is a range of whole runs, validated as one span.
+    #[test]
+    fn a_run_range_is_validated_as_one_contiguous_same_style_span() -> Result<(), String> {
+        let measure = measure_fixed(30.0);
+        let head = test_run("Alpha", 10.0, 12.0, "Times");
+        let mut middle = test_run("Beta", 40.0, 12.0, "Times");
+        middle.id.op_index = 1;
+        let mut tail = test_run("Gamma", 60.0, 12.0, "Times");
+        tail.id.op_index = 2;
+        let all = vec![head.clone(), middle.clone(), tail.clone()];
+        let references = |runs: &[RawRun]| {
+            runs.iter()
+                .map(|run| FragmentRef {
+                    run_id: run.id.clone(),
+                    text: run.text.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut req = request(&head, "Alpha Beta", 100.0, &measure);
+        req.range = references(&[middle.clone(), tail.clone()]);
+        let writes = match validate_run_range(&all, &head, &req) {
+            Ok(writes) => writes,
+            Err(error) => return Err(error.to_string()),
+        };
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].id, middle.id);
+        assert!(
+            writes.iter().all(|write| write.new_bytes.is_empty()),
+            "range runs are cleared, not rewritten"
+        );
+
+        // A different typeface anywhere in the range is a mixed selection. The range
+        // reference resolves against the document's runs, so the document must hold the
+        // different-style run — that is what makes the check meaningful.
+        let mut other = tail.clone();
+        other.style_class = "Helvetica".to_string();
+        let mixed = vec![head.clone(), middle.clone(), other.clone()];
+        let mut req = request(&head, "Alpha", 100.0, &measure);
+        req.range = references(&[middle.clone(), other.clone()]);
+        match validate_run_range(&mixed, &head, &req) {
+            Err(error) => {
+                assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+                assert!(error.to_string().contains("selection-range"), "{error}");
+            }
+            Ok(_) => return Err("a mixed-typeface range must be refused".to_string()),
+        }
+
+        // So is a run that moved to another baseline (a wrapped line).
+        let mut wrapped = tail.clone();
+        wrapped.origin.1 -= 14.0;
+        let shifted = vec![head.clone(), middle.clone(), wrapped.clone()];
+        let mut req = request(&head, "Alpha", 100.0, &measure);
+        req.range = references(&[wrapped]);
+        assert!(validate_run_range(&shifted, &head, &req).is_err());
+
+        // And so is an out-of-order or stale reference.
+        let mut req = request(&head, "Alpha", 100.0, &measure);
+        req.range = references(&[tail.clone(), middle.clone()]);
+        assert!(validate_run_range(&all, &head, &req).is_err());
+
+        let mut req = request(&head, "Alpha", 100.0, &measure);
+        req.range = vec![FragmentRef {
+            run_id: middle.id.clone(),
+            text: "not what is there".to_string(),
+        }];
+        match validate_run_range(&all, &head, &req) {
+            Err(error) => assert_eq!(error.code(), "TEXT_RUN_MISMATCH"),
+            Ok(_) => return Err("a stale range reference must be refused".to_string()),
+        }
+        Ok(())
     }
 
     #[test]

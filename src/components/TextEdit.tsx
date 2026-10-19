@@ -133,7 +133,7 @@ export function TextRunOverlay({
   metrics: OverlayMetrics | null;
   runs: PageTextRun[];
 }) {
-  const { selectedRun, selectRun, textEditMode } = useEditor();
+  const { selectedRun, selection, selectRun, textEditMode } = useEditor();
   if (!textEditMode || !metrics) return null;
 
   // P2.4.2 O-Chain-3: a box-suspicious run's line-sized box does not take page clicks when an
@@ -150,7 +150,11 @@ export function TextRunOverlay({
             key={`${run.runId.opIndex}:${run.runId.operandPath.join(".")}:${index}`}
             type="button"
             className={`textrun-box${run.admissibility.editable ? "" : " refused"}${
-              sameRun(selectedRun, run) ? " selected" : ""
+              selection.some((picked) => sameRun(picked, run))
+                ? sameRun(selectedRun, run)
+                  ? " selected"
+                  : " selected in-range"
+                : ""
             }`}
             style={{
               left: box.x,
@@ -168,7 +172,8 @@ export function TextRunOverlay({
             }
             // Refused runs stay clickable: the click selects them and the panel explains
             // the gate. A dead box would be indistinguishable from a broken picker.
-            onClick={() => selectRun(run)}
+            // Shift-click extends the selection into a range of runs (P2.6 T26).
+            onClick={(event) => selectRun(run, event.shiftKey)}
           >
             <span className="textrun-box-label">{run.text}</span>
           </button>
@@ -316,6 +321,7 @@ export function TextEditPanel({
     pageRuns,
     runsLoading,
     selectedRun,
+    selection,
     selectRun,
     substitution,
     clearSubstitution,
@@ -325,8 +331,11 @@ export function TextEditPanel({
   const [replacement, setReplacement] = useState("");
   const [savedPath, setSavedPath] = useState<string | null>(null);
 
-  // Track the selection into the box, so picking a run by clicking it on the page fills
-  // the form exactly as picking it from the list does.
+  // P2.6 T26: a selection is a range of runs. The box edits the head's text, so extending
+  // the selection keeps the typed replacement rather than resetting it; only picking a
+  // *different* head refills the form.
+  const selectionText = selection.map((run) => run.text).join("");
+  const isRange = selection.length > 1;
   useEffect(() => {
     setReplacement(selectedRun?.text ?? "");
     setSavedPath(null);
@@ -338,7 +347,7 @@ export function TextEditPanel({
     clearSubstitution();
     const path = await editText(page, selectedRun, replacement);
     if (path) setSavedPath(path);
-  }, [editText, page, selectedRun, replacement, clearSubstitution]);
+  }, [editText, page, selectedRun, selection, replacement, clearSubstitution]);
 
   // A protected document refuses every edit (P2.4 T7), so the picker is not offered at
   // all: turning it on would promise an edit the backend will always reject.
@@ -420,7 +429,9 @@ export function TextEditPanel({
                 </p>
               ) : null}
               <label>
-                Replace <span className="path">{selectedRun.text}</span> with
+                Replace{' '}
+                <span className="path">{isRange ? selectionText : selectedRun.text}</span>{' '}
+                with
                 <input
                   type="text"
                   value={replacement}
@@ -453,6 +464,15 @@ export function TextEditPanel({
                   This edit combines {selectedRun.fragmentCount} fragments of{' '}
                   {selectedRun.fontName || selectedRun.fontKey} in one write; undo restores
                   all of them together.
+                </p>
+              ) : null}
+              {/* P2.6 T26: a range of runs is replaced as one span. The backend refuses a
+                  range that is not one contiguous, same-style line, so say what was picked
+                  and leave the refusal to speak for itself if it does not hold. */}
+              {isRange ? (
+                <p className="textedit-merged muted">
+                  {selection.length} runs are selected and will be replaced together by one
+                  write; shift-click extends the selection. Undo restores all of them.
                 </p>
               ) : null}
               <p className="muted">Writes a new file. The original is never changed.</p>

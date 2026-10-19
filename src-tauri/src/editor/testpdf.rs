@@ -30,6 +30,37 @@ fn single_run(text: &str) -> Vec<Operation> {
     ]
 }
 
+/// A page whose only font is a **non-embedded** simple font that publishes `/Widths` — the
+/// shape the Maastricht brochure uses for its Times/Arial resources.
+pub fn simple_font_widths_page() -> Document {
+    let widths: Vec<Object> = (32..=126).map(|_| 500.into()).collect();
+    document_with_pages(
+        dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "DejaVuSans",
+            "FirstChar" => 32,
+            "LastChar" => 126,
+            "Widths" => Object::Array(widths),
+            "Encoding" => "WinAnsiEncoding",
+        },
+        vec![single_run("Test")],
+    )
+}
+
+/// A page whose font publishes no `/Widths` and embeds no program: genuinely unmeasurable.
+pub fn no_widths_page() -> Document {
+    document_with_pages(
+        dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "DejaVuSans",
+            "Encoding" => "WinAnsiEncoding",
+        },
+        vec![single_run("x")],
+    )
+}
+
 /// Wraps content streams into a one-page document using `font` as `/F1`.
 fn document_with_pages(font: Dictionary, pages: Vec<Vec<Operation>>) -> Document {
     let mut document = Document::with_version("1.4");
@@ -1246,4 +1277,20 @@ pub fn tj_kern_seam() -> Document {
     document.trailer.set("Root", catalog_id);
     document.renumber_objects();
     document
+}
+
+/// Two adjacent `Tj` operands on one baseline, one style and size: a line split across
+/// operations, the shape a selection range exists for (P2.6 T26).
+pub fn two_run_line() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new("Tj", vec![Object::string_literal("ALPHA ")]),
+            Operation::new("Tj", vec![Object::string_literal("BETA")]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
 }

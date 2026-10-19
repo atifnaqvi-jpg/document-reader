@@ -13,7 +13,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { EditorProvider, useEditor } from "./EditorProvider";
-import type { Annotation } from "../api/types";
+import type { Annotation, PageTextRun } from "../api/types";
 import { ANNOTATION_CHANGED_EVENT } from "../api/types";
 import { makeAnnotation, installFakeBackend } from "../test/tauri";
 import type { FakeBackend } from "../test/tauri";
@@ -381,5 +381,196 @@ describe("EditorProvider: page scoping", () => {
 
     await waitFor(() => expect(view.result.current.annotations).toHaveLength(1));
     expect(view.result.current.annotations[0].id).toBe("b");
+  });
+});
+
+/**
+ * P2.6 T26: a selection is a **range of runs**.
+ *
+ * The picker used to hold one run, so picking a second line silently threw the first away.
+ * These drive the real provider and the real `editPageText` command, asserting on the IPC
+ * payload -- the place the range either survives or is silently dropped.
+ */
+function makeRun(opIndex: number, text: string, overrides: Partial<PageTextRun> = {}): PageTextRun {
+  return {
+    runId: { opIndex, operandPath: [0] },
+    text,
+    operator: "Tj",
+    fontKey: "F1",
+    fontName: "Times-Roman",
+    fontSize: 12,
+    rect: { x0: 10, y0: 20, x1: 80, y1: 32 },
+    width: 70,
+    admissibility: { editable: true, gate: null, message: null },
+    pairConfidence: "strong",
+    fragmentCount: 1,
+    ...overrides,
+  };
+}
+
+/** Mounts a provider with the picker already on and a fixed run list. */
+async function mountWithRuns(runs: PageTextRun[]) {
+  const backend = installFakeBackend();
+  backend.on("list_annotations", () => []);
+  backend.on("get_app_state", () => null);
+  backend.on("set_app_state", () => null);
+  backend.on("get_page_text_runs", () => runs);
+  backend.on("edit_page_text", () => ({
+    documentId: "doc-2",
+    filePath: "/tmp/out.pdf",
+    inverse: [],
+    substitution: null,
+  }));
+
+  const view = renderHook(() => useEditor(), {
+    wrapper: ({ children }) => (
+      <EditorProvider documentId="doc-1" page={0}>
+        {children}
+      </EditorProvider>
+    ),
+  });
+  await act(async () => {
+    view.result.current.setTextEditMode(true);
+  });
+  await waitFor(() => expect(view.result.current.pageRuns).toHaveLength(runs.length));
+  return { backend, view };
+}
+
+describe("EditorProvider: selection is a range of runs", () => {
+  it("keeps a plain click as a one-run selection", async () => {
+    const runs = [makeRun(1, "Alpha"), makeRun(2, "Beta")];
+    const { backend, view } = await mountWithRuns(runs);
+    open = backend;
+
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[0]);
+    });
+
+    expect(view.result.current.selectedRun?.text).toBe("Alpha");
+    expect(view.result.current.selection.map((run) => run.text)).toEqual(["Alpha"]);
+  });
+
+  it("extends the selection over the runs between head and shift-click", async () => {
+    const runs = [makeRun(1, "Alpha"), makeRun(2, "Beta"), makeRun(3, "Gamma")];
+    const { backend, view } = await mountWithRuns(runs);
+    open = backend;
+
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[0]);
+    });
+    // Forwards: the range is normalised to reading order, and the head stays where the
+    // selection started -- the replacement is written into the head's operand.
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[2], true);
+    });
+
+    expect(view.result.current.selection.map((run) => run.text)).toEqual([
+      "Alpha",
+      "Beta",
+      "Gamma",
+    ]);
+    expect(view.result.current.selectedRun?.text).toBe("Alpha");
+  });
+
+  it("sends the rest of the selection as `range`, with merged tails in `fragments`", async () => {
+    const mergedTail = { ...makeRun(3, "tail"), runId: { opIndex: 3, operandPath: [1] } };
+    const runs = [
+      makeRun(1, "Alpha"),
+      makeRun(2, "Beta", { fragmentCount: 2, fragments: [makeRun(2, "Beta"), mergedTail] }),
+    ];
+    const { backend, view } = await mountWithRuns(runs);
+    open = backend;
+
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[0]);
+    });
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[1], true);
+    });
+    await act(async () => {
+      await view.result.current.editText(0, view.result.current.selectedRun!, "Alpha Beta");
+    });
+
+    const call = backend.callsTo("edit_page_text")[0];
+    expect(call.range).toEqual([{ runId: { opIndex: 2, operandPath: [0] }, text: "Beta" }]);
+    // The merged run's tail must still travel with the fragments, even as a range entry:
+    // the write clears it, and a stale reference there would blank the wrong operand.
+    expect(call.fragments).toEqual([
+      { runId: { opIndex: 3, operandPath: [1] }, text: "tail" },
+    ]);
+  });
+
+  it("does not send a range for a single-run edit", async () => {
+    const runs = [makeRun(1, "Alpha"), makeRun(2, "Beta")];
+    const { backend, view } = await mountWithRuns(runs);
+    open = backend;
+
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[0]);
+    });
+    await act(async () => {
+      await view.result.current.editText(0, view.result.current.selectedRun!, "Alpha");
+    });
+
+    expect(backend.callsTo("edit_page_text")[0].range).toEqual([]);
+  });
+
+  it("extends backwards from a later head without reordering the selection", async () => {
+    const runs = [makeRun(1, "Alpha"), makeRun(2, "Beta"), makeRun(3, "Gamma")];
+    const { backend, view } = await mountWithRuns(runs);
+    open = backend;
+
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[2]);
+    });
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[0], true);
+    });
+
+    expect(view.result.current.selection.map((run) => run.text)).toEqual([
+      "Alpha",
+      "Beta",
+      "Gamma",
+    ]);
+    expect(view.result.current.selectedRun?.text).toBe("Gamma");
+  });
+
+  it("drops the selection when the page changes", async () => {
+    const backend = installFakeBackend();
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+    backend.on("get_page_text_runs", () => [makeRun(1, "Alpha")]);
+    open = backend;
+
+    const view = renderHook(() => useEditor(), {
+      wrapper: ({ children }) => (
+        <EditorProvider documentId="doc-1" page={0}>
+          {children}
+        </EditorProvider>
+      ),
+    });
+    await act(async () => {
+      view.result.current.setTextEditMode(true);
+    });
+    await waitFor(() => expect(view.result.current.pageRuns).toHaveLength(1));
+
+    await act(async () => {
+      view.result.current.selectRun(view.result.current.pageRuns[0]);
+    });
+    expect(view.result.current.selection).toHaveLength(1);
+
+    // Re-mounting on another page is how the app navigates: the selected run belongs to
+    // the old page, so keeping it selected would let the box edit text nobody can see.
+    view.unmount();
+    const next = renderHook(() => useEditor(), {
+      wrapper: ({ children }) => (
+        <EditorProvider documentId="doc-1" page={1}>
+          {children}
+        </EditorProvider>
+      ),
+    });
+    expect(next.result.current.selection).toHaveLength(0);
+    expect(next.result.current.selectedRun).toBeNull();
   });
 });

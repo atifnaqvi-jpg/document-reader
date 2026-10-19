@@ -493,7 +493,9 @@ describe("P2.4.1 merged runs: one entry, expandable fragments, one atomic write"
     const call = mounted.backend.callsTo("edit_page_text")[0]!;
     // The head runs the edit; the four tails travel with it, each carrying the text the
     // picker showed so the backend re-validates before clearing (T4/T18).
-    expect(call.expected).toBe("Hello");
+    // `expected` is the head *operand* ("H"), not the run's joined display text ("Hello"):
+    // the backend compares it with the bytes in the content stream.
+    expect(call.expected).toBe("H");
     expect(call.fragments).toEqual([
       { runId: { opIndex: 8, operandPath: [1] }, text: "e" },
       { runId: { opIndex: 9, operandPath: [1] }, text: "l" },

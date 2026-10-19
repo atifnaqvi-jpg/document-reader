@@ -75,6 +75,15 @@ pub struct RawRun {
     /// (T22) must be a real measurement, never the approximation — a run whose quota is not
     /// measurable refuses rather than trusting a box.
     pub advance_exact: Option<f32>,
+    /// The style class of the font in force (AFM-style name from
+    /// [`crate::editor::substitute::style_match`], e.g. `Times-Bold`).
+    ///
+    /// Two resources with the same class set the same text in the same face, so a seam
+    /// between them is not a style change — it is a producer artifact. The Maastricht
+    /// brochure switches `F4` (`ABCDEF+TimesNewRomanPS-BoldMT`) to `F5`
+    /// (`ABCDEF+TimesNewRomanPSMT`) mid-line purely to change weight; treating the resource
+    /// name as identity split one sentence into two pickable runs.
+    pub style_class: String,
 }
 
 impl RawRun {
@@ -256,6 +265,11 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                 font_size: walker.size,
                 advance: fragment_advance(&metrics, &text, walker.size),
                 advance_exact,
+                style_class: crate::editor::substitute::style_match(
+                    crate::editor::textlocate::font_info(document, page_id, &font_key)
+                        .and_then(|info| info.base_font)
+                        .as_deref(),
+                ),
             });
         }
     }

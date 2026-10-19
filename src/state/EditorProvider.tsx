@@ -30,6 +30,7 @@ import type {
   DecryptOutcome,
   PageTextRun,
   TextRunFragmentRef,
+  TextRunId,
   ToolStyle,
 } from "../api/types";
 import { ANNOTATION_KINDS } from "../api/types";
@@ -87,11 +88,11 @@ interface EditorContextValue {
    * undo (T5). Returns the path of the new file the edit was written to, or `null` when
    * the backend refused (the refusal is on `error`).
    */
-  editText: (
-    page: number,
-    run: PageTextRun,
-    replacement: string,
-  ) => Promise<string | null>;
+  /**
+   * Replaces `run` (and the rest of the current selection, if any) in one write (P2.6 T26).
+   * The range comes from `selection`, which this provider owns, so a caller cannot drop it.
+   */
+  editText: (page: number, run: PageTextRun, replacement: string) => Promise<string | null>;
   /**
    * The substitution disclosure from the most recent successful edit (T10), or `null`.
    * Set when MECH-A switched the run's font; the panel surfaces it as a toast so a
@@ -119,7 +120,18 @@ interface EditorContextValue {
   setTextEditMode: (on: boolean) => void;
   /** The run the user picked, by reference identity within `pageRuns`. */
   selectedRun: PageTextRun | null;
-  selectRun: (run: PageTextRun | null) => void;
+  /**
+   * The whole selection, in reading order, head first (P2.6 T26). A selection is a range of
+   * runs, not one run: a shift-click extends it, and replacing it replaces all of them.
+   * `[selectedRun]` for an ordinary pick, empty for none.
+   */
+  selection: PageTextRun[];
+  /**
+   * Select `run`; with `extend`, extend the current selection from its head to `run`.
+   * Extending past a gap the backend would refuse is still allowed here — the refusal is
+   * explained by the panel rather than silently swallowed by a picker that appears dead.
+   */
+  selectRun: (run: PageTextRun | null, extend?: boolean) => void;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   clearError: () => void;
@@ -166,6 +178,16 @@ function parseStyle(raw: string | null, tool: AnnotationKind): ToolStyle {
   }
 }
 
+/** Whether two run addresses are the same (P2.6 T26). Kept local so the provider does not
+ * import from a component; `sameRun` below is the run-shaped view of it. */
+function sameRunId(a: TextRunId, b: TextRunId): boolean {
+  return a.opIndex === b.opIndex && a.operandPath.join(",") === b.operandPath.join(",");
+}
+
+function sameAddress(a: PageTextRun, b: PageTextRun): boolean {
+  return sameRunId(a.runId, b.runId);
+}
+
 export function EditorProvider({
   documentId,
   page,
@@ -191,6 +213,7 @@ export function EditorProvider({
   const [runsLoading, setRunsLoading] = useState(false);
   const [textEditMode, setTextEditMode] = useState(false);
   const [selectedRun, setSelectedRun] = useState<PageTextRun | null>(null);
+  const [selection, setSelection] = useState<PageTextRun[]>([]);
   // Stage 2: the O-ST2-4 toggle (default on) and the T10 disclosure from the last edit.
   const [allowSubstitution, setAllowSubstitution] = useState(true);
   const [substitution, setSubstitution] = useState<SubstitutionNote | null>(null);
@@ -453,27 +476,47 @@ export function EditorProvider({
       if (!documentId) return null;
       // A merged run's tail fragments travel with the edit so the backend can clear them in
       // the same pass (P2.4.1 T18). An ordinary run sends none.
-      const sameAddress = (a: PageTextRun["runId"], b: PageTextRun["runId"]) =>
-        a.opIndex === b.opIndex && a.operandPath.join(",") === b.operandPath.join(",");
       const fragments: TextRunFragmentRef[] = (run.fragments ?? [])
         // The head fragment `run` itself already carries; only the tail travels here (T18).
-        .filter((fragment) => !sameAddress(fragment.runId, run.runId))
+        .filter((fragment) => !sameRunId(fragment.runId, run.runId))
         .map((fragment) => ({
           runId: fragment.runId,
           text: fragment.text,
         }));
+      // A range run that is itself merged contributes its own tail too: the backend writes
+      // one replacement into the selection's head and clears every other fragment (T26).
+      // The selection is the range; the head is `run`, so the rest are cleared. Derived here
+      // rather than passed in: a caller that forgot the argument must not write a one-run
+      // edit while the UI shows three runs selected.
+      const range = selection.filter((selected) => !sameAddress(selected, run));
+      const rangeFragments: TextRunFragmentRef[] = range.flatMap((selected) =>
+        (selected.fragments ?? [])
+          .filter((fragment) => !sameRunId(fragment.runId, selected.runId))
+          .map((fragment) => ({ runId: fragment.runId, text: fragment.text })),
+      );
       try {
         const result = await editPageText(
           documentId,
           targetPage,
           run.runId,
-          run.text,
+          // The head *operand's* bytes, not the run's display text: a merged run's `text`
+          // joins its fragments and, since T26 item 4, may show a kern seam as a word space
+          // the bytes do not contain. The backend re-validates this against the content
+          // stream, so sending the display text would refuse every merged kern edit.
+          run.fragments?.[0]?.text ?? run.text,
           replacement,
           run.width ?? 0,
           run.fontName,
           run.fontSize,
           allowSubstitution,
-          fragments,
+          [...fragments, ...rangeFragments],
+          // A range entry names the run's *head fragment*: that is the operand the write
+          // clears. A merged run's remaining fragments travel in `fragments` above.
+          range.map((selected) => ({
+            runId: selected.fragments?.[0]?.runId ?? selected.runId,
+            // Same rule as the head: range entries are re-validated by their operand bytes.
+            text: selected.fragments?.[0]?.text ?? selected.text,
+          })),
         );
         // T10: a substitution is never silent. Carry the backend's disclosure into the
         // toast, and clear it again on any edit that keeps the original font.
@@ -513,7 +556,7 @@ export function EditorProvider({
         return null;
       }
     },
-    [documentId, docKey, push, allowSubstitution],
+    [documentId, docKey, push, allowSubstitution, selection],
   );
 
   const clearSubstitution = useCallback(() => setSubstitution(null), []);
@@ -572,10 +615,32 @@ export function EditorProvider({
    * referred to a different run, and showing it against the new selection would name the
    * wrong reason.
    */
-  const selectRun = useCallback((run: PageTextRun | null) => {
-    setSelectedRun(run);
+  // A page change drops the selection: the runs it names are not on the new page, and a
+  // stale head would let the box edit text the user is no longer looking at.
+  useEffect(() => {
+    setSelectedRun(null);
+    setSelection([]);
+  }, [page]);
+
+  const selectRun = useCallback((run: PageTextRun | null, extend = false) => {
+    // A shift-click extends the range but keeps the *head*: the replacement is written into
+    // the head's operand, so moving it to the shift-click target would type into the end of
+    // the selection instead of where the user started.
+    if (!extend) setSelectedRun(run);
     setError(null);
-  }, []);
+    // P2.6 T26: a selection is a range of runs. A plain click is a one-run range; a
+    // shift-click takes every run between the current head and `run` in `pageRuns` order,
+    // which is reading order, so the backend's contiguity check speaks for itself.
+    setSelection((current) => {
+      if (!run) return [];
+      if (!extend || current.length === 0) return [run];
+      const from = pageRuns.findIndex((candidate) => sameAddress(candidate, current[0]));
+      const to = pageRuns.findIndex((candidate) => sameAddress(candidate, run));
+      if (from < 0 || to < 0) return [run];
+      const [start, end] = from <= to ? [from, to] : [to, from];
+      return pageRuns.slice(start, end + 1);
+    });
+  }, [pageRuns]);
 
   const value = useMemo<EditorContextValue>(
     () => ({
@@ -605,6 +670,7 @@ export function EditorProvider({
       textEditMode,
       setTextEditMode,
       selectedRun,
+      selection,
       selectRun,
       undo,
       redo,
@@ -632,6 +698,7 @@ export function EditorProvider({
       runsLoading,
       textEditMode,
       selectedRun,
+      selection,
       selectRun,
       undo,
       redo,

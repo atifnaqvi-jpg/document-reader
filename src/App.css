@@ -616,6 +616,13 @@ button:disabled {
   border-style: solid;
 }
 
+/* A run inside a multi-run selection but not its head (P2.6 T26): visibly part of the
+   selection, while the head keeps the solid outline that says where typing lands. */
+.textrun-box.in-range {
+  background: rgba(31, 111, 235, 0.12);
+  border-style: dashed;
+}
+
 .textrun-box.refused {
   background: rgba(209, 36, 47, 0.06);
   border-color: rgba(209, 36, 47, 0.6);

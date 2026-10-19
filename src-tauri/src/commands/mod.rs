@@ -891,6 +891,7 @@ pub async fn edit_page_text(
     font_size: f32,
     allow_substitution: bool,
     fragments: Vec<crate::editor::textedit::FragmentRef>,
+    range: Option<Vec<crate::editor::textedit::FragmentRef>>,
 ) -> Result<TextEditResult, AppError> {
     let path = document_path(&db, &document_id)?;
 
@@ -936,6 +937,7 @@ pub async fn edit_page_text(
             font_size,
             allow_substitution,
             fragments,
+            range: range.unwrap_or_default(),
             measure: &measure,
         };
         let outcome = crate::editor::textedit::edit(&mut document, &request)?;

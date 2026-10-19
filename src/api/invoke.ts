@@ -283,6 +283,11 @@ export const editPageText = (
   documentId: string,
   page: number,
   runId: TextRunId,
+  /**
+   * The head **operand's** bytes, not the run's display text (P2.6 T26 item 4). For a merged
+   * run the display text joins its fragments and may show a kern seam as a word space the
+   * bytes do not contain; the backend re-validates this against the content stream.
+   */
   expected: string,
   replacement: string,
   oldWidth: number,
@@ -296,6 +301,12 @@ export const editPageText = (
    * ordinary run; each entry is re-validated against the document before anything is written.
    */
   fragments: TextRunFragmentRef[],
+  /**
+   * Further whole runs selected alongside the head, in reading order (P2.6 T26). The backend
+   * replaces the head and clears these in the same atomic write, re-validating that together
+   * they are one contiguous, same-style span. Empty for a single-run pick.
+   */
+  range: TextRunFragmentRef[] = [],
 ) =>
   invoke<TextEditResult>("edit_page_text", {
     documentId,
@@ -310,6 +321,7 @@ export const editPageText = (
     // intent; the UI defaults it on.
     allowSubstitution,
     fragments,
+    range,
   });
 
 /**

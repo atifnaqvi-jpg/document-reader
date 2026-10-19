@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use document_reader_lib::editor::geometry::PdfRect;
 use document_reader_lib::editor::protect;
 use document_reader_lib::editor::runmetrics::{self, PdfiumRun};
+use document_reader_lib::editor::testpdf;
 use document_reader_lib::editor::textedit;
 use document_reader_lib::editor::textlocate::{self, RunId};
 use document_reader_lib::model::AppError;
@@ -133,6 +134,7 @@ fn edit_with_options(
         font_size: 24.0,
         allow_substitution,
         fragments: Vec::new(),
+        range: Vec::new(),
         measure: &measure,
     };
     textedit::edit(document, &request)
@@ -161,6 +163,7 @@ fn edit_with_size(
         font_size,
         allow_substitution: true,
         fragments: Vec::new(),
+        range: Vec::new(),
         measure: &measure,
     };
     textedit::edit(document, &request)
@@ -730,6 +733,7 @@ fn fragmented_tj_fragments_pair_by_origin_not_text() {
         allow_substitution: true,
         fragments: tail,
         measure: &measure,
+        range: Vec::new(),
     };
     let outcome = textedit::edit(&mut document, &request).unwrap();
     assert_eq!(
@@ -866,6 +870,7 @@ fn a_merged_edit_is_one_atomic_write_and_one_undo() {
         allow_substitution: true,
         fragments: tail,
         measure: &measure,
+        range: Vec::new(),
     };
     let outcome = textedit::edit(&mut document, &request).unwrap();
 
@@ -1049,11 +1054,74 @@ fn space_kern_gap_merges_a_kerned_word_break() {
         1,
         "foo and bar merge across the kerned space"
     );
-    // The joined text is the *operands'* bytes: the space lived in the kern, not in a glyph, so
-    // the merged run reads "foobar" while PDFium's box showed "foo bar". That is honest — the
-    // operands have no `0x20` to join — and the widened gap is still what let the seam merge.
-    assert_eq!(described[0].text, "foobar");
+    // P2.6 T26 item 4: the space lived in the kern, not in a glyph, so the operands have no
+    // `0x20` to join — but the page reads "foo bar", and the picker now says so. The separator
+    // is display-only; `EditRequest::expected` stays the operands' bytes (`foobar`), which is
+    // what the write path re-validates against the content stream.
+    assert_eq!(described[0].text, "foo bar");
     assert_eq!(described[0].fragment_count, 2);
+}
+
+/// P2.6 T26 item 4: the whole point of the reading-order pass is that a kern seam the page
+/// reads as a word space is still **editable**. The display text gains the separator; the
+/// write path must accept the document's own bytes and replace them.
+#[test]
+fn a_kerned_word_break_is_editable_without_the_display_space() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("space-kern-gap.pdf");
+    let document = load(&path);
+    let runs = pdfium_runs(&path, 0);
+    let described = textedit::describe_runs(&document, 0, &runs, &char_grid(&path, 0)).unwrap();
+    let line = &described[0];
+    assert_eq!(line.text, "foo bar");
+    assert_eq!(line.fragment_count, 2);
+    assert!(line.admissibility.editable, "the merged run is editable");
+
+    let mut document = document;
+    let measure = move |_text: &str| Ok(40.0);
+    textedit::edit(
+        &mut document,
+        &textedit::EditRequest {
+            page: 0,
+            run_id: line.run_id.clone(),
+            // The head *operand*, not the display text: `expected` is re-validated against the
+            // content stream, where no space exists.
+            expected: line.fragments[0].text.clone(),
+            replacement: "baz qux".to_string(),
+            old_width: line.width.unwrap_or(0.0),
+            font_size: line.font_size,
+            allow_substitution: true,
+            fragments: line
+                .fragments
+                .iter()
+                .skip(1)
+                .map(|fragment| textedit::FragmentRef {
+                    run_id: fragment.run_id.clone(),
+                    text: fragment.text.clone(),
+                })
+                .collect(),
+            range: Vec::new(),
+            measure: &measure,
+        },
+    )
+    .expect("the edit is admitted");
+
+    let edited = std::env::temp_dir().join("kern-seam-edited.pdf");
+    document.save(&edited).unwrap();
+    let reread = textedit::describe_runs(
+        &load(&edited),
+        0,
+        &pdfium_runs(&edited, 0),
+        &char_grid(&edited, 0),
+    )
+    .unwrap();
+    let text: String = reread.iter().map(|run| run.text.as_str()).collect();
+    assert!(
+        text.contains("baz qux"),
+        "the replacement is in the page text: {text}"
+    );
 }
 
 // --- P2.4.2 T22: the width quota is the run's own span, never a line box ----------
@@ -1241,6 +1309,10 @@ fn a_substitution_edit_re_indexes_the_copy_so_search_finds_the_new_text() {
 /// its `Unmeasurable` arm, and the gate refused **every** run on the page with "font carries no
 /// width metrics". That is the Maastricht lockout in miniature.
 ///
+/// P2.6 T26 also reads `/Widths`, which this fixture *does* publish (224 codes, all 600). The
+/// run is therefore measurable in-file now, exactly as the Maastricht Times resources are; the
+/// grid still has to agree with it.
+///
 /// T23a measures the span from PDFium's character grid instead: the run is editable and its
 /// quota is the union of its characters' advance boxes.
 #[test]
@@ -1263,13 +1335,15 @@ fn an_unmeasurable_font_run_is_measurable_from_the_char_grid() {
     );
     assert_eq!(run.admissibility.gate, None);
 
-    // The font really is unmeasurable in-file: the raw run's advance fell back to the
-    // approximation (`0.5em` per character), not an exact metric.
+    // The fixture publishes `/Widths` (600/1000 for every code), so the advance is exact and
+    // must agree with the rendered span below rather than fall back to the `0.5em`
+    // approximation. P2.6 T26 made this measurable; before it, only the grid was.
     let raw = first_run(&document, 0);
     assert_eq!(raw.text, "Data Science");
     assert_eq!(
-        raw.advance_exact, None,
-        "the fixture's font carries no in-file metrics"
+        raw.advance_exact,
+        Some(86.4),
+        "12 codes x 600/1000 at 12pt, from the font's own /Widths"
     );
 
     // The char-grid quota is the rendered span, 12 glyphs x 0.6em at 12pt = 86.4pt.
@@ -1349,6 +1423,7 @@ fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
         allow_substitution: true,
         fragments: tail,
         measure: &measure,
+        range: Vec::new(),
     };
     textedit::edit(&mut document, &request).expect("a short replacement fits the merged line");
 
@@ -1375,6 +1450,7 @@ fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
         allow_substitution: true,
         fragments: tail,
         measure: &measure,
+        range: Vec::new(),
     };
     let error = textedit::edit(&mut document, &request)
         .expect_err("a line-wide replacement into the merged run must be refused");
@@ -1475,6 +1551,7 @@ fn t24_real_maastricht_line_one_is_one_editable_run() {
         allow_substitution: true,
         fragments: tail,
         measure: &measure,
+        range: Vec::new(),
     };
     textedit::edit(&mut document, &request)
         .expect("a narrower replacement fits the merged line's span");
@@ -1502,6 +1579,7 @@ fn t24_real_maastricht_line_one_is_one_editable_run() {
         allow_substitution: true,
         fragments: tail,
         measure: &measure,
+        range: Vec::new(),
     };
     let error = textedit::edit(&mut document, &request)
         .expect_err("a line-wide replacement must hard-refuse");
@@ -1537,16 +1615,20 @@ fn t24_synthetic_wide_glyph_tj_merges_via_character_alignment() {
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
         .unwrap();
 
-    assert_eq!(runs.len(), 1, "the 22 operands are one run, not 22 singletons");
+    assert_eq!(
+        runs.len(),
+        1,
+        "the 22 operands are one run, not 22 singletons"
+    );
     let line = &runs[0];
     assert_eq!(line.text, "5 month University level Data Science ");
     assert_eq!(line.fragment_count, 22, "every operand folded in");
     assert!(line.admissibility.editable);
-    assert!(!line.box_suspicious, "a genuinely merged line is not suspicious");
-    assert_eq!(
-        line.pair_confidence,
-        Some(textedit::PairConfidence::Strong)
+    assert!(
+        !line.box_suspicious,
+        "a genuinely merged line is not suspicious"
     );
+    assert_eq!(line.pair_confidence, Some(textedit::PairConfidence::Strong));
     assert_eq!(
         line.width,
         Some(342.0),
@@ -1574,7 +1656,13 @@ fn t24_generated_space_is_skipped_when_aligning_fragments() {
 
     assert_eq!(runs.len(), 1, "Data + Sci merge across the generated seam");
     let line = &runs[0];
-    assert_eq!(line.text, "DataSci", "the joined operand text");
+    // P2.6 T26 item 4: item 3 of the T26 list asked this case to keep the operands' bytes. The
+    // reading-order pass makes the picker agree with the page instead, which reconstructs the
+    // kern as a word space. The operands still carry no `0x20`; the separator is display-only.
+    assert_eq!(
+        line.text, "Data Sci",
+        "the page reads two words across the kern"
+    );
     assert_eq!(line.fragment_count, 2, "both operands folded in");
 
     // The seam really is a PDFium-generated space: a grid character that occupies a slot but no
@@ -1587,13 +1675,15 @@ fn t24_generated_space_is_skipped_when_aligning_fragments() {
         .count();
     assert_eq!(generated, 1, "PDFium synthesised exactly one seam space");
 
-    // The merged span is the sum of the two fragments' own rendered glyph runs — 4 glyphs and 3
-    // glyphs of 0.6em at 15pt (9pt a glyph): 36 + 27 = 63. A mis-assigned generated character
-    // would shift one fragment's window by a glyph and this sum would not come out exact.
+    // The merged span is the two fragments' own glyph runs — 4 glyphs and 3 glyphs of 0.6em at
+    // 15pt (9pt a glyph): 36 + 27 = 63 — plus the 6pt seam the page really advances across
+    // (`Data` ends at 82, `Sci` begins at 88). The generated character itself is still charged
+    // to nobody: it has zero advance, so a mis-assigned slot would shift a fragment's window by
+    // a whole glyph and this 69 would not come out exact.
     assert_eq!(
         line.width,
-        Some(63.0),
-        "Data (36pt) + Sci (27pt): the generated space was skipped, not charged"
+        Some(69.0),
+        "Data (36pt) + seam (6pt) + Sci (27pt): the generated slot itself is not charged"
     );
 }
 
@@ -1607,8 +1697,13 @@ fn t25_maastricht_missing_word_line_is_one_editable_run() {
     let path = fixture("real-maastricht-brochure.pdf");
     let document = load(&path);
     let page = 2u32;
-    let runs = textedit::describe_runs(&document, page, &pdfium_runs(&path, page), &char_grid(&path, page))
-        .unwrap();
+    let runs = textedit::describe_runs(
+        &document,
+        page,
+        &pdfium_runs(&path, page),
+        &char_grid(&path, page),
+    )
+    .unwrap();
     for r in &runs {
         // The user's broken pick was an *editable* `an` singleton the picker offered mid-line.
         // Other operations on the page do contain non-editable `an` fragments (different
@@ -1629,7 +1724,10 @@ fn t25_maastricht_missing_word_line_is_one_editable_run() {
     // T21 intentionally reports as single runs; that is next ticket's territory, not the
     // phantom-singleton regression T25 pins down.)
     assert!(line.admissibility.editable, "the line is editable");
-    assert!(line.fragment_count > 1, "the line is merged, not a singleton");
+    assert!(
+        line.fragment_count > 1,
+        "the line is merged, not a singleton"
+    );
     assert!(
         line.text.contains("statistics an"),
         "the stranded `an` is merged into the line: {:?}",
@@ -1689,4 +1787,163 @@ fn t25_maastricht_syllabus_line_is_one_editable_run() {
             .any(|r| r.admissibility.editable && r.text.trim() == "concepts of pro"),
         "the truncated `concepts of pro` pick must be gone"
     );
+}
+
+/// T26 regression guard: the two T25 defects the user actually saw on page 2 (index 2).
+///
+/// 1. `Fundamental` was invisible to the editable pick: the `ce. `/`Fu` seam was refused
+///    because the two fragments live in *different font resources* (`F4`/`F5`), even though
+///    both are Times at 14.064pt. Merging by **style class** rather than resource name is
+///    what joins them.
+/// 2. `Scientific` was selectable on its own while `P` looked editable: the `TJ` operands
+///    `(Scienti)` `(fi)` `(c )` `(P)` … never merged because the resource published only
+///    `/Widths` — no AFM entry, no embedded program — so `advance_exact` was `None` and the
+///    chain broke at the very first seam. Reading `/Widths` makes every seam exact.
+#[test]
+fn t26_maastricht_page_two_runs_are_whole_lines() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("real-maastricht-brochure.pdf");
+    let document = load(&path);
+    let page = 2u32;
+    let runs = textedit::describe_runs(
+        &document,
+        page,
+        &pdfium_runs(&path, page),
+        &char_grid(&path, page),
+    )
+    .unwrap();
+
+    // Defect 1: `Fundamental` is reachable, and as part of the whole syllabus line — not as a
+    // truncated `concepts of pro` pick and not as an invisible fragment.
+    let line = runs
+        .iter()
+        .find(|run| run.text.contains("Fundamental concepts"))
+        .expect("`Fundamental` is part of an editable run");
+    assert!(line.admissibility.editable);
+    assert!(
+        line.text
+            .contains("programming in Data Science. Fundamental concepts"),
+        "the seam is joined: {:?}",
+        line.text
+    );
+
+    // Defect 2: the Scientific Programming heading is ONE run ending in "II", not `Scienti`
+    // plus separately-pickable fragments.
+    let heading = runs
+        .iter()
+        .find(|run| run.text.contains("Scientific Programming"))
+        .expect("the heading is one editable run");
+    assert!(
+        heading.admissibility.editable,
+        "{:?}",
+        heading.admissibility
+    );
+    assert_eq!(
+        heading.text.trim(),
+        "Scientific Programming I and II",
+        "the whole heading, including the previously severed `P`"
+    );
+    assert!(heading.fragment_count > 5, "the TJ operands folded in");
+    assert!(
+        !runs.iter().any(|run| run.admissibility.editable
+            && ["Scienti", "fi", "c ", "P"].contains(&run.text.as_str())),
+        "no mid-heading fragment is offered as its own pick"
+    );
+}
+
+/// P2.6 T26: a selection is a **range of runs**, and one write replaces the whole range.
+///
+/// Two `Tj` operands on one baseline, one style, one size: the shape left over when a line
+/// is split across operations. Replacing the selection writes the head and clears the second
+/// operand in the *same* write, so the user's one edit is one undo.
+#[test]
+fn t26_a_selection_range_is_replaced_in_one_write() {
+    let mut document = testpdf::two_run_line();
+    let runs =
+        textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap()).unwrap();
+    assert_eq!(runs.len(), 2, "the fixture draws two operands");
+
+    let (head, beside) = (runs[0].clone(), runs[1].clone());
+    let width = measured_width("ALPHA BETA", head.font_size);
+    let measure = move |_text: &str| Ok(width);
+    let request = textedit::EditRequest {
+        page: 0,
+        run_id: head.id.clone(),
+        expected: head.text.clone(),
+        replacement: "ALPHA BETA".to_string(),
+        old_width: width,
+        font_size: head.font_size,
+        allow_substitution: false,
+        fragments: Vec::new(),
+        range: vec![textedit::FragmentRef {
+            run_id: beside.id.clone(),
+            text: beside.text.clone(),
+        }],
+        measure: &measure,
+    };
+    textedit::edit(&mut document, &request).expect("one contiguous same-style range");
+
+    let after =
+        textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap()).unwrap();
+    assert_eq!(after.len(), 1, "the cleared operand is no longer a run");
+    assert_eq!(
+        after[0].text, "ALPHA BETA",
+        "the head carries the replacement"
+    );
+}
+
+/// A range that spans two baselines is refused `selection-range`, never written.
+#[test]
+fn t26_a_range_across_lines_is_refused() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("real-maastricht-brochure.pdf");
+    let page = 2u32;
+    let document = load(&path);
+    let runs = textedit::describe_runs(
+        &document,
+        page,
+        &pdfium_runs(&path, page),
+        &char_grid(&path, page),
+    )
+    .unwrap();
+    let head = runs
+        .iter()
+        .find(|run| run.admissibility.editable && run.text.contains("Scientific Programming"))
+        .expect("the heading is editable");
+    let below = runs
+        .iter()
+        .find(|run| {
+            run.admissibility.editable
+                && run
+                    .rect
+                    .zip(head.rect)
+                    .is_some_and(|(a, b)| a.y0 > b.y0 + 5.0)
+        })
+        .expect("a run on a later line");
+
+    let width = head.width.unwrap_or(0.0);
+    let measure = move |_text: &str| Ok(width);
+    let mut document = load(&path);
+    let request = textedit::EditRequest {
+        page,
+        run_id: head.fragments[0].run_id.clone(),
+        expected: head.fragments[0].text.clone(),
+        replacement: "shorter".to_string(),
+        old_width: width,
+        font_size: head.font_size,
+        allow_substitution: false,
+        fragments: Vec::new(),
+        range: vec![textedit::FragmentRef {
+            run_id: below.run_id.clone(),
+            text: below.text.clone(),
+        }],
+        measure: &measure,
+    };
+    let error = textedit::edit(&mut document, &request).expect_err("a cross-line range refuses");
+    assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+    assert!(error.to_string().contains("selection-range"), "{error}");
 }

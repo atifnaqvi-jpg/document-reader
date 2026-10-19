@@ -248,6 +248,10 @@ pub enum FontMetrics {
     Afm { base_font: String },
     /// An embedded font measured from its own `hmtx`, via the program `ttf-parser` reads.
     TrueType { program: Vec<u8> },
+    /// A simple font measured from the `/Widths` array the PDF itself carries, indexed from
+    /// `/FirstChar`. This is the only source for a *non-embedded* face (the Maastricht
+    /// brochure's Times/Arial), and it is the same array a viewer uses to lay the run out.
+    SimpleWidths { first_char: u16, widths: Vec<u16> },
     /// No usable metric source: the caller will be handed `None` rather than a guess.
     Nominal,
 }
@@ -272,6 +276,12 @@ impl FontMetrics {
         if let Some(program) = embedded_font_program(document, page_id, font_key) {
             return FontMetrics::TrueType { program };
         }
+        // A non-embedded face still publishes its advances in `/Widths`. Reading them is the
+        // difference between an exact seam and a phantom one: the Maastricht Times/Arial
+        // resources are in this class, and before this they resolved to `Nominal`.
+        if let Some((first_char, widths)) = simple_widths(document, page_id, font_key) {
+            return FontMetrics::SimpleWidths { first_char, widths };
+        }
         FontMetrics::Nominal
     }
 
@@ -283,9 +293,69 @@ impl FontMetrics {
         match self {
             FontMetrics::Afm { base_font } => afm::text_width(base_font, text, font_size),
             FontMetrics::TrueType { program } => true_type_advance(program, text, font_size),
+            FontMetrics::SimpleWidths { first_char, widths } => {
+                simple_widths_advance(*first_char, widths, text, font_size)
+            }
             FontMetrics::Nominal => None,
         }
     }
+}
+
+/// Reads a PDF number that may have been written as an integer or a real.
+fn number(object: &Object) -> Option<f32> {
+    match object {
+        Object::Integer(value) => Some(*value as f32),
+        Object::Real(value) => Some(*value),
+        _ => None,
+    }
+}
+
+/// Reads a simple font's `/Widths` array and `/FirstChar`, the advances the PDF itself
+/// publishes for a non-embedded face.
+///
+/// Returns `None` when the dictionary has no `/Widths` (the Maastricht `F2`/`F9` Arial
+/// resources are in that class, and they must stay unmeasurable rather than be guessed at).
+fn simple_widths(document: &Document, page_id: ObjectId, font_key: &[u8]) -> Option<(u16, Vec<u16>)> {
+    let fonts = document.get_page_fonts(page_id).ok()?;
+    let font = fonts.get(font_key).copied()?;
+    // `/Widths` is routinely written as an indirect array, and `font.get` hands back the
+    // reference rather than the array; resolve it before reading.
+    let resolve = |object: &Object| -> Option<Object> {
+        match object {
+            Object::Reference(id) => document.get_object(*id).ok().cloned(),
+            other => Some(other.clone()),
+        }
+    };
+    let first_char = number(&resolve(font.get(b"FirstChar").ok()?)?)?;
+    let array = resolve(font.get(b"Widths").ok()?)?;
+    let array = array.as_array().ok()?;
+    let widths = array
+        .iter()
+        .map(|width| number(width).map(|w| w.round() as u16))
+        .collect::<Option<Vec<u16>>>()?;
+    if widths.is_empty() {
+        return None;
+    }
+    Some((first_char.round() as u16, widths))
+}
+
+/// Sums the published `/Widths` of `text` in a simple font.
+///
+/// A code outside the `/FirstChar` range, or one whose published width is zero, makes the
+/// whole measurement `None`: the font dictionary does not describe that glyph, so an advance
+/// for it would be fiction — the same contract [`true_type_advance`] holds for a missing
+/// `cmap` entry.
+fn simple_widths_advance(first_char: u16, widths: &[u16], text: &str, font_size: f32) -> Option<f32> {
+    let mut thousandths: f32 = 0.0;
+    for code in text.bytes() {
+        let index = (code as u16).checked_sub(first_char)? as usize;
+        let width = *widths.get(index)?;
+        if width == 0 {
+            return None;
+        }
+        thousandths += f32::from(width);
+    }
+    Some(thousandths * font_size / 1000.0)
 }
 
 /// Sums the `hmtx` advances of `text` in an embedded TrueType program.
@@ -455,6 +525,40 @@ mod tests {
             metrics.advance("Z", 24.0).is_none(),
             "an unmapped glyph has no advance, so the caller refuses rather than guessing"
         );
+    }
+
+    /// The regression `/Widths` support exists for: a *non-embedded* face that publishes its
+    /// advances must measure exactly instead of resolving to `Nominal`.
+    #[test]
+    fn a_non_embedded_font_is_measured_from_its_widths() {
+        let document = testpdf::simple_font_widths_page();
+        let page_id = textlocate::page_id(&document, 0).unwrap();
+        let run = &textlocate::locate_runs(&document, page_id).unwrap()[0];
+        let metrics = FontMetrics::resolve(&document, page_id, &run.font_key);
+
+        assert!(
+            matches!(metrics, FontMetrics::SimpleWidths { .. }),
+            "a non-embedded face with /Widths must resolve to SimpleWidths, not Nominal"
+        );
+        // The fixture publishes 500 for every code in 32..=126.
+        let width = metrics.advance("Test", 10.0).expect("published widths are usable");
+        assert!((width - 4.0 * 500.0 * 10.0 / 1000.0).abs() < 0.001, "{width}");
+        assert!(
+            metrics.advance("\u{2192}", 10.0).is_none(),
+            "a code outside the published range has no advance"
+        );
+    }
+
+    /// A font with no `/Widths` must stay unmeasurable, so the caller keeps refusing rather
+    /// than substituting a guess (T22).
+    #[test]
+    fn a_font_without_widths_stays_nominal() {
+        let document = testpdf::no_widths_page();
+        let page_id = textlocate::page_id(&document, 0).unwrap();
+        let run = &textlocate::locate_runs(&document, page_id).unwrap()[0];
+        let metrics = FontMetrics::resolve(&document, page_id, &run.font_key);
+        assert!(matches!(metrics, FontMetrics::Nominal));
+        assert!(metrics.advance("x", 10.0).is_none());
     }
 
     /// MECH-B's absence: a glyph outside WinAnsi refuses with `GLYPHS_NOT_COVERABLE`.
