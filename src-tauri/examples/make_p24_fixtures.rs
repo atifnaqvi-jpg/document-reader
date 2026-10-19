@@ -127,6 +127,11 @@ fn main() {
             "tj-kern-seam.pdf",
             testpdf::bytes(&testpdf::tj_kern_seam()),
         ),
+        // P2.6 T26: two operands, one baseline, one style -- the selection-range shape.
+        (
+            "two-run-line.pdf",
+            testpdf::bytes(&testpdf::two_run_line()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

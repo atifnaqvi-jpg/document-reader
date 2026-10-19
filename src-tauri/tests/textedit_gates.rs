@@ -39,7 +39,6 @@ use std::path::{Path, PathBuf};
 use document_reader_lib::editor::geometry::PdfRect;
 use document_reader_lib::editor::protect;
 use document_reader_lib::editor::runmetrics::{self, PdfiumRun};
-use document_reader_lib::editor::testpdf;
 use document_reader_lib::editor::textedit;
 use document_reader_lib::editor::textlocate::{self, RunId};
 use document_reader_lib::model::AppError;
@@ -1860,7 +1859,8 @@ fn t26_maastricht_page_two_runs_are_whole_lines() {
 /// operand in the *same* write, so the user's one edit is one undo.
 #[test]
 fn t26_a_selection_range_is_replaced_in_one_write() {
-    let mut document = testpdf::two_run_line();
+    let path = fixture("two-run-line.pdf");
+    let mut document = load(&path);
     let runs =
         textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap()).unwrap();
     assert_eq!(runs.len(), 2, "the fixture draws two operands");

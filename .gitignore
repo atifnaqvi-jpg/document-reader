@@ -19,6 +19,10 @@ Thumbs.db
 
 # Agent working state (kept on disk, not in the repo)
 .openhands/
+automations/
+
+# Local test documents (real-world PDFs used for manual acceptance, not fixtures)
+Maastricht Data Science Program Feb 2022 - Brochure.pdf
 
 # Built installers (large binaries, delivered out-of-band)
 artifacts/

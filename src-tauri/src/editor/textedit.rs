@@ -1264,7 +1264,7 @@ fn measured_span(document: &Document, page: u32, run: &RawRun) -> Option<f32> {
 ///
 /// The union of the group's *box* is never used: a box may be a whole line the group only
 /// occupies part of, which is the 0.4.1 hole.
-
+///
 /// True when the group's union box is wide because **the group's own chain** left fragments
 /// behind in it (P2.5 T25).
 ///
