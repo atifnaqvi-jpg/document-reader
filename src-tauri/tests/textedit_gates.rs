@@ -1788,6 +1788,84 @@ fn t25_maastricht_syllabus_line_is_one_editable_run() {
     );
 }
 
+/// T26 regression guard: the `Overview` line on page 3 (index 2), which the user reported as
+/// split in two — a selectable `Overview`, then only `O` editable and the rest of the line as
+/// single-character picks.
+///
+/// The line's boxes overlap: the bold run (`F4`) and the roman run (`F5`) are separate PDFium
+/// objects whose ink nearly abut, and `O` opens 0.48pt to the *left* of its own box's ink — but
+/// still 3.19pt inside that box. `pair_run`'s tolerance reaches past a box's border by 0.25em,
+/// so both boxes "contained" the origin, and the leftmost-edge tiebreak handed `O` to the
+/// **preceding** box. Its span then pointed at the previous operation's characters, the seam
+/// to `v` measured backwards, and the chain stopped dead: the tail of the line fell out as
+/// one pick per operand.
+///
+/// Preferring the box the origin sits deeper inside keeps the pair on its own ink. This is a
+/// regression guard, not a tolerance change: the boxes and the merge window are untouched.
+#[test]
+fn t26_maastricht_overview_line_is_one_editable_run() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("real-maastricht-brochure.pdf");
+    let document = load(&path);
+    let page = 2u32;
+    let runs = textedit::describe_runs(
+        &document,
+        page,
+        &pdfium_runs(&path, page),
+        &char_grid(&path, page),
+    )
+    .unwrap();
+
+    let line = runs
+        .iter()
+        .find(|run| run.text.contains("Overview on data preparations"))
+        .expect("the Overview line is one merged run");
+
+    assert_eq!(
+        line.text, "Overview on data preparations techniques, (data cleaning, data binning, ",
+        "the whole line from `Overview` to the trailing comma is one run"
+    );
+    assert_eq!(line.fragment_count, 44, "all 44 operands folded in");
+    assert!(
+        line.admissibility.editable,
+        "the line is editable: {:?}",
+        line.admissibility
+    );
+    assert_eq!(
+        line.pair_confidence,
+        Some(textedit::PairConfidence::Strong),
+        "every fragment pairs with its own box"
+    );
+
+    // The reported symptom: `O` alone, and the tail as per-operand picks. Neither may return.
+    assert!(
+        !runs.iter().any(|run| run.text == "O"),
+        "`O` is not its own pick"
+    );
+    assert!(
+        !runs
+            .iter()
+            .any(|run| run.admissibility.editable && run.text == "v"),
+        "`v` is not its own pick"
+    );
+    assert!(
+        !runs
+            .iter()
+            .any(|run| run.admissibility.editable && run.text == ", " && run.fragment_count == 1),
+        "the line's trailing comma is not a lone pick"
+    );
+
+    // `Overview` continues from the bold run it follows, so the line's opening pick carries
+    // both operations — the user's "separates them into 2 parts".
+    assert!(
+        runs.iter()
+            .any(|run| run.text == "Understanding and data Preparation "),
+        "the bold lead-in stays its own run"
+    );
+}
+
 /// T26 regression guard: the two T25 defects the user actually saw on page 2 (index 2).
 ///
 /// 1. `Fundamental` was invisible to the editable pick: the `ce. `/`Fu` seam was refused

@@ -492,7 +492,7 @@ fn pair_run(
     let tol = origin_tolerance(run.font_size);
 
     let mut best: Option<Pair> = None;
-    let mut best_key: Option<(bool, f32, f32, bool)> = None;
+    let mut best_key: Option<(bool, f32, f32, f32, bool)> = None;
     for (index, rect) in rects.iter().enumerate() {
         // `contains` uses the box grown by the tolerance, which absorbs the ink offset and a
         // small metric disagreement without reaching a neighbouring line.
@@ -506,11 +506,30 @@ fn pair_run(
         let baseline = baselines.get(index).copied().unwrap_or(rect.y0);
         let baseline_delta = (run.origin.1 - baseline).abs();
         let strong = baseline_delta <= BASELINE_TOLERANCE;
-        // Prefer strong over weak, then the smallest baseline delta, then the leftmost box —
-        // and, per §3 step 2, exact text equality as the *final* tiebreaker when two boxes
-        // agree on all of it. Text is only ever a tiebreaker here: it never decides a pair the
-        // geometry already separated, which is the whole point of T17.
-        let key = (!strong, baseline_delta, rect.x0, run.text != rect.text);
+        // Prefer strong over weak, then the smallest baseline delta, then the box the origin
+        // sits deepest inside — and, per §3 step 2, exact text equality as the *final*
+        // tiebreaker when two boxes agree on all of it. Text is only ever a tiebreaker here: it
+        // never decides a pair the geometry already separated, which is the whole point of T17.
+        //
+        // Depth is measured as how far the origin falls outside the box (0 when inside), not as
+        // the leftmost edge. The tolerance above deliberately reaches past a box's border, so at
+        // a seam two boxes can both contain the origin, and leftmost then hands the run to the
+        // *previous* box: `O` of `Overview` opens 0.48pt left of the ink of its own box and
+        // 3.19pt past the bold box the line's earlier operation drew, which split the whole
+        // tail of the line into singletons. Only when both boxes contain the origin equally
+        // (a word box inside a line box) does the leftmost edge still decide, as before.
+        let overshoot = (rect.x0 - run.origin.0)
+            .max(run.origin.0 - rect.x1)
+            .max(rect.y0 - run.origin.1)
+            .max(run.origin.1 - rect.y1)
+            .max(0.0);
+        let key = (
+            !strong,
+            baseline_delta,
+            overshoot,
+            rect.x0,
+            run.text != rect.text,
+        );
         if best_key.map_or(true, |current| key < current) {
             best_key = Some(key);
             best = Some(Pair {
