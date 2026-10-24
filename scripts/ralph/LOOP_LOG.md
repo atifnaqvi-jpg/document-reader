@@ -318,7 +318,7 @@ when `ink_y` is reverted to `run.origin.1`.
   `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`.
 - Gate: cargo test 426 passed (334 lib + 92 integration), clippy clean, tsc clean,
   vitest 62 passed.
-- Commit: see below.
+- Commit: `74333ab`.
 - Learned:
   - **The rename was the defect, not just the doc.** Ruling B-7 renamed
     `shared_actualtext_is_reported_not_rewritten` → `shared_actualtext_is_copied_before_it_is_rewritten`
