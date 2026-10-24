@@ -9,7 +9,7 @@
 #   ./scripts/ralph/loop.sh [--max-iterations N] [--agent-cmd "..."] [--dry-run]
 #
 # Environment:
-#   RALPH_AGENT_CMD   command used to run one iteration (default: openhands headless, see below)
+#   RALPH_AGENT_CMD   command used to run one iteration (default: scripts/ralph/run-iteration.sh)
 #   RALPH_GATE_ONLY   set to 1 to run the gate without invoking an agent (useful in CI)
 
 set -uo pipefail
@@ -31,8 +31,10 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$AGENT_CMD" ]; then
-  # The OpenHands CLI in headless mode reads the prompt from a file and exits when done.
-  AGENT_CMD="openhands --headless --always-approve --exit-without-confirmation -f scripts/ralph/PROMPT.md"
+  # A fresh conversation on the local agent server. The CLI cannot be used here:
+  # `openhands --headless` requires `~/.openhands/agent_settings.json`, which this
+  # environment never writes (the Agent Canvas backend owns the settings).
+  AGENT_CMD="scripts/ralph/run-iteration.sh"
 fi
 
 log()  { printf '\n[ralph] %s\n' "$*"; }
