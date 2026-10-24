@@ -239,3 +239,57 @@ when `ink_y` is reverted to `run.origin.1`.
     but every real release was tagged `version-0.4.4`. 0.4.4 built only because the tag pointed
     at the branch head pushed in the same event. Tagging 0.5.0 `version-0.5.0` on a commit that
     is not the branch head produces **no installer**. Fix the glob before the release tag.
+
+## Iteration 7 — T-4b — green
+
+- Task: fix the release workflow so a release tag both triggers the Windows installer and gets
+  the installer attached — T-4b, restated after its stated diagnosis turned out to be false.
+- Test: `a_tag_that_is_not_a_release_does_not_trigger_the_installer` (red before: **yes** —
+  `the trigger globs ["v*"] also match non-release tags ["verify-ci", "vendor-drop", "vnext",
+  "version-notes"]`), `no_tag_outside_the_release_conventions_publishes_a_release` (red before:
+  **yes** — `` `if: startsWith(github.ref, 'refs/tags/v')` publishes a GitHub Release for these
+  non-release tags ``). Two companion tests were green before and stay green as controls:
+  `the_trigger_accepts_every_release_tag_convention` and
+  `every_tag_that_triggers_the_build_also_gets_the_installer_attached` — they are the ones that
+  would fail if I narrowed the trigger past `version-0.4.4`, so they are not decoration.
+- Files: `.github/workflows/release-windows.yml`, `src-tauri/tests/release_workflow.rs` (new),
+  `scripts/ralph/IMPLEMENTATION_PLAN.md`
+- Gate: cargo test 422 passed (334 lib + 82 integration, incl. 6 new), clippy clean, tsc clean,
+  vitest 62 passed
+- Commit: see `fix(ci): trigger and publish only on real release tags`
+- Learned:
+  - **T-4b's premise was wrong: `v*` DOES match `version-0.4.4`.** GitHub filter patterns say
+    `*` matches any run of characters, and the docs' own table states `v2*` "matches branch and
+    tag names that start with `v2`" (workflow-syntax § patterns-to-match-branches-and-tags).
+    The prior iteration inferred "no trigger" from the tag name alone and never checked the
+    glob semantics. Proof from repo evidence, no API needed: `release-windows.yml` has **no**
+    `branches:` trigger, so its `event=push` run 38997489826 can only have come from the tag
+    push; and the installer asset *was* published, which requires `refs/tags/version-0.4.4` to
+    satisfy `startsWith(github.ref, 'refs/tags/v')` at the attach step. Both facts say the tag
+    matched.
+  - **So the real defect is the opposite: `v*` is too wide.** It matches every tag starting with
+    the letter v, and because the attach step guarded on `refs/tags/v` too, any stray tag
+    (`verify-ci`, `vnext`, `vendor-drop`) both spent a Windows build *and* published a GitHub
+    Release named after itself. Trigger is now `v[0-9]*` + `version-[0-9]*`; both conventions
+    still work, nothing else does.
+  - GitHub expressions cannot test a tag's *name* (no regex, no `contains`-on-refname that
+    distinguishes shapes cleanly), so the attach guard cannot re-implement the trigger. It is
+    now `startsWith(github.ref, 'refs/tags/')` — tag vs branch only — and **the trigger globs
+    are the single place that decides what counts as a release.** Do not "harden" the guard with
+    `contains('.')`: `vnext.1` passes that.
+  - The test reads the workflow as text (no YAML crate is a dependency, and adding one for a
+    three-level block is not worth it). `tag_globs` is indentation-driven, so **re-indenting
+    `on:`/`push:`/`tags:` will silently yield zero globs** — the test asserts the list is
+    non-empty for that reason.
+  - `the_glob_matcher_follows_the_documented_semantics` exists because the matcher is test
+    infrastructure: a matcher returning `false` for everything would make the non-release test
+    pass "by the fix", one returning `true` would pass it while proving nothing. It caught its
+    own bug on first run (`*` was crossing `/`), which is exactly the class of error the test is
+    for.
+  - **`cargo fmt --check` is already red at HEAD** in 11 untouched files (testpdf.rs, export.rs,
+    textlocate.rs, textedit.rs, session.rs, substitute.rs, protect.rs, tests/export.rs,
+    tests/textedit_gates.rs, examples/make_p24_fixtures.rs). It is not in the loop gate; do not
+    "fix" it as a drive-by. Format only files you add (`rustfmt --edition 2021 <file>`).
+  - Release tags to use going forward: either `v<version>` or `version-<version>`; both are
+    accepted and both publish. `README.md` documents `v0.1.0`, the two most recent releases used
+    `version-*` — either is now correct, so no doc change was needed.

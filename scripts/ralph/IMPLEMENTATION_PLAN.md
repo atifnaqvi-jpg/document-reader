@@ -90,11 +90,24 @@ under P2.7.4.
       carrier said 0.4.5, which builds an installer named one version that reports another.
       `the_0_5_0_release_notes_cover_every_change_the_plan_claims` fails if any of the four
       shipped changes goes unmentioned.
-- [ ] **T-4b Release tag does not trigger the installer.** `.github/workflows/release-windows.yml`
+- [x] **T-4b Release tag does not trigger the installer.** `.github/workflows/release-windows.yml`
       triggers on tags matching `v*`; both real releases were tagged `version-0.4.4`, which does
       **not** match. The 0.4.4 build fired only because the tag pointed at the branch head that
       was pushed in the same event; a `version-*` tag on any other commit gets no build and no
       release asset. Fix the glob (or adopt `v*` tags) before tagging 0.5.0.
+      **Done — but the diagnosis above was wrong, and the fix is the opposite one.** `v*` *does*
+      match `version-0.4.4`: GitHub's filter syntax says `*` matches any run of characters, and
+      its own table spells out that `v2*` "matches branch and tag names that start with `v2`"
+      (workflow-syntax § patterns-to-match-branches-and-tags). The 0.4.4 evidence agrees twice:
+      the workflow has no `branches:` trigger, so its `event=push` run can only have come from
+      the tag push, and the installer asset was published, which needs the ref to start with
+      `refs/tags/v`. What was actually broken is that `v*` is too **wide** — it matches any tag
+      starting with the letter v, and the attach guard (`refs/tags/v`) then publishes a release
+      for each, so a stray `verify-ci` tag ships an installer named after itself. Trigger is now
+      `v[0-9]*` + `version-[0-9]*` (both conventions, nothing else); the attach guard is
+      `refs/tags/` (tag vs branch only — GitHub expressions cannot test the tag *name*), so the
+      trigger globs are the single place that decides which tags are releases.
+      `src-tauri/tests/release_workflow.rs` pins trigger, guard and the glob matcher itself.
 - [ ] **T-5** Commit the P2.7.1 body (code + fixtures + docs) as one feature commit, separate
       from H0.
 
