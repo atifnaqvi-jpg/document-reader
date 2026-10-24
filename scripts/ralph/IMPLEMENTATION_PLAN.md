@@ -151,6 +151,23 @@ under P2.7.4.
       A-6's marker, unstriking the stale §E path and renaming a file stem each fail exactly one
       test.
 
+- [x] **T-7 Widen the H0 rotation refusal to `cm`.** H0 read rotation from `Tm` alone, but the
+      renderer draws with `tm x ctm`. A page that rotates with `cm` and leaves `Tm` at the
+      identity — a common producer shape, and the shape the app's own `watermark` writes — was
+      still offered as editable with a horizontal `advance`: editable *and* mis-measured, the
+      exact failure H0 exists to remove.
+      Acceptance: a `cm` of `[0 1 -1 0 300 100]` with an identity `Tm` yields a run flagged
+      rotated and refused with `rotated-text` on both the picker and write paths; a translating
+      `cm` stays editable; a rotation undone by `Q` is not flagged.
+      **Done.** `TextMatrixWalk` now tracks the CTM with a `q`/`Q` stack (only the CTM — the
+      text-state parameters are reset by `BT`, not by `Q`, and stay as they were).
+      `is_rotated` reads the composed `matrix_mul(tm, ctm)`. The CTM is still not folded into
+      `origin`/`advance`, so this is strictly a refusal-widening: no measurement changed and no
+      gate was relaxed. Non-vacuity proved by mutation — reverting `is_rotated` to `tm` alone
+      fails `a_graphics_matrix_rotation_is_flagged_on_the_run` and
+      `refuses_a_run_rotated_by_the_graphics_matrix`; dropping the `Q` restore fails
+      `a_rotation_restored_by_q_does_not_flag_the_run`.
+
 ## H2. Next phase (order fixed by B-3 and the plan's own rule)
 
 - [!] **P2.7.3 XObjects** — copy-on-write per B-7. **Blocked on:** design doc

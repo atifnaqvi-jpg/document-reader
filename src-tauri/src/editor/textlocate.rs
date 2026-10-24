@@ -703,8 +703,13 @@ fn translate_operands(operands: &[Object]) -> Option<(f32, f32)> {
 /// A deliberately *partial* implementation of the PDF text machinery: `BT`, `Tm`, `Td`,
 /// `TD`, `T*`, `TL` and `Tf` size. It tracks the text matrix's translation and the font
 /// size, which is everything pairing and the font-size-relative merge tolerances need.
-/// `q`/`Q` graphics-state save/restore and CTM concatenation are **not** modelled -- the
-/// same honest boundary Stage 1 drew for `font_in_force`.
+///
+/// The CTM (`q`/`cm`/`Q`) is tracked **only** to decide whether a run is rotated (P2.7 T-7):
+/// the renderer draws text with `tm x ctm`, so a rotation carried by `cm` with an identity
+/// `Tm` is still rotated text. Only the CTM is saved and restored here -- the text-state
+/// parameters (`Tc`/`Tw`/`Tz`/`Ts`/`TL`/`Tf`), which are also graphics state, are reset by
+/// `BT` and not by `q`/`Q` in this walker. The CTM is never folded into [`Self::origin`]:
+/// that is the same honest boundary Stage 1 drew for `font_in_force`.
 #[derive(Debug, Clone)]
 struct TextMatrixWalk {
     tm: [f32; 6],
@@ -719,6 +724,10 @@ struct TextMatrixWalk {
     horizontal_scale: f32,
     /// `Ts`: baseline rise in points. Moves the ink, never the pen (P2.7.1 B-5).
     rise: f32,
+    /// The current transformation matrix (`cm`, ISO 32000-1 8.3.4), for rotation detection.
+    ctm: [f32; 6],
+    /// CTM saved by `q`, restored by `Q`. A stack, not a single slot: `q` nests.
+    ctm_stack: Vec<[f32; 6]>,
 }
 
 impl TextMatrixWalk {
@@ -732,6 +741,8 @@ impl TextMatrixWalk {
             word_spacing: 0.0,
             horizontal_scale: 100.0,
             rise: 0.0,
+            ctm: IDENTITY,
+            ctm_stack: Vec::new(),
         }
     }
 
@@ -810,6 +821,19 @@ impl TextMatrixWalk {
                     self.rise = value;
                 }
             }
+            "q" => self.ctm_stack.push(self.ctm),
+            // An unmatched `Q` must not invent a CTM: a malformed stream would otherwise be
+            // read as a transform the renderer never applied.
+            "Q" => {
+                if let Some(saved) = self.ctm_stack.pop() {
+                    self.ctm = saved;
+                }
+            }
+            "cm" => {
+                if let Some(matrix) = matrix_operands(&operation.operands) {
+                    self.ctm = matrix_mul(matrix, self.ctm);
+                }
+            }
             // `'` and `"` both perform a `T*` (move to the next line) before showing.
             "'" | "\"" => {
                 self.tlm = matrix_mul(translation(0.0, -self.leading), self.tlm);
@@ -843,7 +867,11 @@ impl TextMatrixWalk {
     /// refuse rather than be measured on the wrong axis.
     fn is_rotated(&self) -> bool {
         const EPSILON: f32 = 1e-4;
-        self.tm[1].abs() > EPSILON || self.tm[2].abs() > EPSILON
+        // Text space reaches the page through `tm x ctm`, so the axis a glyph advances along
+        // is the composed matrix's first column. Reading `tm` alone missed a `cm` rotation,
+        // which left the run editable while its `advance` was vertical (P2.7 T-7).
+        let composed = matrix_mul(self.tm, self.ctm);
+        composed[1].abs() > EPSILON || composed[2].abs() > EPSILON
     }
 }
 
@@ -2017,6 +2045,49 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "ROTATED");
         assert!(!runs[0].rotated);
+    }
+
+    /// P2.7 T-7: H0 read rotation from `Tm` only, so a rotation applied by `cm` — which the
+    /// renderer composes with `Tm` — was called editable with a horizontal `advance`. That is
+    /// editable *and* wrong, the exact failure H0 exists to remove. Rotation must be detected
+    /// in the composed frame.
+    #[test]
+    fn a_graphics_matrix_rotation_is_flagged_on_the_run() {
+        let document = testpdf::rotated_by_graphics_matrix();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "ROTATED");
+        assert!(
+            runs[0].rotated,
+            "a 90 degree `cm` with an identity `Tm` draws vertical text; it must be flagged rotated"
+        );
+    }
+
+    /// The control: a `cm` that only translates is not a rotation. Detection must not refuse
+    /// text just because the page brackets it in `q`/`cm`/`Q`.
+    #[test]
+    fn a_translating_graphics_matrix_is_not_flagged_as_rotated() {
+        let document = testpdf::translated_by_graphics_matrix();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].rotated, "a pure translation is not a rotation");
+    }
+
+    /// The CTM is graphics state: `Q` restores what `q` saved. A rotation undone before the
+    /// text is shown leaves an axis-aligned run, so the stack must be modelled rather than
+    /// treating any `cm` seen earlier on the page as still in force.
+    #[test]
+    fn a_rotation_restored_by_q_does_not_flag_the_run() {
+        let document = testpdf::rotation_restored_before_showing();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].rotated, "`Q` restores the identity, so this run is axis-aligned");
     }
 
     /// A matrix that scales but does not rotate is also not rotated: `Tz`-style horizontal

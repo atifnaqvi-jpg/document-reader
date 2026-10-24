@@ -1358,6 +1358,96 @@ pub fn rotated_text() -> Document {
     )
 }
 
+/// Text rotated by the **graphics** matrix (P2.7 T-7), not by `Tm`.
+///
+/// `cm` sets the CTM; the renderer composes `tm x ctm`, so this run is drawn vertically
+/// while its own `Tm` is the identity. H0 read only `Tm` and therefore called it editable
+/// with a horizontal `advance` — editable *and* mis-measured, the failure H0 exists to
+/// remove. `q`/`Q` bracket it so the CTM is a graphics-state property, as in real files.
+pub fn rotated_by_graphics_matrix() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    0.into(),
+                    1.into(),
+                    (-1).into(),
+                    0.into(),
+                    300.into(),
+                    100.into(),
+                ],
+            ),
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()]),
+            Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
+            Operation::new("ET", vec![]),
+            Operation::new("Q", vec![]),
+        ]],
+    )
+}
+
+/// The control for [`rotated_by_graphics_matrix`]: the same `q`/`cm`/`Q` scaffolding with a
+/// pure translation, which moves the run without rotating it. Detection must not refuse
+/// text merely because a `cm` was present.
+pub fn translated_by_graphics_matrix() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    100.into(),
+                    50.into(),
+                ],
+            ),
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()]),
+            Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
+            Operation::new("ET", vec![]),
+            Operation::new("Q", vec![]),
+        ]],
+    )
+}
+
+/// A rotated `cm` restored by `Q` before the text is shown (P2.7 T-7): the stack must put
+/// the identity back, so this run is axis-aligned and editable. A detection that ignored
+/// `Q` would refuse it.
+pub fn rotation_restored_before_showing() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    0.into(),
+                    1.into(),
+                    (-1).into(),
+                    0.into(),
+                    300.into(),
+                    100.into(),
+                ],
+            ),
+            Operation::new("Q", vec![]),
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()]),
+            Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
 /// The same text, same font, same size, with an axis-aligned matrix: the control for
 /// [`rotated_text`], proving the refusal is caused by the rotation and nothing else.
 pub fn unrotated_text() -> Document {

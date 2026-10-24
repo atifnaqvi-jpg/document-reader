@@ -3159,6 +3159,53 @@ mod tests {
         );
     }
 
+    /// P2.7 T-7: the same refusal must cover a run rotated by `cm` rather than `Tm`.
+    /// H0 read the text matrix alone, so this run was offered as editable with a horizontal
+    /// `advance` while the renderer drew it vertically — editable *and* mis-measured.
+    #[test]
+    fn refuses_a_run_rotated_by_the_graphics_matrix() {
+        let mut document = testpdf::rotated_by_graphics_matrix();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(run.rotated, "fixture must be rotated for this test to mean anything");
+
+        let gates = resolve_gates(&document, 0, &run).unwrap();
+        assert_eq!(font_admissibility(&gates).gate.as_deref(), Some("rotated-text"));
+
+        // The picker path, which is where a user would otherwise be offered the edit.
+        let described = describe_runs(
+            &document,
+            0,
+            &[],
+            &crate::editor::runmetrics::PdfiumCharGrid {
+                text: String::new(),
+                chars: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(described.len(), 1);
+        assert_eq!(
+            described[0].admissibility.gate.as_deref(),
+            Some("rotated-text")
+        );
+
+        let measure = measure_fixed(10.0);
+        let error = edit(&mut document, &request(&run, "X", 100.0, &measure)).unwrap_err();
+        assert!(error.to_string().contains("rotated-text"), "{error}");
+    }
+
+    /// The control for the test above: a `cm` that only translates leaves the run editable,
+    /// so the wider detection did not start refusing ordinary pages.
+    #[test]
+    fn a_run_translated_by_the_graphics_matrix_stays_editable() {
+        let document = testpdf::translated_by_graphics_matrix();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(!run.rotated);
+        let gates = resolve_gates(&document, 0, &run).unwrap();
+        assert!(font_admissibility(&gates).editable);
+    }
+
     /// The control for the refusal above: the same text in an axis-aligned matrix stays
     /// editable, so H0 did not make ordinary pages refuse.
     #[test]

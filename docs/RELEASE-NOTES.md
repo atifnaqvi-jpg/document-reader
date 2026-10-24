@@ -83,10 +83,13 @@ Found while testing the above, and fixed in the same phase:
 
 ### Rotation is refused, not mis-measured (hotfix, shipped separately)
 
-Rotated text (`Tm` with a non-zero off-diagonal) was reported editable while its advance was
-measured on the horizontal axis, so `fits-width` judged the wrong dimension: editable *and*
-wrong. Such runs now refuse with gate `rotated-text` and are still returned to the picker, so
-the UI can explain the refusal. Correct measurement lands in P2.7.4.
+Rotated text was reported editable while its advance was measured on the horizontal axis, so
+`fits-width` judged the wrong dimension: editable *and* wrong. Such runs now refuse with gate
+`rotated-text` and are still returned to the picker, so the UI can explain the refusal. The
+rotation is read from the matrix the renderer actually uses, `Tm` composed with the current
+transformation matrix, so a page that rotates with `cm` and leaves `Tm` at the identity is
+caught too; `q`/`Q` restore the graphics state as the renderer does. Correct measurement lands
+in P2.7.4.
 
 ### Known gaps
 

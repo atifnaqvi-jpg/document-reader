@@ -393,3 +393,53 @@ when `ink_y` is reverted to `run.origin.1`.
     that a stale-fingerprint clippy run and a self-satisfying scan look identical to green.
   - Next unblocked task is **none**: every remaining item (P2.7.3–P2.7.6, P2.8) is `[!]` blocked
     on an unwritten design doc or an unruled decision (C-4/C-5/C-6). T-6 was the last todo.
+
+## Iteration 10 — T-7 — green
+
+- Task: widen the H0 rotation refusal to rotation carried by `cm` (the CTM), not only `Tm`
+- Test: `a_graphics_matrix_rotation_is_flagged_on_the_run` (red before: **yes** — a `cm` of
+  `[0 1 -1 0 300 100]` with an identity `Tm` produced `rotated=false`, `advance=114.67`),
+  `refuses_a_run_rotated_by_the_graphics_matrix` (red before: **yes**, same cause),
+  `a_rotation_restored_by_q_does_not_flag_the_run` (green before and after by design — it is
+  the control that fails if `Q` does not restore), plus
+  `a_translating_graphics_matrix_is_not_flagged_as_rotated` as the "did not over-refuse" control.
+- Files: `src-tauri/src/editor/textlocate.rs`, `src-tauri/src/editor/textedit.rs`,
+  `src-tauri/src/editor/testpdf.rs`, `docs/P2.7-STOCK-TAKE.md`,
+  `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`, `docs/RELEASE-NOTES.md`,
+  `scripts/ralph/IMPLEMENTATION_PLAN.md`
+- Gate: cargo test 435 passed (339 lib + 96 integration), clippy clean, tsc clean,
+  vitest 62 passed
+- Commit: see `fix(p2.7): refuse runs rotated by the graphics matrix, not just by Tm`
+- Learned:
+  - **No unchecked task existed; the plan's "blocked" list was correct, and that was the
+    signal to audit a shipped refusal rather than to declare BLOCKED.** Every remaining phase
+    needs an unwritten design doc or an unruled decision (C-3/C-4/C-5/C-6), and inventing one
+    would be deciding something marked "not ruled". So the iteration checked whether the
+    *shipped* H0 contract held: it says "refuse runs whose text matrix is not axis-aligned",
+    and it did not.
+  - **H0 read `tm` in isolation; the renderer draws with `tm x ctm`.** A content stream that
+    rotates with `cm` and leaves `Tm` at the identity still draws vertical text, and H0 called
+    it editable with a horizontal `advance` — the precise editable-and-wrong failure H0 exists
+    to remove. This is not hypothetical: the app's own `export::watermark` emits exactly this
+    shape (`cm` rotation, `BT`/`Tf`/`Td`, no `Tm`), so a watermarked-then-reopened PDF was
+    offering its mark as editable.
+  - Detection is now `matrix_mul(tm, ctm)` with a `q`/`Q` CTM stack. Keep the boundary the
+    module header states: only the **CTM** is saved/restored, and it never enters `origin` or
+    `advance`. `q`/`Q` also save text state in the spec, but this walker resets text state on
+    `BT` only, unchanged — do not "fix" that as a drive-by; it would move pen positions and
+    change every pairing tolerance.
+  - **The control tests are the load-bearing ones here.** Widening a refusal can over-refuse,
+    and an over-refusing detector would make a rotated-text test pass while breaking ordinary
+    pages. `a_translating_graphics_matrix_is_not_flagged_as_rotated` and
+    `a_rotation_restored_by_q_does_not_flag_the_run` are what stop that.
+  - Non-vacuity proved by two mutations: reverting `is_rotated` to read `tm` alone fails both
+    new "is flagged" tests; making `Q` pop without restoring fails only the `Q` control.
+  - Unmatched `Q` deliberately leaves the CTM alone rather than resetting to identity: a
+    malformed stream must not be read as a transform the renderer never applied.
+  - Checked the real-bytes fixture with a one-off probe (`real-maastricht-brochure.pdf`, 31
+    streams): every text show has an axis-aligned, unit-scale CTM. So the widening changes
+    nothing on the documents we ship, which is why the whole suite stayed green — the gap was
+    only reachable through `cm`-rotated producers. The probe was deleted; `git status` clean.
+  - **Next unblocked task is still none.** Remaining: P2.7.3 (needs `P2.7.3-xobject-DESIGN.md`
+    + a nesting-depth ruling), P2.7.4 (design doc), P2.7.5 (design doc + C-4), P2.7.6 (C-5),
+    P2.8 (design doc + C-6 undo infrastructure).
