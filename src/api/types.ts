@@ -282,6 +282,17 @@ export interface ContentOperation {
   operandPath: number[];
   oldBytes: number[];
   newBytes: number[];
+  /**
+   * The `/Properties` clone a named `ActualText` rewrite created (P2.7.1 ruling B-7). Undo
+   * needs it to repoint the `BDC` at its original name and drop the clone, so it must round-trip
+   * unchanged.
+   */
+  propertyClone?: {
+    opIndex: number;
+    oldName: number[];
+    newName: number[];
+    cloneObject: [number, number];
+  } | null;
 }
 
 export interface TextEditResult {

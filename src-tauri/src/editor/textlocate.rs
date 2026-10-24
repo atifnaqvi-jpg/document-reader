@@ -865,18 +865,7 @@ struct MarkedContentStack<'a> {
 
 impl<'a> MarkedContentStack<'a> {
     fn new(document: &'a Document, page_id: ObjectId) -> Self {
-        let properties = document
-            .get_page_resources(page_id)
-            .ok()
-            .and_then(|(resources, _)| resources)
-            .and_then(|resources| resources.get(b"Properties").ok())
-            .and_then(|object| {
-                document
-                    .dereference(object)
-                    .ok()
-                    .map(|(_, resolved)| resolved)
-            })
-            .and_then(|object| object.as_dict().ok());
+        let properties = properties_dict(document, page_id);
         Self {
             document,
             stack: Vec::new(),
@@ -1164,6 +1153,7 @@ pub fn apply_text(
         new_bytes: new_bytes.to_vec(),
         font_swap: None,
         also: Vec::new(),
+        property_clone: None,
     })
 }
 
@@ -1297,11 +1287,14 @@ pub fn apply_merged(
     // left reading the old string. The rewrite rides in this same pass, so one undo restores
     // both the operand and the property. `false` means the span is shared or the properties
     // are a shared resource: the edit lands, but the caller must tell the user.
-    let actual_text_preserved = rewrite_actual_text(
+    let named = page_properties(document, page_id);
+    let (actual_text_preserved, property_clone) = rewrite_actual_text(
+        document,
+        page_id,
         &mut content.operations,
         head.id.op_index,
         write.replacement,
-        &page_properties(document, page_id),
+        &named,
     )?;
 
     let encoded = content
@@ -1326,6 +1319,7 @@ pub fn apply_merged(
             new_bytes: fragment.new_bytes.clone(),
             font_swap: None,
             also: Vec::new(),
+            property_clone: None,
         })
         .collect();
 
@@ -1355,6 +1349,7 @@ pub fn apply_merged(
             new_bytes: head.new_bytes.clone(),
             font_swap,
             also,
+            property_clone,
         },
         actual_text_preserved,
     ))
@@ -1369,22 +1364,27 @@ pub fn apply_merged(
 ///
 /// - the enclosing `BDC` holds another showing operation (the span's text is the concatenation
 ///   of both, so the replacement is only part of it);
-/// - the properties operand is a **name** resolving to a shared `/Properties` entry, which other
-///   sequences in the document may also use;
 /// - the existing `ActualText` does not decode (ruling B-6): rewriting text we could not read
 ///   would silently replace an unknown value;
 /// - the new bytes are not decodable text, so there is nothing meaningful to write.
 ///
+/// A **named** `/Properties` entry is rewritten by copy-on-write (ruling B-7): the entry is
+/// cloned under a fresh name, this `BDC` is repointed at the clone, and only the clone is
+/// edited. Nothing shared is mutated, so every other sequence naming the original keeps its
+/// own `ActualText`. The clone is reported so undo can remove it again.
+///
 /// A malformed stream (no `EMC` for a `BDC`) simply leaves the scan at depth > 0; the span is
 /// then treated as open to the end of the stream, which is the conservative reading.
 fn rewrite_actual_text(
+    document: &mut Document,
+    page_id: ObjectId,
     operations: &mut [Operation],
     op_index: usize,
     replacement: Option<&str>,
     named: &HashMap<Vec<u8>, Dictionary>,
-) -> Result<bool, AppError> {
+) -> Result<(bool, Option<PropertyClone>), AppError> {
     let Some(bdc_index) = enclosing_bdc(operations, op_index) else {
-        return Ok(true);
+        return Ok((true, None));
     };
     let operation = operations
         .get(bdc_index)
@@ -1393,20 +1393,20 @@ fn rewrite_actual_text(
     // A name operand resolves through `/Properties`. It cannot be mutated in place without
     // knowing whether another sequence shares it, but it must still be *read*: a named bundle
     // with no `ActualText` is the common case and must not produce a warning.
-    let named_properties = match operation.operands.get(1) {
+    let named_entry = match operation.operands.get(1) {
         Some(Object::Dictionary(_)) => None,
-        Some(Object::Name(name)) => Some(named.get(name).ok_or(AppError::TextRunMismatch)?),
-        _ => return Ok(true),
+        Some(Object::Name(name)) => Some(name.clone()),
+        _ => return Ok((true, None)),
     };
-    let (properties, properties_are_inline) = match named_properties {
-        Some(properties) => (properties, false),
+    let properties = match &named_entry {
+        Some(name) => named.get(name).ok_or(AppError::TextRunMismatch)?,
         None => match operation.operands.get(1) {
-            Some(Object::Dictionary(properties)) => (properties, true),
-            _ => return Ok(true),
+            Some(Object::Dictionary(properties)) => properties,
+            _ => return Ok((true, None)),
         },
     };
     if properties.get(b"ActualText").is_err() {
-        return Ok(true);
+        return Ok((true, None));
     }
     // Ruling B-6: we may only claim preservation for text we could actually read. An
     // `ActualText` that does not decode (an undefined PDFDocEncoding code, a malformed UTF-16
@@ -1417,53 +1417,174 @@ fn rewrite_actual_text(
         .ok()
         .and_then(|object| object.as_str().ok());
     if existing.and_then(decode_text_string).is_none() {
-        return Ok(false);
-    }
-    if !properties_are_inline {
-        // Declares `ActualText`, but shared by name: report rather than rewrite.
-        return Ok(false);
+        return Ok((false, None));
     }
     if !span_is_this_operation(operations, bdc_index, op_index) {
-        return Ok(false);
+        return Ok((false, None));
     }
 
     // Without the replacement string there is no semantic text to write. `MergedWrite` always
     // supplies it for an edit; a caller that does not is treated as "cannot preserve".
     let Some(text) = replacement else {
-        return Ok(false);
+        return Ok((false, None));
     };
     let mut encoded = vec![0xFE, 0xFF];
     encoded.extend(text.encode_utf16().flat_map(|unit| unit.to_be_bytes()));
+
+    let Some(original_name) = named_entry else {
+        let operation = operations
+            .get_mut(bdc_index)
+            .ok_or(AppError::TextRunMismatch)?;
+        if let Some(Object::Dictionary(properties)) = operation.operands.get_mut(1) {
+            properties.set(
+                "ActualText",
+                Object::String(encoded, lopdf::StringFormat::Literal),
+            );
+        }
+        return Ok((true, None));
+    };
+
+    let source = properties.clone();
+    let Some(clone) = clone_named_property(
+        document,
+        page_id,
+        bdc_index,
+        &original_name,
+        &source,
+        encoded,
+    ) else {
+        // B-7: no clone, no rewrite. Disclose rather than mutate the shared entry.
+        return Ok((false, None));
+    };
     let operation = operations
         .get_mut(bdc_index)
         .ok_or(AppError::TextRunMismatch)?;
-    if let Some(Object::Dictionary(properties)) = operation.operands.get_mut(1) {
-        properties.set("ActualText", Object::String(encoded, lopdf::StringFormat::Literal));
+    *operation
+        .operands
+        .get_mut(1)
+        .ok_or(AppError::TextRunMismatch)? = Object::Name(clone.new_name.clone());
+    Ok((true, Some(clone)))
+}
+
+/// A named `/Properties` entry cloned for one edit (ruling B-7), recorded so undo can take
+/// the clone back out again.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PropertyClone {
+    /// Index of the `BDC` whose properties operand now names the clone.
+    pub op_index: usize,
+    /// The name the `BDC` used before the edit.
+    pub old_name: Vec<u8>,
+    /// The fresh name this edit created and pointed the `BDC` at.
+    pub new_name: Vec<u8>,
+    /// The clone object itself, removed on undo so the file does not accumulate orphans.
+    pub clone_object: ObjectId,
+}
+
+/// Clones a named `/Properties` entry under a fresh name, installs it in the page's
+/// `/Properties` dictionary and stores the new `ActualText` in the clone. Returns `None` when
+/// the clone cannot be made, which the caller reports as "not preserved" (B-7).
+fn clone_named_property(
+    document: &mut Document,
+    page_id: ObjectId,
+    bdc_index: usize,
+    original_name: &[u8],
+    source: &Dictionary,
+    actual_text: Vec<u8>,
+) -> Option<PropertyClone> {
+    let mut clone = source.clone();
+    clone.set(
+        "ActualText",
+        Object::String(actual_text, lopdf::StringFormat::Literal),
+    );
+    let new_name = {
+        let properties = properties_mut(document, page_id)?;
+        fresh_property_name(properties, original_name)?
+    };
+    let clone_object = document.add_object(clone);
+    properties_mut(document, page_id)?.set(new_name.clone(), Object::Reference(clone_object));
+    Some(PropertyClone {
+        op_index: bdc_index,
+        old_name: original_name.to_vec(),
+        new_name,
+        clone_object,
+    })
+}
+
+/// `<base>_edit<N>` for the smallest `N` not already taken in `properties`.
+fn fresh_property_name(properties: &Dictionary, base: &[u8]) -> Option<Vec<u8>> {
+    (1..=999).find_map(|suffix| {
+        let mut candidate = base.to_vec();
+        candidate.extend_from_slice(b"_edit");
+        candidate.extend_from_slice(suffix.to_string().as_bytes());
+        (!properties.has(&candidate)).then_some(candidate)
+    })
+}
+
+/// Where a page's `/Properties` dictionary actually lives.
+///
+/// `/Properties` can hang off an inline `/Resources` dict, off an indirect `/Resources` object
+/// (what real producers write), or be an indirect object itself; `/Resources` may also be
+/// inherited from the page tree. `Document::get_page_resources` reports the inline dictionary
+/// and the referenced ones separately, so both have to be considered.
+enum PropertiesSlot {
+    /// `/Properties` is inline inside the page's inline `/Resources`.
+    Page,
+    /// `/Properties` is inline inside the resources object `id` (possibly an inherited one).
+    Resources(ObjectId),
+    /// `/Properties` is itself an indirect object.
+    Object(ObjectId),
+}
+
+fn properties_slot(document: &Document, page_id: ObjectId) -> Option<PropertiesSlot> {
+    let page = document.get_dictionary(page_id).ok()?;
+    if let Some(resources) = page.get(b"Resources").ok().and_then(|r| r.as_dict().ok()) {
+        match resources.get(b"Properties").ok()? {
+            Object::Reference(properties) => return Some(PropertiesSlot::Object(*properties)),
+            Object::Dictionary(_) => return Some(PropertiesSlot::Page),
+            _ => return None,
+        }
     }
-    Ok(true)
+    let (_, resource_ids) = document.get_page_resources(page_id).ok()?;
+    resource_ids.iter().find_map(|id| {
+        let resources = document.get_dictionary(*id).ok()?;
+        match resources.get(b"Properties").ok()? {
+            Object::Reference(properties) => Some(PropertiesSlot::Object(*properties)),
+            Object::Dictionary(_) => Some(PropertiesSlot::Resources(*id)),
+            _ => None,
+        }
+    })
+}
+
+/// The page's `/Properties` dictionary, resolved the same way the write path resolves it.
+fn properties_dict(document: &Document, page_id: ObjectId) -> Option<&Dictionary> {
+    match properties_slot(document, page_id)? {
+        PropertiesSlot::Object(id) => document.get_dictionary(id).ok(),
+        PropertiesSlot::Resources(id) => document
+            .get_dictionary(id)
+            .ok()?
+            .get(b"Properties")
+            .ok()?
+            .as_dict()
+            .ok(),
+        PropertiesSlot::Page => document
+            .get_dictionary(page_id)
+            .ok()?
+            .get(b"Resources")
+            .ok()?
+            .as_dict()
+            .ok()?
+            .get(b"Properties")
+            .ok()?
+            .as_dict()
+            .ok(),
+    }
 }
 
 /// The page's `/Properties` entries, keyed by name, so the write path can read a named
 /// `ActualText` without borrowing the document it is about to mutate.
 fn page_properties(document: &Document, page_id: ObjectId) -> HashMap<Vec<u8>, Dictionary> {
-    document
-        .get_page_resources(page_id)
-        .ok()
-        .and_then(|(resources, _)| resources)
-        // `get_page_resources` returns the dictionary only when it was written inline; an
-        // indirect `/Resources` (the usual case) still has to be read through the page.
-        .or_else(|| {
-            document
-                .get_object(page_id)
-                .ok()
-                .and_then(|page| page.as_dict().ok())
-                .and_then(|page| page.get(b"Resources").ok())
-                .and_then(|resources| document.dereference(resources).ok())
-                .and_then(|(_, resolved)| resolved.as_dict().ok())
-        })
-        .and_then(|resources| resources.get(b"Properties").ok())
-        .and_then(|object| document.dereference(object).ok())
-        .and_then(|(_, resolved)| resolved.as_dict().ok().cloned())
+    properties_dict(document, page_id)
         .map(|properties| {
             properties
                 .iter()
@@ -1477,6 +1598,37 @@ fn page_properties(document: &Document, page_id: ObjectId) -> HashMap<Vec<u8>, D
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Mutable access to the page's `/Properties` dictionary.
+///
+/// Adding a key here is safe even when pages share one `/Resources` object: the write path only
+/// *adds* a clone (ruling B-7) and never mutates an entry a shared reader can see.
+pub(crate) fn properties_mut(
+    document: &mut Document,
+    page_id: ObjectId,
+) -> Option<&mut Dictionary> {
+    match properties_slot(document, page_id)? {
+        PropertiesSlot::Object(id) => document.get_dictionary_mut(id).ok(),
+        PropertiesSlot::Resources(id) => document
+            .get_dictionary_mut(id)
+            .ok()?
+            .get_mut(b"Properties")
+            .ok()?
+            .as_dict_mut()
+            .ok(),
+        PropertiesSlot::Page => document
+            .get_dictionary_mut(page_id)
+            .ok()?
+            .get_mut(b"Resources")
+            .ok()?
+            .as_dict_mut()
+            .ok()?
+            .get_mut(b"Properties")
+            .ok()?
+            .as_dict_mut()
+            .ok(),
+    }
 }
 
 /// The index of the `BDC` that opened the marked-content sequence containing `op_index`.
@@ -1689,6 +1841,10 @@ pub struct ContentOperation {
     /// an ordinary single-operand edit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<ContentOperation>,
+    /// The `/Properties` clone a named-`ActualText` rewrite created (ruling B-7), so undo can
+    /// repoint the `BDC` at the original name and drop the clone again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub property_clone: Option<PropertyClone>,
 }
 
 /// One run's switch from its original font resource to a standard-14 substitute.

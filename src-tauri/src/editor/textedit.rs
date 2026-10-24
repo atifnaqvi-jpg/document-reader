@@ -2107,6 +2107,24 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
             }
         }
 
+        // Undo a `/Properties` clone (P2.7.1 B-7): the `BDC` goes back to the name it used
+        // before the edit. A `BDC` that no longer names the clone means something else edited
+        // it since, and repointing it would undo an edit the user did not make.
+        if let Some(clone) = &operation.property_clone {
+            let bdc = content
+                .operations
+                .get_mut(clone.op_index)
+                .ok_or(AppError::TextRunMismatch)?;
+            if bdc.operator != "BDC"
+                || bdc.operands.get(1).and_then(|name| name.as_name().ok())
+                    != Some(clone.new_name.as_slice())
+            {
+                return Err(AppError::TextRunMismatch);
+            }
+            *bdc.operands.get_mut(1).ok_or(AppError::TextRunMismatch)? =
+                lopdf::Object::Name(clone.old_name.clone());
+        }
+
         content.encode().map_err(|error| {
             AppError::Other(format!("could not re-encode page content: {error}"))
         })?
@@ -2114,7 +2132,25 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
 
     document
         .change_page_content(page_id, encoded)
-        .map_err(|error| AppError::Other(format!("could not replace page content: {error}")))
+        .map_err(|error| AppError::Other(format!("could not replace page content: {error}")))?;
+
+    // The clone object is now unreferenced; drop it so an undo leaves the file as it was
+    // rather than accumulating one orphan per edit-then-undo cycle.
+    if let Some(clone) = &operation.property_clone {
+        if let Some(properties) = textlocate::properties_mut(document, page_id) {
+            let is_our_clone = properties
+                .get(&clone.new_name)
+                .ok()
+                .and_then(|entry| entry.as_reference().ok())
+                == Some(clone.clone_object);
+            if is_our_clone {
+                properties.remove(&clone.new_name);
+                document.objects.remove(&clone.clone_object);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The mutable resource-name operand a [`FontSwap`] names.
@@ -3326,5 +3362,57 @@ mod tests {
         };
         let error = revert(&mut document, &stale).unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_MISMATCH");
+    }
+
+    /// B-7: undo takes the clone out again. After an edit of a named `ActualText` and its
+    /// revert, the `BDC` names its original entry, the clone key is gone, the clone object is
+    /// gone, and the shared entry never changed.
+    #[test]
+    fn revert_removes_the_property_clone() {
+        let mut document = testpdf::named_property_shared_actualtext();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        let measure = measure_fixed(70.0);
+        let outcome = edit(&mut document, &request(&run, "OMEGA", 100.0, &measure)).unwrap();
+
+        let clone = outcome
+            .inverse
+            .property_clone
+            .clone()
+            .expect("a named ActualText is rewritten through a clone");
+        assert!(outcome.actual_text_preserved);
+
+        revert(&mut document, &outcome.inverse).unwrap();
+
+        let page = page_id(&document, 0).unwrap();
+        let after = textlocate::decoded_content(&document, page).unwrap();
+        let names: Vec<&[u8]> = after
+            .operations
+            .iter()
+            .filter(|operation| operation.operator == "BDC")
+            .filter_map(|operation| operation.operands.get(1))
+            .filter_map(|operand| operand.as_name().ok())
+            .collect();
+        assert_eq!(names, vec![&b"P0"[..], &b"P0"[..]], "both BDCs name /P0 again");
+
+        {
+            let properties = textlocate::properties_mut(&mut document, page).unwrap();
+            assert!(
+                !properties.has(&clone.new_name),
+                "the clone key is removed, so the file does not accumulate orphans"
+            );
+            assert!(properties.has(b"P0"), "the shared entry is still there");
+        }
+        assert!(
+            !document.objects.contains_key(&clone.clone_object),
+            "the clone object itself is dropped"
+        );
+
+        // And the run still reads its original semantic text.
+        let runs = textlocate::locate_runs(&document, page).unwrap();
+        assert_eq!(
+            runs[0].marked_content[0].actual_text.as_deref(),
+            Some("ALPHA")
+        );
     }
 }

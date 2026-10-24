@@ -155,6 +155,10 @@ fn main() {
             testpdf::bytes(&testpdf::actualtext_named_property()),
         ),
         (
+            "named-property-shared-actualtext.pdf",
+            testpdf::bytes(&testpdf::named_property_shared_actualtext()),
+        ),
+        (
             "named-property-no-actualtext.pdf",
             testpdf::bytes(&testpdf::named_property_without_actualtext()),
         ),

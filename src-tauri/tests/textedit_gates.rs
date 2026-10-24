@@ -2122,10 +2122,11 @@ fn actualtext_is_rewritten_with_the_edit() {
     assert_eq!(String::from_utf16(&units).unwrap(), "OMEGA");
 }
 
-/// T30: a **named** `/Properties` entry cannot be rewritten in place — another sequence may
-/// share it — so the edit lands and the caller is told the accessible text diverged.
+/// T30 + ruling B-7: a **named** `/Properties` entry is shared, so it is never rewritten in
+/// place. Copy-on-write gives the edited sequence its own entry: the edit lands, the caller is
+/// told the accessible text was preserved, and the shared entry keeps its original value.
 #[test]
-fn shared_actualtext_is_reported_not_rewritten() {
+fn shared_actualtext_is_copied_before_it_is_rewritten() {
     let path = fixture("actualtext-named-property.pdf");
     let mut document = load(&path);
     let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
@@ -2143,10 +2144,27 @@ fn shared_actualtext_is_reported_not_rewritten() {
     )
     .unwrap();
     assert!(
-        !outcome.actual_text_preserved,
-        "a shared named property is reported, never silently rewritten"
+        outcome.actual_text_preserved,
+        "B-7 preserves the semantic text by cloning the entry, not by skipping it"
     );
     assert_eq!(outcome.inverse.new_bytes, b"OMEGA", "the edit itself lands");
+    assert!(
+        outcome.inverse.property_clone.is_some(),
+        "the clone is recorded so undo can remove it"
+    );
+
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let runs = textlocate::locate_runs(&document, page_id).unwrap();
+    assert_eq!(
+        runs[0].marked_content[0].actual_text.as_deref(),
+        Some("OMEGA"),
+        "the edited span now reads the new semantic text"
+    );
+    assert_eq!(
+        page_property_entry(&document, page_id, b"P0"),
+        b"\xFE\xFF\0A\0L\0P\0H\0A".to_vec(),
+        "the shared entry is byte-identical"
+    );
 }
 
 /// T-2 (B-6): `ActualText` written in PDFDocEncoding must decode with the standard's table,
@@ -2325,4 +2343,116 @@ fn named_properties_without_actualtext_is_not_a_warning() {
         outcome.actual_text_preserved,
         "no ActualText was declared, so the edit preserved all there was"
     );
+}
+
+/// Ruling B-7: a named `/Properties` entry that *does* carry `ActualText` is cloned rather
+/// than mutated in place. Two sequences name `/P0`; editing one must rewrite only that one's
+/// semantic text and leave `/P0` — and therefore the other sequence's `ActualText` — exactly
+/// as it was.
+#[test]
+fn a_shared_named_property_is_cloned_not_rewritten_in_place() {
+    let path = fixture("named-property-shared-actualtext.pdf");
+    let mut document = load(&path);
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let runs = textlocate::locate_runs(&document, page_id).unwrap();
+    assert_eq!(runs.len(), 2, "two baselines, two runs");
+    assert_eq!(runs[0].marked_content[0].actual_text.as_deref(), Some("ALPHA"));
+    assert_eq!(runs[1].marked_content[0].actual_text.as_deref(), Some("ALPHA"));
+
+    let outcome = edit_with(&mut document, 0, runs[0].id.clone(), "ALPHA", "OMEGA", 70.0, 70.0)
+        .unwrap();
+    assert!(
+        outcome.actual_text_preserved,
+        "a clone is exactly how B-7 lets us preserve it"
+    );
+
+    let content = textlocate::decoded_content(&document, page_id).unwrap();
+    let names: Vec<Vec<u8>> = content
+        .operations
+        .iter()
+        .filter(|operation| operation.operator == "BDC")
+        .filter_map(|operation| operation.operands.get(1))
+        .filter_map(|operand| operand.as_name().ok().map(<[u8]>::to_vec))
+        .collect();
+    assert_eq!(names.len(), 2, "both sequences still have properties");
+    assert_ne!(
+        names[0], names[1],
+        "the edited sequence must be repointed at its own clone, not left sharing /P0"
+    );
+    assert_eq!(names[1], b"P0", "the untouched sequence keeps its original name");
+
+    // The original entry is byte-identical: no sequence outside the edit changed meaning.
+    let original = page_property_entry(&document, page_id, b"P0");
+    assert_eq!(
+        original, b"\xFE\xFF\0A\0L\0P\0H\0A".to_vec(),
+        "the shared /P0 must not be touched by the edit"
+    );
+    let clone = page_property_entry(&document, page_id, &names[0]);
+    assert_eq!(
+        decode_utf16_be(&clone),
+        "OMEGA",
+        "the clone carries the edited semantic text"
+    );
+
+    // The plan's acceptance is "byte-identical after save", so the clone and the untouched
+    // entry must survive a real write and reload, not just the in-memory document.
+    let saved = std::env::temp_dir().join("t3-shared-named-property.pdf");
+    document.save(&saved).unwrap();
+    let reloaded = load(&saved);
+    let reloaded_page = textlocate::page_id(&reloaded, 0).unwrap();
+    assert_eq!(
+        page_property_entry(&reloaded, reloaded_page, b"P0"),
+        b"\xFE\xFF\0A\0L\0P\0H\0A".to_vec(),
+        "the shared /P0 is unchanged on disk"
+    );
+    let runs = textlocate::locate_runs(&reloaded, reloaded_page).unwrap();
+    assert_eq!(runs.len(), 2, "both runs still read after reload");
+    assert_eq!(
+        runs[0].marked_content[0].actual_text.as_deref(),
+        Some("OMEGA"),
+        "the edited span keeps its cloned ActualText"
+    );
+    assert_eq!(
+        runs[1].marked_content[0].actual_text.as_deref(),
+        Some("ALPHA"),
+        "the untouched span still reads the original ActualText"
+    );
+    std::fs::remove_file(&saved).unwrap();
+}
+
+/// One `/Properties` entry's raw `ActualText` bytes, read back through the page resources.
+fn page_property_entry(document: &lopdf::Document, page_id: lopdf::ObjectId, name: &[u8]) -> Vec<u8> {
+    let page = document.get_dictionary(page_id).unwrap();
+    let resources = document
+        .dereference(page.get(b"Resources").unwrap())
+        .unwrap()
+        .1
+        .as_dict()
+        .unwrap();
+    let properties = document
+        .dereference(resources.get(b"Properties").unwrap())
+        .unwrap()
+        .1
+        .as_dict()
+        .unwrap();
+    document
+        .dereference(properties.get(name).unwrap())
+        .unwrap()
+        .1
+        .as_dict()
+        .unwrap()
+        .get(b"ActualText")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_vec()
+}
+
+fn decode_utf16_be(bytes: &[u8]) -> String {
+    assert_eq!(&bytes[..2], b"\xFE\xFF", "ActualText is written as UTF-16BE");
+    let units: Vec<u16> = bytes[2..]
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16(&units).unwrap()
 }

@@ -48,10 +48,24 @@ under P2.7.4.
       cross-checked against qpdf/poppler. Undefined codes are `0x7F`, `0x9F`, `0xAD` — not
       `0xA0`, which is the euro sign. `undecodable_actualtext_is_reported_not_rewritten` fails
       independently of the decoder change if the refusal branch is removed.
-- [ ] **T-3 (B-7) Copy-on-write for named `/Properties`.** Clone the named entry, repoint the
+- [x] **T-3 (B-7) Copy-on-write for named `/Properties`.** Clone the named entry, repoint the
       `BDC`, rewrite the clone. Fall back to disclosure only if the clone cannot be made.
       Acceptance: two `BDC`s sharing `/P0` — editing one updates only that one; the other's
       `ActualText` is byte-identical after save.
+      **Done.** `a_shared_named_property_is_cloned_not_rewritten_in_place` proves it in memory
+      and again after `Document::save` + reload; `revert_removes_the_property_clone` proves undo
+      takes the clone out (red if the cleanup block is disabled). Fresh key is `<name>_edit<N>`;
+      the clone rides on the inverse as `propertyClone`, so undo repoints the `BDC`, drops the
+      key and drops the object — an edit-then-undo leaves no orphan.
+      **Reader bug found and fixed:** `Document::get_page_resources` returns the dictionary only
+      for an *inline* `/Resources`, so on the usual file (indirect `/Resources`) no named
+      `/ActualText` was visible to the locator at all. Reader and writer now share
+      `page_properties_dict`.
+- [ ] **T-3b Regression fixture gap.** The P2.7.1 suite never exercised a page whose
+      `/Resources` is an **indirect object** — the form real producers write — which is how the
+      reader bug above stayed invisible. Audit the other page-resource readers (font lookup,
+      `ensure_substitute_resource`, XObject lookup) for the same inline-only assumption and add
+      an indirect-`/Resources` variant of an existing fixture to each.
 - [ ] **T-4** Version bump to 0.5.0 (`Cargo.toml`, `package.json`, `tauri.conf.json`), release
       notes listing `Ts`, PDFDocEncoding, copy-on-write, and the MCID work.
 - [ ] **T-5** Commit the P2.7.1 body (code + fixtures + docs) as one feature commit, separate

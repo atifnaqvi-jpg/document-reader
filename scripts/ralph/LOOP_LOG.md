@@ -111,3 +111,45 @@ when `ink_y` is reverted to `run.origin.1`.
     Revert it with `git checkout --` after regenerating; commit only the new PDFs.
   - Non-string `ActualText` now discloses (`actual_text_preserved = false`) rather than
     erroring the whole edit — an unreadable property must not block the text change.
+
+## Iteration 4 — T-3 (B-7) — green
+- Task: copy-on-write for a named `/Properties` entry carrying `ActualText`, plus undo of the
+  clone.
+- Test: `a_shared_named_property_is_cloned_not_rewritten_in_place` (red before: **yes** — first
+  `index out of bounds: len is 0` because the locator saw no named properties at all, then, once
+  the reader was fixed, `a clone is exactly how B-7 lets us preserve it` at the
+  `actual_text_preserved` assertion). Also `revert_removes_the_property_clone` (red before:
+  **yes** — verified by disabling only the cleanup block, which fails at the clone-key
+  assertion), and `shared_actualtext_is_reported_not_rewritten` was renamed to
+  `shared_actualtext_is_copied_before_it_is_rewritten` because its old assertion encoded the
+  pre-B-7 behaviour that this task supersedes.
+- Files: `src-tauri/src/editor/textlocate.rs`, `src-tauri/src/editor/textedit.rs`,
+  `src-tauri/tests/textedit_gates.rs`, `src-tauri/src/editor/testpdf.rs`,
+  `src-tauri/examples/make_p24_fixtures.rs`,
+  `src-tauri/tests/fixtures/named-property-shared-actualtext.pdf`,
+  `src/api/types.ts`, `docs/P2.7.1-mcid-DESIGN.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`
+- Gate: cargo test 334 lib + 51 gates + 24 other integration = 409 passed, clippy clean,
+  tsc clean, vitest 62 passed
+- Commit: see `feat(p2.7.1): copy-on-write for named ActualText properties`
+- Learned:
+  - **Found a real reader bug: `Document::get_page_resources` returns the inline `/Resources`
+    dictionary only.** It returns `(Option<&Dictionary>, Vec<ObjectId>)` — the `Option` is the
+    page's *own inline* dict, the `Vec` is the referenced one(s), following the `/Parent` chain.
+    Every fixture with a named `/Properties` uses an **indirect** `/Resources`
+    (`/Resources 4 0 R`), so `MarkedContentStack` resolved no properties at all and
+    `named_property_no_actualtext_is_not_a_warning` had been passing **vacuously**: nothing was
+    resolved, so nothing warned. Any code path that reads page resources must handle both
+    forms; `properties_slot`/`properties_dict`/`properties_mut` in `textlocate.rs` now do, and
+    the substitute-font path already did (it uses the `Vec`).
+  - The clone is recorded on the inverse as `propertyClone { opIndex, oldName, newName,
+    cloneObject }`. `ObjectId` is `(u32, u16)` and serialises as a JSON array, which is fine
+    because the frontend round-trips the inverse object verbatim — do not "normalise" it.
+  - Undo must remove the clone key **and** the clone object: lopdf writes every entry in
+    `document.objects`, reachable or not, so leaving the object would grow the file on every
+    edit/undo cycle. Guard the removal on the entry still being a reference to *our* object.
+  - `fresh_property_name` caps at 999 suffixes (`/P0_edit999`); past that it returns `None` and
+    the edit discloses instead of cloning. That is a deliberate ceiling, not an oversight.
+  - Harness note: two long `cargo test` runs were lost to terminal-session restarts (one tmux
+    server death, one "restart during tool execution"). Running the command with output
+    redirected to a file in the background and polling the file is the reliable pattern here;
+    `cargo` output is otherwise truncated by the tool.
