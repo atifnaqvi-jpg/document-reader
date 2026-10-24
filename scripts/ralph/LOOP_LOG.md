@@ -409,7 +409,7 @@ when `ink_y` is reverted to `run.origin.1`.
   `scripts/ralph/IMPLEMENTATION_PLAN.md`
 - Gate: cargo test 435 passed (339 lib + 96 integration), clippy clean, tsc clean,
   vitest 62 passed
-- Commit: see `fix(p2.7): refuse runs rotated by the graphics matrix, not just by Tm`
+- Commit: `eb4af51`.
 - Learned:
   - **No unchecked task existed; the plan's "blocked" list was correct, and that was the
     signal to audit a shipped refusal rather than to declare BLOCKED.** Every remaining phase
