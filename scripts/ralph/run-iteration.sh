@@ -101,21 +101,57 @@ done
 
 # The iteration's own verdict line is part of the contract; surface it, and fail the run when
 # the agent never produced one (a truncated conversation must not look like a completed task).
-curl -sS -H "X-Session-API-Key: $KEY" \
-  "$SERVER/api/conversations/$CID/events/search?limit=2000" \
-  | python3 -c '
-import json, sys
-events = json.load(sys.stdin).get("events", [])
-text = "\n".join(
-    part.get("text", "")
-    for event in events
-    if event.get("kind") in ("MessageEvent", "AgentMessageEvent")
-    for part in (event.get("content") or [])
-    if isinstance(part, dict) and part.get("type") == "text"
-)
-lines = [line for line in text.splitlines() if line.startswith("ITERATION ")]
-print(lines[-1] if lines else "")
-'
+#
+# Events come back as {"items": [{kind, source, llm_message: {role, content: [{type, text}]}}]}
+# — not {"events": [{kind, content}]}. `limit` is capped server-side (2000 silently yields zero
+# items) and `page_id` is only a valid cursor together with sort_order=TIMESTAMP_DESC, so walk
+# backwards from the newest event and stop at the first verdict instead of paging the whole,
+# multi-megabyte history forwards. The key travels via the environment so it stays out of `ps`.
+VERDICT="$(RALPH_SERVER="$SERVER" RALPH_CID="$CID" RALPH_API_KEY="$KEY" python3 - <<'PY'
+import json, os, sys, urllib.request
+
+server, cid, key = (os.environ[k] for k in ("RALPH_SERVER", "RALPH_CID", "RALPH_API_KEY"))
+
+
+def page(page_id=None):
+    url = f"{server}/api/conversations/{cid}/events/search?limit=100&sort_order=TIMESTAMP_DESC"
+    if page_id:
+        url += f"&page_id={page_id}"
+    request = urllib.request.Request(url, headers={"X-Session-API-Key": key})
+    with urllib.request.urlopen(request) as response:
+        return json.load(response)
+
+
+cursor = None
+for _ in range(100):  # 10k events is far past any real iteration
+    events = page(cursor)
+    for event in events.get("items", []):
+        if event.get("kind") != "MessageEvent" or event.get("source") != "agent":
+            continue
+        message = event.get("llm_message") or {}
+        if message.get("role") != "assistant":
+            continue
+        text = "\n".join(
+            part.get("text", "")
+            for part in (message.get("content") or [])
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+        for line in text.splitlines():
+            if line.strip().startswith("ITERATION "):
+                print(line.strip())
+                sys.exit(0)
+    cursor = events.get("next_page_id")
+    if not cursor:
+        break
+sys.exit(1)
+PY
+)"
+
+if [ -n "$VERDICT" ]; then
+  printf '[ralph] %s\n' "$VERDICT"
+else
+  printf '[ralph] the iteration produced no ITERATION verdict line\n' >&2
+fi
 
 printf '[ralph] iteration ended with status %s\n' "$STATUS"
-[ "$STATUS" = "finished" ]
+[ "$STATUS" = "finished" ] && [ -n "$VERDICT" ]

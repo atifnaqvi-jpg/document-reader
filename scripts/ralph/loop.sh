@@ -102,7 +102,9 @@ for iteration in $(seq 1 "$MAX_ITERATIONS"); do
   fi
   start_sha="$new_sha"
 
-  if grep -q '^ITERATION .*BLOCKED' <(tail -5 scripts/ralph/LOOP_LOG.md); then
+  # The durable record is the log heading; the agent also emits an ITERATION line in its
+  # final message, but that only reaches run-iteration.sh's stdout, not this log.
+  if grep -qiE '^(ITERATION .*BLOCKED|## Iteration .*blocked)' <(tail -5 scripts/ralph/LOOP_LOG.md); then
     log "the last iteration reported BLOCKED; stopping"
     exit 0
   fi
