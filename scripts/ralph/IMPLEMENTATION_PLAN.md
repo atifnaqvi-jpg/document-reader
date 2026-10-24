@@ -31,10 +31,12 @@ under P2.7.4.
 
 ## H1. Close P2.7.1 at 0.5.0
 
-- [ ] **T-1 (B-5) `Ts`.** Add `rise` to `TextMatrixWalk`, reset on `BT`, set by `Ts`, expose on
+- [x] **T-1 (B-5) `Ts`.** Add `rise` to `TextMatrixWalk`, reset on `BT`, set by `Ts`, expose on
       `RawRun`, and use it in pairing (a raised run sits on a different baseline). Does **not**
       change `advance`.
       Acceptance: a fixture with `Ts 5` pairs to a box offset by 5pt; `advance` is unchanged.
+      **Done.** `a_raised_run_pairs_to_the_box_offset_by_its_rise` fails if pairing reads the
+      pen instead of the ink (`left: 0, right: 1`), so it is not a test that cannot fail.
 - [ ] **T-2 (B-6) PDFDocEncoding.** Replace `byte as char` with the real PDFDocEncoding table
       (Latin-1 plus the `0x80`–`0x9F` and `0xA0`–`0xFF` exceptions per ISO 32000-1 Annex D).
       If a byte cannot be decoded, treat the `ActualText` as absent and set

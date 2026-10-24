@@ -2350,6 +2350,50 @@ mod tests {
         assert!(!mergeable(&head, &overlapping, false, None, None));
     }
 
+    /// The T-1 acceptance from the plan: a run with `Ts 5` must pair to the box that is
+    /// 5pt above its pen.
+    ///
+    /// The fixture is built so the two readings disagree: the body box ends exactly at the
+    /// pen (`695..700`), the raised box starts exactly at the ink (`705..712`). Measuring the
+    /// pen therefore pairs downward, and measuring the ink pairs upward — the boxes cannot
+    /// both match, which is what makes this test able to fail.
+    #[test]
+    fn a_raised_run_pairs_to_the_box_offset_by_its_rise() {
+        use crate::editor::runmetrics::PdfiumRun;
+        let grid = crate::editor::runmetrics::PdfiumCharGrid {
+            text: "HIGH".to_string(),
+            chars: Vec::new(),
+        };
+
+        let mut run = test_run("HIGH", 72.0, 12.0, "F1");
+        run.rise = 5.0;
+        run.origin.1 = 700.0; // pen at 700, ink at 705
+
+        let body = PdfiumRun {
+            text: "BASE".to_string(),
+            font_name: "Helvetica".to_string(),
+            font_size: 12.0,
+            x0: 72.0,
+            x1: 92.0,
+            y0: 688.0,
+            y1: 700.0,
+            width: 20.0,
+        };
+        let raised = PdfiumRun {
+            y0: 705.0,
+            y1: 717.0,
+            ..body.clone()
+        };
+        let rects = vec![body, raised];
+        // Rendered baselines: the body sits on 700, the raised glyphs on 705.
+        let pair = pair_run(&run, &rects, &[700.0, 705.0], &grid).expect("pairs");
+        assert_eq!(
+            pair.rect, 1,
+            "the run's ink sits at 705, so it belongs to the raised box, not the body"
+        );
+        assert_eq!(pair.confidence, PairConfidence::Strong);
+    }
+
     #[test]
     fn text_equality_only_breaks_a_geometric_tie() {
         use crate::editor::runmetrics::PdfiumRun;

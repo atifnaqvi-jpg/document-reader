@@ -65,3 +65,13 @@ most recent iteration last.
     `Tj`/`'`/`"` — only `TJ` advances internally. Consecutive `Tj` operands therefore report
     the same origin x. Pre-existing, independent of `Ts`. Needs its own task; recorded in
     `PENDING` below rather than silently fixed inside this one.
+
+### Iteration 2b — T-1 acceptance test
+
+The plan's stated acceptance (a `Ts 5` run pairs to a box offset by 5pt) was **not** covered by
+the first iteration's tests: `does_not_merge_across_a_rise_change` covered merging, not pairing.
+Added `a_raised_run_pairs_to_the_box_offset_by_its_rise`. The first version of it passed
+against the *old* code too (both boxes contained the pen y), which is the exact failure mode
+the prompt's "confirm it fails for the right reason" step exists to catch — the fixture was
+rebuilt so the two readings select different boxes, and it now fails with `left: 0, right: 1`
+when `ink_y` is reverted to `run.origin.1`.
