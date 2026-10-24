@@ -125,8 +125,11 @@ pub(crate) fn embedded_font_program(
     font_key: &[u8],
 ) -> Option<Vec<u8>> {
     let fonts = document.get_page_fonts(page_id).ok()?;
-    let font = fonts.get(font_key).copied()?;
+    program_of(document, fonts.get(font_key).copied()?)
+}
 
+/// The embedded program of an already-resolved font dictionary.
+fn program_of(document: &Document, font: &lopdf::Dictionary) -> Option<Vec<u8>> {
     let descriptor = font
         .get(b"FontDescriptor")
         .ok()
@@ -263,23 +266,43 @@ impl FontMetrics {
     /// embedded subset with a real `FontFile2`/`FontFile3` is next. A run whose font is
     /// neither (a non-embedded, non-standard-14 face) gets [`FontMetrics::Nominal`].
     pub fn resolve(document: &Document, page_id: ObjectId, font_key: &[u8]) -> FontMetrics {
-        if let Some(info) = crate::editor::textlocate::font_info(document, page_id, font_key) {
-            if let Some(base_font) = info.base_font.as_deref() {
-                let stripped = strip_subset_prefix(base_font);
-                if afm::widths_for(stripped).is_some() {
-                    return FontMetrics::Afm {
-                        base_font: stripped.to_string(),
-                    };
-                }
+        let Some(font) = crate::editor::textlocate::font_dict(document, page_id, font_key) else {
+            return FontMetrics::Nominal;
+        };
+        let base_font = font
+            .get(b"BaseFont")
+            .ok()
+            .and_then(|object| object.as_name().ok())
+            .map(|name| String::from_utf8_lossy(name).into_owned());
+        FontMetrics::resolve_with(document, font, base_font.as_deref())
+    }
+
+    /// The same choice, from a font dictionary already resolved at the level that declares it
+    /// (P2.7.3 X1).
+    ///
+    /// A run inside a Form XObject must be measured through **that form's** `/Font` entry: the
+    /// page's table may not name the resource at all, and `get_page_fonts` would answer with a
+    /// different face under the same name.
+    pub fn resolve_with(
+        document: &Document,
+        font: &lopdf::Dictionary,
+        base_font: Option<&str>,
+    ) -> FontMetrics {
+        if let Some(base_font) = base_font {
+            let stripped = strip_subset_prefix(base_font);
+            if afm::widths_for(stripped).is_some() {
+                return FontMetrics::Afm {
+                    base_font: stripped.to_string(),
+                };
             }
         }
-        if let Some(program) = embedded_font_program(document, page_id, font_key) {
+        if let Some(program) = program_of(document, font) {
             return FontMetrics::TrueType { program };
         }
         // A non-embedded face still publishes its advances in `/Widths`. Reading them is the
         // difference between an exact seam and a phantom one: the Maastricht Times/Arial
         // resources are in this class, and before this they resolved to `Nominal`.
-        if let Some((first_char, widths)) = simple_widths(document, page_id, font_key) {
+        if let Some((first_char, widths)) = widths_of(document, font) {
             return FontMetrics::SimpleWidths { first_char, widths };
         }
         FontMetrics::Nominal
@@ -310,14 +333,11 @@ fn number(object: &Object) -> Option<f32> {
     }
 }
 
-/// Reads a simple font's `/Widths` array and `/FirstChar`, the advances the PDF itself
-/// publishes for a non-embedded face.
+/// The `/Widths` of an already-resolved font dictionary.
 ///
-/// Returns `None` when the dictionary has no `/Widths` (the Maastricht `F2`/`F9` Arial
-/// resources are in that class, and they must stay unmeasurable rather than be guessed at).
-fn simple_widths(document: &Document, page_id: ObjectId, font_key: &[u8]) -> Option<(u16, Vec<u16>)> {
-    let fonts = document.get_page_fonts(page_id).ok()?;
-    let font = fonts.get(font_key).copied()?;
+/// Returns `None` when it has no `/Widths` (the Maastricht `F2`/`F9` Arial resources are in
+/// that class, and they must stay unmeasurable rather than be guessed at).
+fn widths_of(document: &Document, font: &lopdf::Dictionary) -> Option<(u16, Vec<u16>)> {
     // `/Widths` is routinely written as an indirect array, and `font.get` hands back the
     // reference rather than the array; resolve it before reading.
     let resolve = |object: &Object| -> Option<Object> {

@@ -24,6 +24,7 @@ use lopdf::Document;
 use crate::editor::runmetrics::{CharSpan, PdfiumCharGrid};
 use crate::editor::textlocate::{
     self, is_cid_font, is_simple_font, page_id, ContentOperation, FontInfo, RawRun, RunId,
+    XObjectRefusal,
 };
 use crate::model::AppError;
 
@@ -46,6 +47,9 @@ pub enum Gate {
     /// (h) the run's text matrix is rotated or skewed, so its advance is not a horizontal
     /// width and the width gate would measure the wrong axis (P2.7 hotfix H0).
     RotatedText,
+    /// (i) the text sits in a Form XObject this walk refused to enter: nested past the cap, or
+    /// drawing itself (P2.7.3 Q1). Carries no text, so there is nothing to rewrite.
+    NestedXObject,
 }
 
 impl Gate {
@@ -60,6 +64,7 @@ impl Gate {
             Gate::RunMismatch => "run-mismatch",
             Gate::SelectionRange => "selection-range",
             Gate::RotatedText => "rotated-text",
+            Gate::NestedXObject => "nested-xobject",
         }
     }
 
@@ -90,6 +95,10 @@ impl Gate {
             Gate::RotatedText => {
                 "this text is rotated or skewed, so its width cannot yet be measured reliably; \
                  add a text annotation instead"
+            }
+            Gate::NestedXObject => {
+                "this text sits in a form nested too deeply to edit, or in a form that draws \
+                 itself; add a text annotation instead"
             }
         }
     }
@@ -155,6 +164,8 @@ pub struct RunGates {
     pub round_trips: bool,
     /// True when the run's text matrix was not axis-aligned (P2.7 hotfix H0).
     pub rotated: bool,
+    /// Why this run is a Form XObject refusal placeholder (P2.7.3 X1), if it is one.
+    pub nested_xobject: Option<XObjectRefusal>,
 }
 
 /// Resolves the font gates for a run.
@@ -164,6 +175,20 @@ pub struct RunGates {
 /// page, no content) surfaces as an error.
 pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<RunGates, AppError> {
     let page_id = page_id(document, page)?;
+    // A placeholder run has no font — there is no text — and the refusal it carries is the
+    // answer, so `nested-xobject` outranks every font gate including `simple-font` (X1).
+    if run.xobject_refusal.is_some() {
+        return Ok(RunGates {
+            font: FontInfo {
+                key: run.font_key.clone(),
+                base_font: None,
+                subtype: None,
+            },
+            round_trips: false,
+            rotated: false,
+            nested_xobject: run.xobject_refusal,
+        });
+    }
     let font = textlocate::font_info(document, page_id, &run.font_key).ok_or_else(|| {
         AppError::TextRunNotEditable(format!(
             "this run's font ({}) could not be resolved; add a text annotation instead (gate: {})",
@@ -189,6 +214,7 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
         font,
         round_trips,
         rotated: run.rotated,
+        nested_xobject: run.xobject_refusal,
     })
 }
 
@@ -208,6 +234,11 @@ pub fn font_admissibility(gates: &RunGates) -> Admissibility {
     // Font capability is irrelevant when the geometry is the thing that cannot be read.
     if gates.rotated {
         return Admissibility::refused(Gate::RotatedText);
+    }
+    // A placeholder is not text: there is no operand to rewrite, so the only honest answer is
+    // that the text inside that form is out of reach (P2.7.3 Q1/§4.2).
+    if let Some(reason) = gates.nested_xobject {
+        return Admissibility::refused_with(Gate::NestedXObject, reason.message());
     }
     if !is_simple_font(&gates.font) {
         return Admissibility::refused(Gate::SimpleFont);
@@ -300,10 +331,6 @@ pub struct PageTextRun {
     /// ordinary run, whose own fields already describe its single operand.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragments: Vec<PageTextRun>,
-    /// The innermost marked-content id this run sits in (P2.7.1), when the page is tagged.
-    /// Advisory: it explains why a visually continuous line is two runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcid: Option<i64>,
     /// False when the run sits under an `/ActualText` that could not be updated with the edit
     /// (P2.7.1 T30), so the UI can warn that the document's accessible text still reads the
     /// old string. Always true for an untagged run.
@@ -1108,6 +1135,12 @@ fn mergeable(
     next_span: Option<CharSpan>,
 ) -> bool {
     head.style_class == next.style_class
+        // P2.7.3 X1: a placeholder is not text, and two of them are not one run. Nor may a
+        // run inside a form merge with one on the page: they have different addresses, so a
+        // single write could not clear both.
+        && head.xobject_refusal.is_none()
+        && next.xobject_refusal.is_none()
+        && head.id.xobject_path == next.id.xobject_path
         // P2.7.1 T27/T28: a tagged unit is a boundary the document itself drew. Two fragments
         // in different `MCID`s are not one editable run, however perfectly their geometry
         // abuts -- a table cell beside its neighbour, a caption under its figure. Untagged
@@ -1466,8 +1499,6 @@ fn describe_group(
     }
 
     let head = &fragments[0];
-    // Captured before `fragments` is moved into the returned struct (P2.7.1).
-    let mcid = head.mcid;
     // P2.6 T26 item 4: a seam PDFium reconstructed as a word space is shown as one. The
     // fragments' bytes have no `0x20` there (the space lived in the kern), but the page reads
     // as two words, and the picker must agree with the page. Only the display text gains the
@@ -1568,7 +1599,6 @@ fn describe_group(
         // O-Pair-3: only a genuinely merged run carries the second display level; a single
         // run's own fields already describe its operand.
         fragments: if group.len > 1 { fragments } else { Vec::new() },
-        mcid,
         actual_text_preserved: true,
     })
 }
@@ -1702,7 +1732,6 @@ fn describe_single(
         pair_confidence: pair.map(|pair| pair.confidence),
         fragment_count: 1,
         fragments: Vec::new(),
-        mcid: run.innermost_mcid(),
         actual_text_preserved: true,
     })
 }
@@ -1897,8 +1926,20 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         return Err(refuse(match verdict.gate.as_deref() {
             Some("encoding-round-trip") => Gate::EncodingRoundTrip,
             Some("rotated-text") => Gate::RotatedText,
+            Some("nested-xobject") => Gate::NestedXObject,
             _ => Gate::SimpleFont,
         }));
+    }
+
+    // P2.7.3 X1 boundary. Discovery reaches form-addressed runs, but this write path decodes
+    // the **page** stream and indexes it by `op_index`: writing here would land the bytes in
+    // an unrelated page operation. Refuse until X2's copy-on-write write exists; a refusal is
+    // recoverable, a silent corruption of untouched text is not (B-7/Q2).
+    if !run.id.xobject_path.is_empty() {
+        return Err(AppError::TextRunNotEditable(format!(
+            "text inside a form cannot be rewritten yet; add a text annotation instead (gate: {})",
+            Gate::NestedXObject.name()
+        )));
     }
 
     // Stage 2 (T11): keep the original font when it can set the replacement; otherwise
@@ -2032,6 +2073,10 @@ fn validate_run_range(
         if next.text != reference.text {
             return Err(AppError::TextRunMismatch);
         }
+        // P2.7.3 X1: "consecutive" means consecutive *in one stream*. Two runs in different
+        // forms are not one span however their indices read, and one write could not clear
+        // both.
+        let same_stream = next.id.xobject_path == previous.id.xobject_path;
         let consecutive = if next.id.op_index == previous.id.op_index {
             next.id.operand_path > previous.id.operand_path
         } else {
@@ -2041,7 +2086,7 @@ fn validate_run_range(
             && sizes_match(next.font_size, previous.font_size);
         let same_baseline = (next.baseline() - previous.baseline()).abs() <= BASELINE_TOLERANCE;
         let rightward = next.origin.0 >= previous.origin.0;
-        if !(consecutive && same_style && same_baseline && rightward) {
+        if !(same_stream && consecutive && same_style && same_baseline && rightward) {
             return Err(refuse(Gate::SelectionRange));
         }
         writes.push(textlocate::FragmentWrite {
@@ -2233,6 +2278,7 @@ mod tests {
             id: RunId {
                 op_index: 0,
                 operand_path: vec![0],
+                xobject_path: Vec::new(),
             },
             bytes: text.as_bytes().to_vec(),
             text: text.to_string(),
@@ -2250,6 +2296,7 @@ mod tests {
             marked_content: Vec::new(),
             rise: 0.0,
             rotated: false,
+            xobject_refusal: None,
         }
     }
 
@@ -3460,6 +3507,165 @@ mod tests {
         assert_eq!(
             runs[0].marked_content[0].actual_text.as_deref(),
             Some("ALPHA")
+        );
+    }
+
+    /// P2.7.3 X1: `nested-xobject` outranks `run-mismatch`. A placeholder has no PDFium box, so
+    /// the generic unpaired arm would mask the real reason — the same precedence bug H0 avoided
+    /// for `rotated-text`.
+    #[test]
+    fn the_nested_xobject_gate_outranks_run_mismatch() {
+        let document = testpdf::xobject_cycle();
+        let placeholder = {
+            let page = page_id(&document, 0).unwrap();
+            textlocate::locate_runs(&document, page)
+                .unwrap()
+                .into_iter()
+                .find(|run| run.operator == "Do")
+                .expect("the cycle placeholder")
+        };
+        // No PDFium box exists for the placeholder, so the unpaired arm is in play.
+        let described = describe_single(&document, 0, &placeholder, None, &[]).unwrap();
+        assert_eq!(
+            described.admissibility.gate.as_deref(),
+            Some("nested-xobject"),
+            "the traversal refusal must be the reason the user sees, not `run-mismatch`"
+        );
+        assert!(!described.admissibility.editable);
+        assert_eq!(described.rect, None);
+        assert_eq!(described.width, None);
+    }
+
+    /// A run inside a form must not merge with a run drawn directly on the page, however well
+    /// their geometry abuts: one write cannot clear both, because they are in different streams.
+    #[test]
+    fn a_form_run_does_not_merge_with_a_page_run() {
+        let head = test_run("He", 72.0, 12.0, "F1");
+        let mut next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        next.id.xobject_path = vec![textlocate::XObjectStep {
+            name: b"X1".to_vec(),
+            op_index: 1,
+        }];
+        assert!(
+            !mergeable(&head, &next, false, None, None),
+            "different addressing levels are different runs"
+        );
+    }
+
+    /// Two placeholders are never one run, even at the same origin and size: they carry no
+    /// text, and merging them would invent an editable address out of two refusals.
+    #[test]
+    fn two_placeholders_never_merge() {
+        let head = test_run("/X1", 72.0, 12.0, "");
+        let next = test_run("/X1", 72.0, 12.0, "");
+        let mut head = head;
+        head.xobject_refusal = Some(XObjectRefusal::Cycle);
+        let mut next = next;
+        next.xobject_refusal = Some(XObjectRefusal::Cycle);
+        assert!(!mergeable(&head, &next, false, None, None));
+    }
+
+    /// P2.7.3 X1 boundary: discovery makes a form run *visible and clickable*, but the write
+    /// path in this phase still decodes the **page** stream by `op_index`. Writing a
+    /// form-addressed run through it would land the bytes in an unrelated page operation — a
+    /// silent corruption, far worse than a refusal.
+    ///
+    /// So `edit` refuses `nested-xobject` for any run whose path is non-empty. X2 replaces
+    /// this refusal with the copy-on-write write; until then the refusal is the honest answer,
+    /// and this test is what forces X2 to notice.
+    #[test]
+    fn editing_a_form_run_is_refused_rather_than_written_to_the_page() {
+        let mut document = testpdf::xobject_single();
+        let page = page_id(&document, 0).unwrap();
+        let form_run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("the form's run is located");
+        assert_eq!(form_run.id.xobject_path.len(), 1);
+
+        let before = testpdf::bytes(&document);
+        let error = edit(&mut document, &request(&form_run, "BRAVO", 60.0, &measure_fixed(60.0)))
+            .expect_err("a form run must not be written through the page path");
+        assert!(
+            matches!(&error, AppError::TextRunNotEditable(message) if message.contains("nested-xobject")),
+            "the refusal must name the traversal gate, got {error:?}"
+        );
+        assert_eq!(testpdf::bytes(&document), before, "a refusal writes nothing");
+    }
+
+    /// The placeholder's own `Do` is not text either: even if the UI somehow sent it, the
+    /// refusal names the traversal gate rather than a font or encoding failure.
+    #[test]
+    fn editing_a_placeholder_is_refused_with_nested_xobject() {
+        let mut document = testpdf::xobject_cycle();
+        let page = page_id(&document, 0).unwrap();
+        let placeholder = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.operator == "Do")
+            .unwrap();
+        let error = edit(&mut document, &request(&placeholder, "X", 10.0, &measure_fixed(10.0)))
+            .expect_err("a placeholder is not text");
+        assert!(
+            matches!(&error, AppError::TextRunNotEditable(message) if message.contains("nested-xobject")),
+            "expected a nested-xobject refusal, got {error:?}"
+        );
+    }
+
+    /// P2.7.3 X1: a selection may not span two addressing levels. Two runs can sit at
+    /// consecutive `op_index` values, in one style, on one baseline, running rightward — and
+    /// still be in different streams, where one write could never clear both.
+    #[test]
+    fn a_selection_may_not_span_two_streams() {
+        let head = test_run("ALPHA", 72.0, 24.0, "F1");
+        let mut tail = test_run("BETA", 72.0 + head.advance, 24.0, "F1");
+        tail.id.op_index = head.id.op_index + 1;
+        tail.id.xobject_path = vec![textlocate::XObjectStep {
+            name: b"X1".to_vec(),
+            op_index: 1,
+        }];
+
+        // The same geometry in one stream does *not* refuse: the stream check is the only
+        // difference between this call and the refusing one below.
+        let mut one_stream = tail.clone();
+        one_stream.id.xobject_path.clear();
+        let one_stream_all = vec![head.clone(), one_stream.clone()];
+        let one_stream_request = EditRequest {
+            page: 0,
+            run_id: head.id.clone(),
+            expected: head.text.clone(),
+            replacement: "X".into(),
+            old_width: 60.0,
+            font_size: 24.0,
+            allow_substitution: true,
+            fragments: Vec::new(),
+            range: vec![FragmentRef {
+                run_id: one_stream.id.clone(),
+                text: one_stream.text.clone(),
+            }],
+            measure: &measure_fixed(60.0),
+        };
+        assert!(
+            validate_run_range(&one_stream_all, &head, &one_stream_request).is_ok(),
+            "in one stream the same selection is a legitimate range"
+        );
+
+        let all = vec![head.clone(), tail.clone()];
+        let request = EditRequest {
+            range: vec![FragmentRef {
+                run_id: tail.id.clone(),
+                text: tail.text.clone(),
+            }],
+            ..one_stream_request
+        };
+        let Err(error) = validate_run_range(&all, &head, &request) else {
+            panic!("a cross-stream selection must refuse");
+        };
+        assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+        assert!(
+            format!("{error:?}").contains("selection-range"),
+            "expected selection-range, got {error:?}"
         );
     }
 }

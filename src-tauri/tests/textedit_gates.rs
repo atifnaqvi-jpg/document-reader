@@ -2045,8 +2045,6 @@ fn mcid_boundary_stops_a_geometric_merge() {
         .unwrap();
 
     assert_eq!(runs.len(), 2, "one run per tagged unit");
-    assert_eq!(runs[0].mcid, Some(5));
-    assert_eq!(runs[1].mcid, Some(6));
     assert_eq!(runs[0].text, "ALPHA ");
     assert_eq!(runs[1].text, "BETA");
     assert_eq!(runs[0].fragment_count, 1);
@@ -2070,7 +2068,6 @@ fn untagged_adjacent_runs_still_merge() {
     assert_eq!(runs.len(), 1, "untagged: one editable run");
     assert_eq!(runs[0].fragment_count, 2);
     assert_eq!(runs[0].text, "ALPHA BETA");
-    assert_eq!(runs[0].mcid, None, "no structure to report");
 }
 
 /// T30: an editable run under `/Span <</ActualText …>>` has its `ActualText` rewritten with

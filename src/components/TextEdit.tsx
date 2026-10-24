@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { LibraryEntry, PageTextRun } from "../api/types";
+import { sameTextRunId, textRunIdKey } from "../api/types";
 import type { PdfRect } from "../state/geometry";
 import { pdfToPage } from "../state/geometry";
 import { useEditor } from "../state/EditorProvider";
@@ -56,12 +57,7 @@ function runBox(run: PageTextRun, metrics: OverlayMetrics) {
 /** Whether two run addresses are the same run. Reference equality is not reliable: the
  * provider re-fetches the list, so the selected object and the listed object differ. */
 export function sameRun(a: PageTextRun | null, b: PageTextRun | null): boolean {
-  return (
-    a !== null &&
-    b !== null &&
-    a.runId.opIndex === b.runId.opIndex &&
-    a.runId.operandPath.join(",") === b.runId.operandPath.join(",")
-  );
+  return a !== null && b !== null && sameTextRunId(a.runId, b.runId);
 }
 
 /** Whether `outer` fully covers `inner` in PDF points, edges included. */
@@ -147,7 +143,7 @@ export function TextRunOverlay({
         if (!box) return null;
         return (
           <button
-            key={`${run.runId.opIndex}:${run.runId.operandPath.join(".")}:${index}`}
+            key={`${textRunIdKey(run.runId)}:${index}`}
             type="button"
             className={`textrun-box${run.admissibility.editable ? "" : " refused"}${
               selection.some((picked) => sameRun(picked, run))
@@ -276,7 +272,7 @@ function RunListItem({
       {merged && expanded ? (
         <ul className="textrun-fragments" aria-label={`Fragments of "${run.text}"`}>
           {fragments.map((fragment, index) => (
-            <li key={`${fragment.runId.opIndex}:${fragment.runId.operandPath.join(".")}:${index}`}>
+            <li key={`${textRunIdKey(fragment.runId)}:${index}`}>
               <button
                 type="button"
                 className={fragment.admissibility.editable ? undefined : "refused"}
@@ -403,7 +399,7 @@ export function TextEditPanel({
                   what the user most often came to fix — then the ordinary single runs. */}
               {orderedRuns.map((run, index) => (
                 <RunListItem
-                  key={`${run.runId.opIndex}:${run.runId.operandPath.join(".")}:${index}`}
+                  key={`${textRunIdKey(run.runId)}:${index}`}
                   run={run}
                   selected={sameRun(selectedRun, run)}
                   onSelect={(picked) => {

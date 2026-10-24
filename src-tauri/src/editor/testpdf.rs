@@ -392,6 +392,201 @@ pub fn style_match_cases() -> Document {
     document
 }
 
+// --- P2.7.3: Form XObject fixtures (design §8) ---------------------------------
+
+/// How a fixture's form declares `/Resources`.
+enum FormResources {
+    /// No `/Resources`: every name resolves through the enclosing level (ISO 32000-1 §8.10).
+    Inherit,
+    /// A private dictionary naming `/F1` plus the child XObjects listed (a nested form, a
+    /// cycle, or no children at all).
+    Own(Vec<String>),
+}
+
+/// The operations that draw one run through the resource name `F1`.
+fn form_run(text: &str) -> Vec<Operation> {
+    vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("Tj", vec![Object::string_literal(text)]),
+        Operation::new("ET", vec![]),
+    ]
+}
+
+/// One `Do` of a named form, as a page (or an enclosing form) writes it.
+fn draw_form(name: &str) -> Vec<Operation> {
+    vec![Operation::new("Do", vec![name.into()])]
+}
+
+/// Builds a document from named forms and one or more pages.
+///
+/// Form ids are allocated **before** any stream is built, so a form can name a child or
+/// itself — the shapes `xobject-nested`, `xobject-depth-9` and `xobject-cycle` need. The
+/// page's `/Resources` names `/F1` and every form, so a locator that resolves fonts against
+/// the page still finds one by accident; the nested fixture is what tells the two readings
+/// apart, and `xobject-shared-resources` is what tells the resource ownership apart.
+fn xobject_document(
+    forms: Vec<(String, Vec<Operation>, FormResources)>,
+    pages: Vec<Vec<Operation>>,
+) -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(winansi_helvetica());
+
+    let ids: Vec<lopdf::ObjectId> = forms.iter().map(|_| document.new_object_id()).collect();
+    let names: Vec<String> = forms.iter().map(|(name, _, _)| name.clone()).collect();
+    let id_of = |name: &str| -> lopdf::ObjectId {
+        let index = names
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or_else(|| panic!("a fixture may only name a form it declares: {name}"));
+        ids[index]
+    };
+
+    let mut page_xobjects = Dictionary::new();
+    for (index, (name, operations, resources)) in forms.into_iter().enumerate() {
+        let mut form = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        };
+        if let FormResources::Own(children) = resources {
+            let mut xobjects = Dictionary::new();
+            for child in &children {
+                xobjects.set(child.as_str(), Object::Reference(id_of(child)));
+            }
+            form.set(
+                "Resources",
+                Object::Dictionary(dictionary! {
+                    "Font" => dictionary! { "F1" => font_id },
+                    "XObject" => xobjects,
+                }),
+            );
+        }
+        document.set_object(
+            ids[index],
+            Stream::new(form, Content { operations }.encode().unwrap()),
+        );
+        page_xobjects.set(name.as_str(), Object::Reference(ids[index]));
+    }
+
+    let page_resources = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+        "XObject" => page_xobjects,
+    });
+    let mut kids = Vec::new();
+    for operations in pages {
+        let content = document.add_object(page_body(operations));
+        kids.push(Object::Reference(document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content,
+            "Resources" => page_resources,
+        })));
+    }
+    let count = kids.len() as i64;
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => count,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// `xobject-single.pdf`: the page draws `/X1 Do`, and `X1` draws `ALPHA`.
+pub fn xobject_single() -> Document {
+    xobject_document(
+        vec![("X1".into(), form_run("ALPHA"), FormResources::Own(Vec::new()))],
+        vec![draw_form("X1")],
+    )
+}
+
+/// `xobject-nested.pdf`: the page draws `X1`, `X1` draws `X2`, `X2` draws `ALPHA`.
+///
+/// This is the fixture that separates a level-by-level walk (Q1's reading, which reaches
+/// depth 2) from a one-level walk, which cannot see the run at all.
+pub fn xobject_nested() -> Document {
+    xobject_document(
+        vec![
+            (
+                "X1".into(),
+                draw_form("X2"),
+                FormResources::Own(vec!["X2".into()]),
+            ),
+            ("X2".into(), form_run("ALPHA"), FormResources::Own(Vec::new())),
+        ],
+        vec![draw_form("X1")],
+    )
+}
+
+/// `xobject-inherited-resources.pdf`: `X1` declares no `/Resources` at all, so its `/F1` and
+/// its `/X2` resolve only through the page's dictionary (ISO 32000-1 §8.10).
+///
+/// Producers emit this shape routinely. A walker that replaces the resource stack whole
+/// instead of falling back per key finds no font and no child here, and the text silently
+/// disappears — the exact failure this phase exists to remove.
+pub fn xobject_inherited_resources() -> Document {
+    xobject_document(
+        vec![
+            ("X1".into(), draw_form("X2"), FormResources::Inherit),
+            ("X2".into(), form_run("ALPHA"), FormResources::Own(Vec::new())),
+        ],
+        vec![draw_form("X1")],
+    )
+}
+
+/// `xobject-cycle.pdf`: `X1` draws itself. Legal to write, and a naive walker never returns.
+pub fn xobject_cycle() -> Document {
+    xobject_document(
+        vec![(
+            "X1".into(),
+            draw_form("X1"),
+            FormResources::Own(vec!["X1".into()]),
+        )],
+        vec![draw_form("X1")],
+    )
+}
+
+/// `xobject-depth-9.pdf`: the chain `X1 → … → X9`, the leaf drawing `ALPHA`.
+///
+/// The page is depth 0, so `X8` sits at depth 8 (editable, the cap) and `X9` at depth 9
+/// (refused `nested-xobject`).
+pub fn xobject_depth_nine() -> Document {
+    let names: Vec<String> = (1..=9).map(|number| format!("X{number}")).collect();
+    let forms = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| match names.get(index + 1) {
+            // The last form that is still within the cap draws its own text *and* the one
+            // level that is over it, so one fixture proves both halves of the boundary.
+            Some(child) if index + 1 == 8 => {
+                let mut operations = form_run("EDGE");
+                operations.extend(draw_form(child));
+                (
+                    name.clone(),
+                    operations,
+                    FormResources::Own(vec![child.clone()]),
+                )
+            }
+            Some(child) => (
+                name.clone(),
+                draw_form(child),
+                FormResources::Own(vec![child.clone()]),
+            ),
+            None => (name.clone(), form_run("ALPHA"), FormResources::Own(Vec::new())),
+        })
+        .collect();
+    xobject_document(forms, vec![draw_form("X1")])
+}
+
 /// Serialises a document to bytes.
 pub fn bytes(document: &Document) -> Vec<u8> {
     let mut copy = document.clone();

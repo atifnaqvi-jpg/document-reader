@@ -668,3 +668,47 @@ describe("P2.4.2 click targeting: a line-sized orphan does not swallow the line"
   });
 });
 
+
+/**
+ * P2.7.3 X1: a run inside a Form XObject is addressed by its `xobjectPath`, and that path is
+ * part of what identifies it.
+ *
+ * Without the path in the identity, a page run at op 3 and a form run at op 3 are "the same
+ * run": selecting one highlights the other, and the React keys collide so React reuses the
+ * wrong element. The two runs below are deliberately given identical `opIndex` and
+ * `operandPath` to make that collision the only thing the test can be measuring.
+ */
+describe("P2.7.3 X1: an XObject run is a distinct address", () => {
+  it("keeps a page run and a form run at the same op index apart", async () => {
+    const pageRun = makeRun({
+      runId: { opIndex: 3, operandPath: [0] },
+      text: "PAGE",
+      rect: { x0: 72, y0: 700, x1: 130, y1: 712 },
+    });
+    const formRun = makeRun({
+      runId: { opIndex: 3, operandPath: [0], xobjectPath: [{ name: [88, 49], opIndex: 2 }] },
+      text: "FORM",
+      rect: { x0: 72, y0: 600, x1: 130, y1: 612 },
+    });
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [pageRun, formRun]);
+
+    await startEditing();
+
+    // Both are listed: the form's text is reachable, which is what closing matrix row A6 means.
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    expect(within(list).getByRole("button", { name: /PAGE/ })).toBeInTheDocument();
+    expect(within(list).getByRole("button", { name: /FORM/ })).toBeInTheDocument();
+
+    // And selecting the form run selects only it. The overlay's `selected` class is the
+    // visible consequence: with an identity that ignored the path, the page run would light
+    // up too, and the user would see two boxes selected for one click.
+    await userEvent.click(within(list).getByRole("button", { name: /FORM/ }));
+    expect(screen.getByLabelText(/Replace FORM with/)).toBeInTheDocument();
+    const pageBox = screen.getByRole("button", { name: /^Edit text: PAGE/ });
+    expect(pageBox.className).not.toMatch(/\bselected\b/);
+    const formBox = screen.getByRole("button", { name: /^Edit text: FORM/ });
+    expect(formBox.className).toMatch(/\bselected\b/);
+  });
+});

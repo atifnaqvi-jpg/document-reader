@@ -207,6 +207,22 @@ export const ANNOTATION_CHANGED_EVENT = "annotation://changed";
 export interface TextRunId {
   opIndex: number;
   operandPath: number[];
+  /**
+   * The Form XObjects followed to reach this operand, outermost first (P2.7.3 §3).
+   *
+   * Empty or absent means the page's own content stream, so every address written before
+   * P2.7.3 keeps its meaning. The step's `name` — a resource name, never an object id —
+   * is what identifies the form: object ids are renumbered on save (Q2/B-7).
+   */
+  xobjectPath?: XObjectStep[];
+}
+
+/** One step of descent into a Form XObject (P2.7.3 §2.2). */
+export interface XObjectStep {
+  /** The `/XObject` entry's name in the enclosing resource dictionary (`X1`). */
+  name: number[];
+  /** Index of the `Do` in the enclosing content stream that drew it. */
+  opIndex: number;
 }
 
 /** The Stage-1 verdict for one run, precomputed by the backend (P2.4 §4/T3). */
@@ -255,11 +271,6 @@ export interface PageTextRun {
   fragmentCount: number;
   /** The fragments of a merged run, head first (P2.4.1 O-Pair-3). Absent for a single run. */
   fragments?: PageTextRun[];
-  /**
-   * The innermost marked-content id the run sits in (P2.7.1), when the page is tagged.
-   * Advisory: it explains why a visually continuous line is two runs.
-   */
-  mcid?: number | null;
   /** Whether the run's `/ActualText`, if any, could be updated with the edit (P2.7.1). */
   actualTextPreserved?: boolean;
 }
@@ -320,3 +331,20 @@ export interface DecryptOutcome {
 export const ENCRYPTED_READ_ONLY = "ENCRYPTED_READ_ONLY";
 /** Error code when a supplied password does not unlock the document (P2.4 T8). */
 export const WRONG_PASSWORD = "WRONG_PASSWORD";
+
+/**
+ * A stable string for a run address, for React keys and identity checks (P2.7.3 X1).
+ *
+ * The `opIndex`/`operandPath` pair alone is no longer unique: a page run at op 3 and a run at
+ * op 3 inside a form are different runs. The XObject names are part of the key, in order, so a
+ * nested run and a page run can never collide in a list, a selection, or a `key` prop.
+ */
+export function textRunIdKey(runId: TextRunId): string {
+  const path = (runId.xobjectPath ?? []).map((step) => step.name.join(".")).join("/");
+  return `${path}:${runId.opIndex}:${runId.operandPath.join(".")}`;
+}
+
+/** Whether two addresses name the same operand (P2.7.3 X1: including the XObject path). */
+export function sameTextRunId(a: TextRunId, b: TextRunId): boolean {
+  return textRunIdKey(a) === textRunIdKey(b);
+}

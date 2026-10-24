@@ -33,7 +33,7 @@ import type {
   TextRunId,
   ToolStyle,
 } from "../api/types";
-import { ANNOTATION_KINDS } from "../api/types";
+import { ANNOTATION_KINDS, sameTextRunId } from "../api/types";
 
 /**
  * Editing state (docs/P2-DESIGN.md D7/D10).
@@ -190,7 +190,7 @@ function parseStyle(raw: string | null, tool: AnnotationKind): ToolStyle {
 /** Whether two run addresses are the same (P2.6 T26). Kept local so the provider does not
  * import from a component; `sameRun` below is the run-shaped view of it. */
 function sameRunId(a: TextRunId, b: TextRunId): boolean {
-  return a.opIndex === b.opIndex && a.operandPath.join(",") === b.operandPath.join(",");
+  return sameTextRunId(a, b);
 }
 
 function sameAddress(a: PageTextRun, b: PageTextRun): boolean {

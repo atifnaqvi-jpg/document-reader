@@ -41,6 +41,27 @@ pub struct RunId {
     /// Path from that operation's operands down to the string object. Empty would mean
     /// the operand itself, which is never a string for the operators handled here.
     pub operand_path: Vec<usize>,
+    /// The Form XObjects followed to reach the operation (P2.7.3 §3), outermost first.
+    ///
+    /// Empty — and absent from the payload — for the page's own content stream, so every
+    /// 0.5.0 address keeps its meaning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub xobject_path: Vec<XObjectStep>,
+}
+
+/// One step of descent into a page's Form XObjects (P2.7.3 §2.2).
+///
+/// The **name** is the address: `renumber_objects` rewrites every object id on save, so an id
+/// recorded here would name a different object when the inverse is replayed. `op_index` does
+/// not resolve the form — the name does — but the grouped inverse needs it to repoint the
+/// `Do`, and it is re-validated before use (§7).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XObjectStep {
+    /// The `/XObject` entry's name in the enclosing resource dictionary (`X1`).
+    pub name: Vec<u8>,
+    /// Index of the `Do` operation in the enclosing content stream that drew it.
+    pub op_index: usize,
 }
 
 /// A text run as recovered from the content bytes.
@@ -100,6 +121,36 @@ pub struct RawRun {
     /// horizontal, so the advance is not a width and the `fits-width` gate would compare it
     /// against a horizontal box. Such runs refuse until P2.7.4 measures transforms.
     pub rotated: bool,
+    /// Set on the **placeholder** run standing for a `Do` this walk refused to descend
+    /// (P2.7.3 Q1); `None` for every ordinary run.
+    ///
+    /// A refusal with no run to attach to would be invisible, and the text inside the form is
+    /// precisely what was refused. The placeholder carries the reason instead, so the picker
+    /// can say why the text it can see is not offered.
+    pub xobject_refusal: Option<XObjectRefusal>,
+}
+
+/// Why a `Do` was not descended into (P2.7.3 §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XObjectRefusal {
+    /// Descending would put the path one step past [`MAX_XOBJECT_DEPTH`].
+    Depth,
+    /// The form is already on the current path.
+    Cycle,
+}
+
+impl XObjectRefusal {
+    /// The sentence the picker shows, naming the reason and the way out.
+    pub fn message(self) -> &'static str {
+        match self {
+            XObjectRefusal::Depth => {
+                "this text sits in forms nested too deeply to edit; add a text annotation instead"
+            }
+            XObjectRefusal::Cycle => {
+                "this form draws itself, so its text cannot be walked; add a text annotation instead"
+            }
+        }
+    }
 }
 
 impl RawRun {
@@ -452,60 +503,244 @@ pub fn decoded_content(
         .map_err(|error| AppError::Other(format!("could not parse page content: {error}")))
 }
 
-/// Every text run on a page, in content order.
+/// The nesting cap for Form XObjects (P2.7.3 Q1). The page is depth 0, so a path of length 8
+/// is editable and a ninth step is refused.
+pub const MAX_XOBJECT_DEPTH: usize = 8;
+
+/// The resources in force at one level of the descent, and how that level was reached.
 ///
-/// A run whose font cannot be resolved or whose bytes cannot be decoded through the
-/// font's encoding is **dropped** rather than returned with a guessed string: an
-/// unreadable run cannot be shown to the user or matched later, so offering it would
-/// only promise an edit the write path has to refuse.
+/// A form's own `/Resources` **replaces** the enclosing one only for the keys it defines
+/// (ISO 32000-1 §8.10); the enclosing dictionary answers the rest. Resolving a font against
+/// the page in every case would decode a form's `/F9` through the page's unrelated `/F1` —
+/// the same class of bug T-3b fixed for named `/Properties`.
+struct ResourceLevel<'a> {
+    /// The dictionaries in force, outermost first. A name resolves through the innermost
+    /// dictionary that defines it, falling back to the enclosing ones (ISO 32000-1 §8.10).
+    dictionaries: Vec<&'a Dictionary>,
+    /// The `Do` steps that reached this level.
+    xobject_path: Vec<XObjectStep>,
+    /// The form ids on this path, for cycle detection.
+    form_ids: Vec<ObjectId>,
+}
+
+impl<'a> ResourceLevel<'a> {
+    /// An entry of the `/XObject` dictionary in force.
+    fn xobject(&self, document: &'a Document, name: &[u8]) -> Option<&'a Object> {
+        self.dictionaries.iter().rev().find_map(|level| {
+            let entry = level.get(b"XObject").ok()?;
+            let dictionary = document.dereference(entry).ok()?.1.as_dict().ok()?;
+            dictionary.get(name).ok()
+        })
+    }
+
+    /// The font a `/Fx Tf` in this level's content names.
+    fn font(&self, document: &'a Document, name: &[u8]) -> Option<&'a Dictionary> {
+        self.dictionaries.iter().rev().find_map(|level| {
+            let entry = level.get(b"Font").ok()?;
+            let dictionary = document.dereference(entry).ok()?.1.as_dict().ok()?;
+            document
+                .dereference(dictionary.get(name).ok()?)
+                .ok()?
+                .1
+                .as_dict()
+                .ok()
+        })
+    }
+
+    /// The form stream a `Do` names, with its object id, or `None` when the name is not a
+    /// form — an image, or a reference that does not resolve. Neither holds text, so neither
+    /// is a refusal (§4.1).
+    fn form(&self, document: &'a Document, name: &[u8]) -> Option<(&'a lopdf::Stream, ObjectId)> {
+        let (id, object) = document.dereference(self.xobject(document, name)?).ok()?;
+        let stream = object.as_stream().ok()?;
+        if stream.dict.get(b"Subtype").ok()?.as_name().ok()? != b"Form" {
+            return None;
+        }
+        Some((stream, id?))
+    }
+
+    /// The level a `Do` of `name` descends into, or why it must not be descended.
+    fn descend(&self, document: &'a Document, name: &[u8], op_index: usize) -> Descend<'a> {
+        let Some((stream, form_id)) = self.form(document, name) else {
+            return Descend::Skip;
+        };
+        if self.xobject_path.len() >= MAX_XOBJECT_DEPTH {
+            return Descend::Refuse(XObjectRefusal::Depth);
+        }
+        if self.form_ids.contains(&form_id) {
+            return Descend::Refuse(XObjectRefusal::Cycle);
+        }
+        let mut xobject_path = self.xobject_path.clone();
+        xobject_path.push(XObjectStep {
+            name: name.to_vec(),
+            op_index,
+        });
+        // Per-key fallback (ISO 32000-1 §8.10): the form's own dictionary answers the names it
+        // defines, the enclosing one answers the rest. A form written without `/Resources` is
+        // common in real files and would otherwise resolve no font at all.
+        let mut dictionaries = self.dictionaries.clone();
+        if let Some(own) = stream
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|object| document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_dict().ok())
+        {
+            dictionaries.push(own);
+        }
+        Descend::Level(ResourceLevel {
+            dictionaries,
+            xobject_path,
+            form_ids: self.form_ids.iter().copied().chain([form_id]).collect(),
+        })
+    }
+}
+
+/// What `ResourceLevel::descend` found.
+enum Descend<'a> {
+    /// A form to walk into.
+    Level(ResourceLevel<'a>),
+    /// Not a form, or not resolvable: nothing to locate inside, and not a refusal.
+    Skip,
+    /// A form this walk must not enter. A placeholder run reports it.
+    Refuse(XObjectRefusal),
+}
+
+/// Every text run on a page, in content order, **including** the text drawn by Form XObjects.
+///
+/// A run whose font cannot be resolved or whose bytes cannot be decoded through the font's
+/// encoding is **dropped** rather than returned with a guessed string: an unreadable run
+/// cannot be shown to the user or matched later, so offering it would only promise an edit the
+/// write path has to refuse.
+///
+/// Forms are walked level by level (P2.7.3 Q1), because stopping at one level leaves text in
+/// nested forms invisible — the silent failure this gate exists to remove. A `Do` the walk may
+/// not enter still yields a placeholder, so a refusal is visible rather than absent.
 pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>, AppError> {
     let content = decoded_content(document, page_id)?;
-    let fonts = document
+    let page_fonts = document
         .get_page_fonts(page_id)
         .map_err(|error| AppError::Other(format!("could not read page fonts: {error}")))?;
+    let page_resources = effective_resources(document, page_id);
+    let mut root_dictionaries = Vec::new();
+    if let Some(resources) = page_resources.as_ref() {
+        root_dictionaries.push(resources);
+    }
 
     let mut runs = Vec::new();
-    // P2.4.1 T17: follow the text object through the whole page so each operand gets the
-    // origin it was shown at. Only translation and size are tracked -- enough to pair a run
-    // with the box that contains it; skew/rotation stay out of scope (Stage 3).
     let mut walker = TextMatrixWalk::new();
-    // P2.7.1: marked content is tracked alongside the text state, in the same single pass.
     let mut marked = MarkedContentStack::new(document, page_id);
+    walk_level(
+        document,
+        &page_fonts,
+        &content.operations,
+        &ResourceLevel {
+            dictionaries: root_dictionaries,
+            xobject_path: Vec::new(),
+            form_ids: Vec::new(),
+        },
+        &mut walker,
+        &mut marked,
+        page_id,
+        &mut runs,
+    );
+    Ok(runs)
+}
 
-    for (op_index, operation) in content.operations.iter().enumerate() {
+/// Walks one content stream, appending its runs and descending the forms it draws.
+///
+/// The text state is per level: a form is a separate content stream, and the renderer starts
+/// its `Tm`/`Tf`/CTM from the graphics state it was invoked in, not from the page's. The
+/// walker and marked-content stack are therefore created fresh for each form rather than
+/// shared, which keeps every measurement identical to drawing the same text on its own page.
+#[allow(clippy::too_many_arguments)]
+fn walk_level<'a>(
+    document: &'a Document,
+    page_fonts: &std::collections::BTreeMap<Vec<u8>, &'a Dictionary>,
+    operations: &[Operation],
+    level: &ResourceLevel<'a>,
+    walker: &mut TextMatrixWalk,
+    marked: &mut MarkedContentStack<'a>,
+    page_id: ObjectId,
+    runs: &mut Vec<RawRun>,
+) {
+    for (op_index, operation) in operations.iter().enumerate() {
         walker.step(operation);
         marked.step(operation);
+
+        if operation.operator == "Do" {
+            let Some(name) = operation.operands.first().and_then(|o| o.as_name().ok()) else {
+                continue;
+            };
+            match level.descend(document, name, op_index) {
+                Descend::Level(child) => {
+                    let Some((stream, _)) = level.form(document, name) else {
+                        continue;
+                    };
+                    // A form whose stream will not decode is skipped rather than failing the
+                    // page: the rest of the page is still readable and editable.
+                    let Ok(content) = decode_stream(stream) else {
+                        continue;
+                    };
+                    let mut form_walker = TextMatrixWalk::new();
+                    let mut form_marked = MarkedContentStack::new(document, page_id);
+                    walk_level(
+                        document,
+                        page_fonts,
+                        &content.operations,
+                        &child,
+                        &mut form_walker,
+                        &mut form_marked,
+                        page_id,
+                        runs,
+                    );
+                }
+                Descend::Refuse(reason) => {
+                    runs.push(placeholder_run(op_index, name, level, reason));
+                }
+                Descend::Skip => {}
+            }
+            continue;
+        }
 
         let paths = text_operand_paths(operation);
         if paths.is_empty() {
             continue;
         }
 
-        // The font in force is the last `/Fx Tf` before this operation. A run with
-        // no font cannot be decoded, and its encoding gates are unknowable.
-        let Some(font_key) = font_in_force(&content.operations, op_index) else {
+        // The font in force is the last `/Fx Tf` before this operation, resolved through the
+        // resources **of this level**. A run with no resolvable font cannot be decoded, and
+        // its encoding gates are unknowable.
+        let Some(font_key) = font_in_force(operations, op_index) else {
             continue;
         };
-        let Some(font) = fonts.get(&font_key).copied() else {
+        let font = level
+            .font(document, &font_key)
+            .or_else(|| page_fonts.get(&font_key).copied());
+        let Some(font) = font else {
             continue;
         };
         let Ok(encoding) = font.get_font_encoding(document) else {
             continue;
         };
-        // P2.4.2 Phase A: the run's advance is measured from the font's own metrics when it has
-        // any (AFM for standard-14, `hmtx` for an embedded program), so the merge gap is exact
-        // rather than a per-character guess. The same source supplies the width quota (T22).
-        let metrics = crate::editor::substitute::FontMetrics::resolve(document, page_id, &font_key);
+        // P2.4.2 Phase A: the run's advance comes from the font's own metrics when it has any,
+        // so the merge gap is exact rather than a per-character guess.
+        let metrics = crate::editor::substitute::FontMetrics::resolve_with(
+            document,
+            font,
+            font.get(b"BaseFont")
+                .ok()
+                .and_then(|object| object.as_name().ok())
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .as_deref(),
+        );
 
-        // Where each operand showed: an ordinary `Tj` shows at the current matrix origin,
-        // but fragments inside one `TJ` array advance along the line as their kerning
-        // numbers and glyph widths dictate (T17). Both are needed for merging: a per-glyph
-        // `TJ` array is a sequence of adjacent fragments, and only the advancing pen tells
-        // them apart from a word break.
-        let per_path = tj_fragment_origins(operation, &walker, &metrics, &encoding);
-        // T29: an `MCID` changes only at `BDC`/`EMC`, which cannot occur inside a `TJ` array.
-        // The snapshot is therefore taken once per operation: every operand of one showing
-        // operator belongs to the marked-content unit the operator started in.
+        // Where each operand showed: an ordinary `Tj` shows at the current matrix origin, but
+        // fragments inside one `TJ` array advance along the line as their kerning numbers and
+        // glyph widths dictate (T17).
+        let per_path = tj_fragment_origins(operation, walker, &metrics, &encoding);
+        // T29: an `MCID` changes only at `BDC`/`EMC`, which cannot occur inside a `TJ` array,
+        // so the snapshot is taken once per operation.
         let marked_content = marked.snapshot();
 
         for path in paths {
@@ -524,16 +759,13 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                 .find(|(candidate, _)| **candidate == path)
                 .map(|(_, origin)| *origin)
                 .unwrap_or_else(|| walker.origin());
-
-            // The exact in-file advance, or `None` when this font offers no metric. The
-            // approximation exists only to keep the walk finite; `advance_exact` is what the
-            // width quota trusts (T22).
             let advance_exact = metrics.advance(&text, walker.size);
 
             runs.push(RawRun {
                 id: RunId {
                     op_index,
                     operand_path: path,
+                    xobject_path: level.xobject_path.clone(),
                 },
                 bytes: bytes.to_vec(),
                 text: text.clone(),
@@ -541,22 +773,66 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                 operator: operation.operator.clone(),
                 origin,
                 font_size: walker.size,
-                advance: spaced_advance(&metrics, &text, &walker),
-                advance_exact: advance_exact
-                    .map(|width| spaced_width(width, &text, &walker)),
+                advance: spaced_advance(&metrics, &text, walker),
+                advance_exact: advance_exact.map(|width| spaced_width(width, &text, walker)),
                 style_class: crate::editor::substitute::style_match(
-                    crate::editor::textlocate::font_info(document, page_id, &font_key)
-                        .and_then(|info| info.base_font)
+                    font.get(b"BaseFont")
+                        .ok()
+                        .and_then(|object| object.as_name().ok())
+                        .map(|name| String::from_utf8_lossy(name).into_owned())
                         .as_deref(),
                 ),
                 marked_content: marked_content.clone(),
                 rise: walker.rise(),
                 rotated: walker.is_rotated(),
+                xobject_refusal: None,
             });
         }
     }
+}
 
-    Ok(runs)
+/// The placeholder standing for a `Do` the walk refused to enter (§4.2).
+///
+/// It carries no box and cannot be edited — its `RunId` names a name operand, which fails
+/// every write validation — but it exists so the user is told why the text inside is missing
+/// rather than seeing a form behave as if it were empty.
+fn placeholder_run(
+    op_index: usize,
+    name: &[u8],
+    level: &ResourceLevel<'_>,
+    reason: XObjectRefusal,
+) -> RawRun {
+    RawRun {
+        id: RunId {
+            op_index,
+            operand_path: vec![0],
+            xobject_path: level.xobject_path.clone(),
+        },
+        bytes: name.to_vec(),
+        text: format!("/{}", String::from_utf8_lossy(name)),
+        font_key: Vec::new(),
+        operator: "Do".to_string(),
+        origin: (0.0, 0.0),
+        font_size: 0.0,
+        advance: 0.0,
+        advance_exact: None,
+        style_class: String::new(),
+        marked_content: Vec::new(),
+        rise: 0.0,
+        rotated: false,
+        xobject_refusal: Some(reason),
+    }
+}
+
+/// Decodes one Form XObject's content stream, bounded by the same cap as a page (T3e).
+fn decode_stream(
+    stream: &lopdf::Stream,
+) -> Result<lopdf::content::Content<Vec<Operation>>, AppError> {
+    let bytes = stream
+        .decompressed_content_with_limit(CONTENT_LIMIT)
+        .map_err(|error| AppError::Other(format!("could not read form content: {error}")))?;
+    lopdf::content::Content::decode(&bytes)
+        .map_err(|error| AppError::Other(format!("could not parse form content: {error}")))
 }
 
 /// The origin of every string operand of one operation, advancing the pen across a `TJ`
@@ -1048,6 +1324,11 @@ pub struct FontInfo {
     pub key: Vec<u8>,
     pub base_font: Option<String>,
     pub subtype: Option<String>,
+}
+
+/// The font dictionary the page resolves for `font_key`, for measurement (P2.7.3 X1).
+pub fn font_dict<'a>(document: &'a Document, page_id: ObjectId, font_key: &[u8]) -> Option<&'a Dictionary> {
+    document.get_page_fonts(page_id).ok()?.get(font_key).copied()
 }
 
 /// Reads the font dictionary's `/Subtype` and `/BaseFont`.
@@ -2323,6 +2604,7 @@ mod tests {
         let bogus = RunId {
             op_index: 9_999,
             operand_path: vec![0],
+            xobject_path: Vec::new(),
         };
         let error = apply_text(&mut document, 0, page, &bogus, "x", b"y").unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_MISMATCH");
@@ -2495,5 +2777,158 @@ mod tests {
                 "byte 0x{byte:02X} must decode to {want:?}"
             );
         }
+    }
+
+    // --- P2.7.3 X1: discovery across Form XObjects ------------------------------
+
+    /// The reachability the whole phase exists for: text drawn by a form is text on the page,
+    /// and the picker must be able to address it. Before X1 the run was simply absent.
+    #[test]
+    fn locates_runs_inside_a_form_xobject() {
+        let document = testpdf::xobject_single();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        let run = runs
+            .iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("text drawn inside a form is still text on the page");
+        assert_eq!(run.id.xobject_path.len(), 1, "one step: the page drew X1");
+        assert_eq!(run.id.xobject_path[0].name, b"X1");
+        assert_eq!(run.font_key, b"F1");
+        // The address is the *form's* stream, not the page's: op 3 is its `Tj`.
+        assert_eq!(run.id.op_index, 3);
+        assert_eq!(run.id.operand_path, vec![0]);
+    }
+
+    /// Q1 is only satisfied by a walk that descends level by level: a one-level walk cannot
+    /// see `X2` at all, so this fixture is what distinguishes the two readings of the ruling.
+    #[test]
+    fn a_run_inside_a_nested_form_is_located() {
+        let document = testpdf::xobject_nested();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        let run = runs
+            .iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("a doubly nested form still draws text");
+        let names: Vec<&[u8]> = run
+            .id
+            .xobject_path
+            .iter()
+            .map(|step| step.name.as_slice())
+            .collect();
+        assert_eq!(names, vec![&b"X1"[..], &b"X2"[..]], "the full path of names");
+    }
+
+    /// A form that draws itself is legal to write and hangs a naive walker. The refusal must
+    /// be **visible**: a placeholder run at the `Do` that could not be descended, carrying
+    /// `nested-xobject`, because text the picker cannot see is the failure this gate removes.
+    #[test]
+    fn a_cycle_refuses_with_nested_xobject_and_is_visible() {
+        let document = testpdf::xobject_cycle();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        let placeholder = runs
+            .iter()
+            .find(|run| run.text == "/X1")
+            .expect("the undescendable `Do` still reports itself");
+        assert_eq!(placeholder.operator, "Do");
+        assert_eq!(
+            placeholder.xobject_refusal,
+            Some(XObjectRefusal::Cycle),
+            "the placeholder carries the reason"
+        );
+
+        let gates = crate::editor::textedit::resolve_gates(&document, 0, placeholder).unwrap();
+        let verdict = crate::editor::textedit::font_admissibility(&gates);
+        assert!(!verdict.editable);
+        assert_eq!(verdict.gate.as_deref(), Some("nested-xobject"));
+        assert!(
+            verdict.message.as_deref().is_some_and(|m| m.contains("itself")),
+            "the refusal must name the cycle: {:?}",
+            verdict.message
+        );
+    }
+
+    /// The cap: depth 8 is editable, depth 9 is refused. One fixture carries both halves, so
+    /// the boundary is proven rather than the existence of a limit.
+    #[test]
+    fn depth_nine_refuses_with_nested_xobject() {
+        let document = testpdf::xobject_depth_nine();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        let edge = runs
+            .iter()
+            .find(|run| run.text == "EDGE")
+            .expect("depth 8 is within the cap and must be located");
+        assert_eq!(edge.id.xobject_path.len(), 8);
+
+        let refused = runs
+            .iter()
+            .find(|run| run.text == "/X9")
+            .expect("the ninth level still reports itself");
+        assert_eq!(refused.xobject_refusal, Some(XObjectRefusal::Depth));
+
+        let gates = crate::editor::textedit::resolve_gates(&document, 0, refused).unwrap();
+        let verdict = crate::editor::textedit::font_admissibility(&gates);
+        assert_eq!(verdict.gate.as_deref(), Some("nested-xobject"));
+        assert!(
+            verdict.message.as_deref().is_some_and(|m| m.contains("deeply")),
+            "the refusal must name the depth: {:?}",
+            verdict.message
+        );
+    }
+
+    /// The address model: an ordinary page run's `xobjectPath` is absent from the JSON, so a
+    /// 0.5.0 client sees exactly the payload it saw before.
+    #[test]
+    fn a_page_run_serialises_without_an_xobject_path() {
+        let json = serde_json::to_value(RunId {
+            op_index: 3,
+            operand_path: vec![0],
+            xobject_path: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(json, serde_json::json!({ "opIndex": 3, "operandPath": [0] }));
+
+        let json = serde_json::to_value(RunId {
+            op_index: 3,
+            operand_path: vec![0],
+            xobject_path: vec![XObjectStep {
+                name: b"X1".to_vec(),
+                op_index: 7,
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "opIndex": 3,
+                "operandPath": [0],
+                "xobjectPath": [{ "name": [88, 49], "opIndex": 7 }],
+            })
+        );
+    }
+
+    /// A form with no `/Resources` resolves every name through the enclosing level — the
+    /// per-key fallback of §4, and the reason a whole-dictionary replacement is wrong.
+    #[test]
+    fn a_form_without_resources_inherits_fonts_and_children() {
+        let document = testpdf::xobject_inherited_resources();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        let run = runs
+            .iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("the inherited child form is still descended");
+        assert_eq!(run.id.xobject_path.len(), 2, "X1 had no resources; X2 came from the page");
+        // The font came from the page's `/Font` dictionary, not from X2's own.
+        assert_eq!(run.font_key, b"F1");
+        assert_eq!(run.font_size, 24.0);
     }
 }
