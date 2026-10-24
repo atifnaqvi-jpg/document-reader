@@ -325,6 +325,8 @@ export function TextEditPanel({
     selectRun,
     substitution,
     clearSubstitution,
+    actualTextNotice,
+    clearActualTextNotice,
     allowSubstitution,
     setAllowSubstitution,
   } = useEditor();
@@ -496,6 +498,22 @@ export function TextEditPanel({
             type="button"
             aria-label="Dismiss font substitution notice"
             onClick={clearSubstitution}
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
+      {/* P2.7.1 T30: the page and the document's accessible text now disagree. This is the
+          one warning that must not be dismissible-by-ignorance, so it sits beside the
+          substitution toast and names the consequence rather than the mechanism. */}
+      {actualTextNotice ? (
+        <div className="textedit-substitution" role="status">
+          <span>{actualTextNotice}</span>
+          <button
+            type="button"
+            aria-label="Dismiss accessibility text notice"
+            onClick={clearActualTextNotice}
           >
             Dismiss
           </button>

@@ -255,6 +255,13 @@ export interface PageTextRun {
   fragmentCount: number;
   /** The fragments of a merged run, head first (P2.4.1 O-Pair-3). Absent for a single run. */
   fragments?: PageTextRun[];
+  /**
+   * The innermost marked-content id the run sits in (P2.7.1), when the page is tagged.
+   * Advisory: it explains why a visually continuous line is two runs.
+   */
+  mcid?: number | null;
+  /** Whether the run's `/ActualText`, if any, could be updated with the edit (P2.7.1). */
+  actualTextPreserved?: boolean;
 }
 
 /**
@@ -286,6 +293,11 @@ export interface TextEditResult {
   substitution?: string | null;
   /** The disclosure sentence shown when MECH-A fired (T10). `null`/absent otherwise. */
   note?: string | null;
+  /**
+   * False when the run sat under an `/ActualText` the edit could not update: the page shows
+   * the new text but the document's accessible text still states the old one.
+   */
+  actualTextPreserved?: boolean;
 }
 
 export interface DecryptOutcome {

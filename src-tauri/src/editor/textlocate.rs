@@ -13,7 +13,8 @@
 //! calls back into these helpers so the parse that a run's identity came from is the
 //! same parse that is re-validated immediately before the edit lands.
 
-use lopdf::{content::Operation, Document, Object, ObjectId};
+use std::collections::HashMap;
+use lopdf::{content::Operation, Dictionary, Document, Object, ObjectId};
 
 use crate::model::AppError;
 
@@ -84,14 +85,265 @@ pub struct RawRun {
     /// (`ABCDEF+TimesNewRomanPSMT`) mid-line purely to change weight; treating the resource
     /// name as identity split one sentence into two pickable runs.
     pub style_class: String,
+    /// The marked-content stack in force when this operand was shown, outermost first
+    /// (P2.7.1). Empty on an untagged page — which is every predicate's behaviour in 0.4.5.
+    pub marked_content: Vec<MarkedContent>,
 }
 
 impl RawRun {
-    /// The string a run's identity is re-validated against at write time.
-    pub fn signature(&self) -> &str {
-        &self.text
+    /// The innermost `MCID` this run sits in, if any.
+    ///
+    /// The *innermost* one is the boundary that matters: a paragraph (`MCID 5`) containing a
+    /// span (`MCID`-less) is still one unit, and an adjacent cell's paragraph has its own
+    /// `MCID`. Comparing whole stacks would refuse a merge whenever a producer emits an
+    /// extra wrapper on one side only.
+    pub fn innermost_mcid(&self) -> Option<i64> {
+        self.marked_content
+            .iter()
+            .rev()
+            .find_map(|entry| entry.mcid)
+    }
+
+    /// The unit whose boundary a merge must respect (P2.7.1 T27).
+    ///
+    /// Two things can bound a run, and only one of them is the document's intent:
+    ///
+    /// * a **block-level structure element**, when the `/ParentTree` resolves the `MCID`
+    ///   (`StructureIndex` above). This is the paragraph, list item or table cell that owns the
+    ///   text, and it is what a merge must not cross;
+    /// * otherwise the **raw `MCID`**, which is finer than a block. Producers that give every
+    ///   inline `Span` its own `MCID` land here only when their structure tree is missing or
+    ///   unreadable, and the finer boundary is the safe one: it can refuse a merge that a
+    ///   reader would allow, never allow one that crosses a cell.
+    ///
+    /// `None` means the text is outside any marked content, on a page with no tag at all —
+    /// the 0.4.5 behaviour, unchanged (T28).
+    pub fn merge_scope(&self) -> Option<MergeScope> {
+        let innermost = self
+            .marked_content
+            .iter()
+            .rev()
+            .find(|entry| entry.mcid.is_some())?;
+        Some(match innermost.block {
+            Some(block) => MergeScope::Block(block),
+            None => MergeScope::Untyped(innermost.mcid),
+        })
     }
 }
+
+/// What a run's merge boundary actually is (see [`RawRun::merge_scope`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeScope {
+    /// A resolved block-level structure element: the coarse, correct boundary.
+    Block(ObjectId),
+    /// A bare `MCID` whose structure element could not be resolved: the fine, conservative
+    /// boundary.
+    Untyped(Option<i64>),
+}
+
+/// One entry of the marked-content stack at a run's start (P2.7.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkedContent {
+    /// The tag (`Span`, `P`, `Artifact`, …). Recorded for diagnostics; **never** consulted
+    /// for admissibility or merging (T27).
+    pub tag: String,
+    /// The `MCID` this sequence declared, if it declared one.
+    pub mcid: Option<i64>,
+    /// The decoded `/ActualText`, when the sequence carried one.
+    pub actual_text: Option<String>,
+    /// The nearest **block-level** structure element this `MCID` resolves to, when the
+    /// document's structure tree names one (see [`StructureIndex`]).
+    ///
+    /// This, not the raw `MCID`, is the merge boundary. A producer may give every inline
+    /// `Span` inside one paragraph its own `MCID` — the Maastricht brochure does, five of them
+    /// across one sentence — so comparing `MCID`s would split a plain line of text into
+    /// uneditable pieces. The block that owns those spans is one unit, and it is the unit a
+    /// reader calls a paragraph.
+    pub block: Option<ObjectId>,
+}
+
+/// The page's structural view of `MCID`s, used to tell a *paragraph* boundary from an
+/// *inline span* boundary (P2.7.1 T27).
+///
+/// The marked-content stream says which content belongs to which `MCID`; only the structure
+/// tree says what those `MCID`s mean. Resolution is page `/StructParents` → the root's
+/// `/ParentTree` number tree → an array indexed by `MCID` → a structure element, then up
+/// through `/P` to the nearest element that is not inline.
+///
+/// Failure at **any** step is `None` rather than an error: a document with no structure tree,
+/// a malformed tree, or an out-of-range `MCID` falls back to the raw-`MCID` comparison, which
+/// can only split more conservatively (T27/T31).
+struct StructureIndex<'a> {
+    document: &'a Document,
+    /// The elements of this page's parent-tree entry, indexed by `MCID`.
+    parents: Vec<Object>,
+    /// Memoised `/P` walks, so a paragraph with 200 spans costs one traversal.
+    blocks: HashMap<ObjectId, Option<ObjectId>>,
+}
+
+impl<'a> StructureIndex<'a> {
+    fn new(document: &'a Document, page_id: ObjectId) -> Self {
+        Self {
+            document,
+            parents: Self::read_parents(document, page_id),
+            blocks: HashMap::new(),
+        }
+    }
+
+    fn read_parents(document: &Document, page_id: ObjectId) -> Vec<Object> {
+        let Some(page) = document
+            .get_object(page_id)
+            .ok()
+            .and_then(|object| object.as_dict().ok())
+        else {
+            return Vec::new();
+        };
+        let Some(index) = page.get(b"StructParents").ok().and_then(|o| o.as_i64().ok()) else {
+            return Vec::new();
+        };
+        let Some(root) = document
+            .catalog()
+            .ok()
+            .and_then(|catalog| catalog.get(b"StructTreeRoot").ok().and_then(|root| document.dereference(root).ok().map(|(_, root)| root)))
+            .and_then(|root| root.as_dict().ok())
+        else {
+            return Vec::new();
+        };
+        let Some(tree) = root.get(b"ParentTree").ok() else {
+            return Vec::new();
+        };
+        number_tree_lookup(document, tree, index)
+            .and_then(|entry| {
+                // The entry is normally a reference to the per-page array; a page with one
+                // `MCID` may inline it.
+                document
+                    .dereference(&entry)
+                    .ok()
+                    .map(|(_, resolved)| resolved.clone())
+                    .or(Some(entry))
+            })
+            .map(|entry| match entry {
+                Object::Array(items) => items,
+                other => vec![other],
+            })
+            .unwrap_or_default()
+    }
+
+    /// The block-level element owning `mcid` on this page.
+    fn block_for(&mut self, mcid: i64) -> Option<ObjectId> {
+        let entry = self.parents.get(usize::try_from(mcid).ok()?)?;
+        let leaf = referenced_element(self.document, entry)?;
+        self.block_of(leaf)
+    }
+
+    /// Walks `/P` from a leaf element to the nearest element whose type is not inline.
+    fn block_of(&mut self, element: ObjectId) -> Option<ObjectId> {
+        if let Some(known) = self.blocks.get(&element) {
+            return *known;
+        }
+        // Guard against a `/P` cycle in a malformed tree: a walk longer than the object
+        // count cannot be a real ancestry chain.
+        let mut current = Some(element);
+        let mut answer = None;
+        let mut steps = 0usize;
+        while let Some(id) = current {
+            steps += 1;
+            if steps > self.document.objects.len() + 1 {
+                break;
+            }
+            let Some(dict) = element_dict(self.document, id) else {
+                break;
+            };
+            let role = dict
+                .get(b"S")
+                .ok()
+                .and_then(|object| object.as_name().ok())
+                .map(|name| String::from_utf8_lossy(name).into_owned());
+            if role.as_deref().is_some_and(is_block_role) {
+                answer = Some(id);
+                break;
+            }
+            current = dict.get(b"P").ok().and_then(|parent| match parent {
+                Object::Reference(parent) => Some(*parent),
+                _ => None,
+            });
+        }
+        self.blocks.insert(element, answer);
+        answer
+    }
+}
+
+/// Structure element roles that own a whole block of text.
+///
+/// Everything absent from this set is treated as inline (a `Span`, a `Link`, an `Artifact`,
+/// or a role mapped through `/RoleMap`, which this walk deliberately does not follow: an
+/// unknown role is inline, so the boundary falls back to a coarser one, never to a finer one).
+fn is_block_role(role: &str) -> bool {
+    matches!(
+        role,
+        "P" | "H" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
+            | "L" | "LI" | "LBody" | "Lbl"
+            | "Table" | "TR" | "TH" | "TD" | "THead" | "TBody" | "TFoot"
+            | "Figure" | "Caption" | "BlockQuote" | "Note" | "TOC" | "TOCI"
+            | "Sect" | "Div" | "Art" | "Part" | "Index" | "NonStruct"
+    )
+}
+
+fn element_dict(document: &Document, id: ObjectId) -> Option<&Dictionary> {
+    document
+        .get_object(id)
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+}
+
+/// The structure element an `/ParentTree` entry refers to, accepting both the bare reference
+/// modern producers write and the array wrapper the same producers use for multi-page keys.
+fn referenced_element(document: &Document, entry: &Object) -> Option<ObjectId> {
+    match entry {
+        Object::Reference(id) => Some(*id),
+        Object::Array(items) => items.iter().find_map(|item| match item {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        }),
+        _ => document
+            .dereference(entry)
+            .ok()
+            .and_then(|(_, resolved)| resolved.as_array().ok())
+            .and_then(|items| {
+                items.iter().find_map(|item| match item {
+                    Object::Reference(id) => Some(*id),
+                    _ => None,
+                })
+            }),
+    }
+}
+
+/// Reads one key out of a `/ParentTree`, which is a number tree (`/Nums` or `/Kids`).
+fn number_tree_lookup(document: &Document, node: &Object, key: i64) -> Option<Object> {
+    let (_, resolved) = document.dereference(node).ok()?;
+    let dict = resolved.as_dict().ok()?;
+    if let Ok(kids) = dict.get(b"Kids").and_then(|kids| kids.as_array()) {
+        for kid in kids {
+            let (_, kid) = document.dereference(kid).ok()?;
+            let kid = kid.as_dict().ok()?;
+            let limits = kid.get(b"Limits").ok()?.as_array().ok()?;
+            let low = limits.first()?.as_i64().ok()?;
+            let high = limits.get(1)?.as_i64().ok()?;
+            if (low..=high).contains(&key) {
+                return number_tree_lookup(document, &Object::Dictionary(kid.clone()), key);
+            }
+        }
+        return None;
+    }
+    let nums = dict.get(b"Nums").ok()?.as_array().ok()?;
+    for pair in nums.chunks_exact(2) {
+        if pair[0].as_i64().ok()? == key {
+            return Some(pair[1].clone());
+        }
+    }
+    None
+}
+
 
 /// Text-showing operators (ISO 32000-1 9.4.3) and where each keeps its string.
 ///
@@ -197,9 +449,12 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
     // origin it was shown at. Only translation and size are tracked -- enough to pair a run
     // with the box that contains it; skew/rotation stay out of scope (Stage 3).
     let mut walker = TextMatrixWalk::new();
+    // P2.7.1: marked content is tracked alongside the text state, in the same single pass.
+    let mut marked = MarkedContentStack::new(document, page_id);
 
     for (op_index, operation) in content.operations.iter().enumerate() {
         walker.step(operation);
+        marked.step(operation);
 
         let paths = text_operand_paths(operation);
         if paths.is_empty() {
@@ -227,8 +482,11 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
         // numbers and glyph widths dictate (T17). Both are needed for merging: a per-glyph
         // `TJ` array is a sequence of adjacent fragments, and only the advancing pen tells
         // them apart from a word break.
-        let per_path =
-            tj_fragment_origins(operation, walker.origin(), walker.size, &metrics, &encoding);
+        let per_path = tj_fragment_origins(operation, &walker, &metrics, &encoding);
+        // T29: an `MCID` changes only at `BDC`/`EMC`, which cannot occur inside a `TJ` array.
+        // The snapshot is therefore taken once per operation: every operand of one showing
+        // operator belongs to the marked-content unit the operator started in.
+        let marked_content = marked.snapshot();
 
         for path in paths {
             let Some(bytes) = string_at(operation, &path) else {
@@ -263,13 +521,15 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                 operator: operation.operator.clone(),
                 origin,
                 font_size: walker.size,
-                advance: fragment_advance(&metrics, &text, walker.size),
-                advance_exact,
+                advance: spaced_advance(&metrics, &text, &walker),
+                advance_exact: advance_exact
+                    .map(|width| spaced_width(width, &text, &walker)),
                 style_class: crate::editor::substitute::style_match(
                     crate::editor::textlocate::font_info(document, page_id, &font_key)
                         .and_then(|info| info.base_font)
                         .as_deref(),
                 ),
+                marked_content: marked_content.clone(),
             });
         }
     }
@@ -287,8 +547,7 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
 /// origin is the answer.
 fn tj_fragment_origins(
     operation: &Operation,
-    start: (f32, f32),
-    font_size: f32,
+    state: &TextMatrixWalk,
     metrics: &crate::editor::substitute::FontMetrics,
     encoding: &lopdf::Encoding,
 ) -> Vec<(Vec<usize>, (f32, f32))> {
@@ -297,7 +556,7 @@ fn tj_fragment_origins(
     }
 
     let mut origins = Vec::new();
-    let mut pen_x = start.0;
+    let mut pen_x = state.origin().0;
     for (index, operand) in operation.operands.iter().enumerate() {
         let Object::Array(items) = operand else {
             continue;
@@ -305,17 +564,17 @@ fn tj_fragment_origins(
         for (inner, item) in items.iter().enumerate() {
             match item {
                 Object::String(bytes, _) => {
-                    origins.push((vec![index, inner], (pen_x, start.1)));
+                    origins.push((vec![index, inner], (pen_x, state.origin().1)));
                     let width = encoding
                         .bytes_to_string(bytes)
-                        .map(|text| fragment_advance(metrics, &text, font_size))
+                        .map(|text| spaced_advance(metrics, &text, state))
                         .unwrap_or(0.0);
                     pen_x += width;
                 }
                 // A kerning number is in thousandths of an em, subtracted from the pen.
                 other => {
                     if let Ok(number) = other.as_float() {
-                        pen_x -= number / 1000.0 * font_size;
+                        pen_x -= number / 1000.0 * state.size;
                     }
                 }
             }
@@ -341,6 +600,36 @@ pub fn fragment_advance(
     metrics
         .advance(text, font_size)
         .unwrap_or_else(|| text.chars().count() as f32 * 0.5 * font_size)
+}
+
+/// A fragment's horizontal advance including the text state's spacing and scaling (P2.7.1).
+///
+/// ISO 32000-1 9.4.4: each glyph moves the pen by
+/// `(w0/1000 × Tf + Tc + Tw_if_space) × Tz/100`. `fragment_advance` gives the `w0` term;
+/// this adds the other two. Before P2.7.1 they were ignored, so a metrics-less font with
+/// character spacing drifted by exactly `Tc` per glyph — the same class of defect the T24
+/// grid walk was built to survive, reintroduced on the fallback path.
+fn spaced_advance(
+    metrics: &crate::editor::substitute::FontMetrics,
+    text: &str,
+    state: &TextMatrixWalk,
+) -> f32 {
+    let Some(width) = metrics.advance(text, state.size) else {
+        return fragment_advance(metrics, text, state.size) * state.horizontal_scale / 100.0;
+    };
+    spaced_width(width, text, state)
+}
+
+/// The spacing terms alone, applied to an already-measured glyph width.
+///
+/// `Tw` counts single-byte code 32; a multi-byte code that happens to *decode* to a space is
+/// not word-spaced (ISO 32000-1 9.4.4), which is why this counts the bytes rather than the
+/// characters.
+fn spaced_width(width: f32, text: &str, state: &TextMatrixWalk) -> f32 {
+    let glyphs = text.chars().count() as f32;
+    let spaces = text.bytes().filter(|byte| *byte == b' ').count() as f32;
+    let spacing = state.char_spacing * glyphs + state.word_spacing * spaces;
+    (width + spacing) * state.horizontal_scale / 100.0
 }
 
 /// The identity text matrix `[a b c d e f]`.
@@ -400,6 +689,12 @@ struct TextMatrixWalk {
     tlm: [f32; 6],
     leading: f32,
     size: f32,
+    /// `Tc`: extra space added after every glyph, in unscaled text units (P2.7.1).
+    char_spacing: f32,
+    /// `Tw`: extra space added after every single-byte code 32 (P2.7.1).
+    word_spacing: f32,
+    /// `Tz`: horizontal scaling as a percentage, 100 = unscaled (P2.7.1).
+    horizontal_scale: f32,
 }
 
 impl TextMatrixWalk {
@@ -409,6 +704,9 @@ impl TextMatrixWalk {
             tlm: IDENTITY,
             leading: 0.0,
             size: 0.0,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scale: 100.0,
         }
     }
 
@@ -423,6 +721,10 @@ impl TextMatrixWalk {
             "BT" => {
                 self.tm = IDENTITY;
                 self.tlm = IDENTITY;
+                // ISO 32000-1 9.4.1: `BT` resets the text state parameters it can.
+                self.char_spacing = 0.0;
+                self.word_spacing = 0.0;
+                self.horizontal_scale = 100.0;
             }
             "Tm" => {
                 if let Some(matrix) = matrix_operands(&operation.operands) {
@@ -462,6 +764,21 @@ impl TextMatrixWalk {
                     }
                 }
             }
+            "Tc" => {
+                if let Some(value) = operation.operands.first().and_then(|o| o.as_float().ok()) {
+                    self.char_spacing = value;
+                }
+            }
+            "Tw" => {
+                if let Some(value) = operation.operands.first().and_then(|o| o.as_float().ok()) {
+                    self.word_spacing = value;
+                }
+            }
+            "Tz" => {
+                if let Some(value) = operation.operands.first().and_then(|o| o.as_float().ok()) {
+                    self.horizontal_scale = value;
+                }
+            }
             // `'` and `"` both perform a `T*` (move to the next line) before showing.
             "'" | "\"" => {
                 self.tlm = matrix_mul(translation(0.0, -self.leading), self.tlm);
@@ -475,6 +792,125 @@ impl TextMatrixWalk {
     fn origin(&self) -> (f32, f32) {
         (self.tm[4], self.tm[5])
     }
+}
+
+/// Tracks the `BDC`/`BMC`/`EMC` stack across a page's operations (P2.7.1).
+///
+/// The stack is what turns "two fragments look adjacent" into "two fragments are in the same
+/// tagged unit". It is deliberately a *depth* machine, not a structure-tree reader: a
+/// producer's malformed sequence must not make a page uneditable (T31), and the tag names are
+/// never consulted (T27).
+struct MarkedContentStack<'a> {
+    document: &'a Document,
+    /// `None` for a `BMC` (no properties dict, no `MCID`) so the depth is still balanced.
+    stack: Vec<Option<MarkedContent>>,
+    /// The page's `/Properties` resource dictionary, for `BDC` with a name operand.
+    properties: Option<&'a Dictionary>,
+    /// Resolves each `MCID` to its owning block, where the structure tree allows it.
+    structure: StructureIndex<'a>,
+}
+
+impl<'a> MarkedContentStack<'a> {
+    fn new(document: &'a Document, page_id: ObjectId) -> Self {
+        let properties = document
+            .get_page_resources(page_id)
+            .ok()
+            .and_then(|(resources, _)| resources)
+            .and_then(|resources| resources.get(b"Properties").ok())
+            .and_then(|object| {
+                document
+                    .dereference(object)
+                    .ok()
+                    .map(|(_, resolved)| resolved)
+            })
+            .and_then(|object| object.as_dict().ok());
+        Self {
+            document,
+            stack: Vec::new(),
+            properties,
+            structure: StructureIndex::new(document, page_id),
+        }
+    }
+
+    fn step(&mut self, operation: &Operation) {
+        match operation.operator.as_str() {
+            "BDC" => {
+                let entry = self.bdc_entry(operation);
+                self.stack.push(entry);
+            }
+            // `BMC` has no properties: it only affects depth.
+            "BMC" => self.stack.push(None),
+            // T31: an `EMC` at depth 0 is ignored rather than failing the page.
+            "EMC" => {
+                self.stack.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// The entries in force, outermost first. `None` slots (a `BMC`) contribute nothing.
+    fn snapshot(&self) -> Vec<MarkedContent> {
+        self.stack.iter().flatten().cloned().collect()
+    }
+
+    fn bdc_entry(&mut self, operation: &Operation) -> Option<MarkedContent> {
+        let tag = operation
+            .operands
+            .first()
+            .and_then(|operand| operand.as_name().ok())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .unwrap_or_default();
+        let properties = self.resolve_properties(operation.operands.get(1))?;
+        let mcid = properties
+            .get(b"MCID")
+            .ok()
+            .and_then(|object| object.as_i64().ok());
+        let actual_text = properties
+            .get(b"ActualText")
+            .ok()
+            .and_then(|object| object.as_str().ok())
+            .and_then(decode_text_string);
+        let block = mcid.and_then(|mcid| self.structure.block_for(mcid));
+        Some(MarkedContent {
+            tag,
+            mcid,
+            actual_text,
+            block,
+        })
+    }
+
+    /// `BDC` operands are `(tag, properties)`; properties is either an inline dictionary or a
+    /// name resolving through `/Properties` in the page resources.
+    fn resolve_properties(&self, operand: Option<&'a Object>) -> Option<&'a Dictionary> {
+        match operand? {
+            Object::Dictionary(dict) => Some(dict),
+            Object::Name(name) => self
+                .properties?
+                .get(name)
+                .ok()
+                .and_then(|object| self.document.dereference(object).ok())
+                .map(|(_, object)| object)
+                .and_then(|object| object.as_dict().ok()),
+            _ => None,
+        }
+    }
+}
+
+/// Decodes a PDF text string as a marked-content property value.
+///
+/// `ActualText` is required to be UTF-16BE with a `FE FF` byte-order mark when it carries
+/// non-ASCII; producers that ignore that write the text in PDFDocEncoding. Both are decoded
+/// here, and an undecodable string is treated as absent — a value we cannot read is one we
+/// must not rewrite (T30).
+fn decode_text_string(bytes: &[u8]) -> Option<String> {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        return String::from_utf16(&units).ok();
+    }
+    Some(bytes.iter().map(|byte| *byte as char).collect())
 }
 
 /// The font resource name in force at `op_index`, i.e. the last `Tf` at or before it.
@@ -665,6 +1101,9 @@ pub struct MergedWrite<'a> {
     /// The standard-14 `/BaseFont` to switch the run to (MECH-A), or `None` to keep the run's
     /// own font. One substitution per merged run, exactly as Stage 2 does for a single run.
     pub substitute: Option<&'a str>,
+    /// The text the user asked for, when there is one. Only `/ActualText` consumes it (P2.7.1):
+    /// the property must state the *semantic* text, which the operand bytes are not.
+    pub replacement: Option<&'a str>,
 }
 
 /// Applies a merged run's edit in **one** decode -> mutate -> encode -> replace pass
@@ -685,7 +1124,7 @@ pub fn apply_merged(
     page_index: u32,
     page_id: ObjectId,
     write: &MergedWrite<'_>,
-) -> Result<ContentOperation, AppError> {
+) -> Result<(ContentOperation, bool), AppError> {
     let head = write.fragments.first().ok_or(AppError::TextRunMismatch)?;
     let mut content = decoded_content(document, page_id)?;
 
@@ -770,6 +1209,17 @@ pub fn apply_merged(
         }
     }
 
+    // P2.7.1 T30: a run inside `/Span <</ActualText …>>` has semantic text that must not be
+    // left reading the old string. The rewrite rides in this same pass, so one undo restores
+    // both the operand and the property. `false` means the span is shared or the properties
+    // are a shared resource: the edit lands, but the caller must tell the user.
+    let actual_text_preserved = rewrite_actual_text(
+        &mut content.operations,
+        head.id.op_index,
+        write.replacement,
+        &page_properties(document, page_id),
+    )?;
+
     let encoded = content
         .encode()
         .map_err(|error| AppError::Other(format!("could not re-encode page content: {error}")))?;
@@ -812,15 +1262,170 @@ pub fn apply_merged(
             .collect(),
     });
 
-    Ok(ContentOperation {
-        page: page_index,
-        op_index: head.id.op_index,
-        operand_path: head.id.operand_path.clone(),
-        old_bytes: originals[0].clone(),
-        new_bytes: head.new_bytes.clone(),
-        font_swap,
-        also,
-    })
+    Ok((
+        ContentOperation {
+            page: page_index,
+            op_index: head.id.op_index,
+            operand_path: head.id.operand_path.clone(),
+            old_bytes: originals[0].clone(),
+            new_bytes: head.new_bytes.clone(),
+            font_swap,
+            also,
+        },
+        actual_text_preserved,
+    ))
+}
+
+/// Rewrites the `/ActualText` of the innermost `BDC` governing one showing operation
+/// (P2.7.1 T30).
+///
+/// Returns `true` when there was nothing to update or the update happened; `false` when an
+/// `ActualText` exists but cannot be safely rewritten. Three cases are refused rather than
+/// guessed at, because each would silently change text the user did not edit:
+///
+/// - the enclosing `BDC` holds another showing operation (the span's text is the concatenation
+///   of both, so the replacement is only part of it);
+/// - the properties operand is a **name** resolving to a shared `/Properties` entry, which other
+///   sequences in the document may also use;
+/// - the new bytes are not decodable text, so there is nothing meaningful to write.
+///
+/// A malformed stream (no `EMC` for a `BDC`) simply leaves the scan at depth > 0; the span is
+/// then treated as open to the end of the stream, which is the conservative reading.
+fn rewrite_actual_text(
+    operations: &mut [Operation],
+    op_index: usize,
+    replacement: Option<&str>,
+    named: &HashMap<Vec<u8>, Dictionary>,
+) -> Result<bool, AppError> {
+    let Some(bdc_index) = enclosing_bdc(operations, op_index) else {
+        return Ok(true);
+    };
+    let operation = operations
+        .get(bdc_index)
+        .ok_or(AppError::TextRunMismatch)?;
+
+    // A name operand resolves through `/Properties`. It cannot be mutated in place without
+    // knowing whether another sequence shares it, but it must still be *read*: a named bundle
+    // with no `ActualText` is the common case and must not produce a warning.
+    let named_properties = match operation.operands.get(1) {
+        Some(Object::Dictionary(_)) => None,
+        Some(Object::Name(name)) => Some(named.get(name).ok_or(AppError::TextRunMismatch)?),
+        _ => return Ok(true),
+    };
+    let (properties, properties_are_inline) = match named_properties {
+        Some(properties) => (properties, false),
+        None => match operation.operands.get(1) {
+            Some(Object::Dictionary(properties)) => (properties, true),
+            _ => return Ok(true),
+        },
+    };
+    if properties.get(b"ActualText").is_err() {
+        return Ok(true);
+    }
+    if !properties_are_inline {
+        // Declares `ActualText`, but shared by name: report rather than rewrite.
+        return Ok(false);
+    }
+    if !span_is_this_operation(operations, bdc_index, op_index) {
+        return Ok(false);
+    }
+
+    // Without the replacement string there is no semantic text to write. `MergedWrite` always
+    // supplies it for an edit; a caller that does not is treated as "cannot preserve".
+    let Some(text) = replacement else {
+        return Ok(false);
+    };
+    let mut encoded = vec![0xFE, 0xFF];
+    encoded.extend(text.encode_utf16().flat_map(|unit| unit.to_be_bytes()));
+    let operation = operations
+        .get_mut(bdc_index)
+        .ok_or(AppError::TextRunMismatch)?;
+    if let Some(Object::Dictionary(properties)) = operation.operands.get_mut(1) {
+        properties.set("ActualText", Object::String(encoded, lopdf::StringFormat::Literal));
+    }
+    Ok(true)
+}
+
+/// The page's `/Properties` entries, keyed by name, so the write path can read a named
+/// `ActualText` without borrowing the document it is about to mutate.
+fn page_properties(document: &Document, page_id: ObjectId) -> HashMap<Vec<u8>, Dictionary> {
+    document
+        .get_page_resources(page_id)
+        .ok()
+        .and_then(|(resources, _)| resources)
+        // `get_page_resources` returns the dictionary only when it was written inline; an
+        // indirect `/Resources` (the usual case) still has to be read through the page.
+        .or_else(|| {
+            document
+                .get_object(page_id)
+                .ok()
+                .and_then(|page| page.as_dict().ok())
+                .and_then(|page| page.get(b"Resources").ok())
+                .and_then(|resources| document.dereference(resources).ok())
+                .and_then(|(_, resolved)| resolved.as_dict().ok())
+        })
+        .and_then(|resources| resources.get(b"Properties").ok())
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(_, resolved)| resolved.as_dict().ok().cloned())
+        .map(|properties| {
+            properties
+                .iter()
+                .filter_map(|(name, value)| {
+                    document
+                        .dereference(value)
+                        .ok()
+                        .and_then(|(_, resolved)| resolved.as_dict().ok())
+                        .map(|dict| (name.clone(), dict.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The index of the `BDC` that opened the marked-content sequence containing `op_index`.
+fn enclosing_bdc(operations: &[Operation], op_index: usize) -> Option<usize> {
+    let mut stack: Vec<usize> = Vec::new();
+    for (index, operation) in operations.iter().enumerate().take(op_index) {
+        match operation.operator.as_str() {
+            "BDC" => stack.push(index),
+            "BMC" => stack.push(usize::MAX),
+            "EMC" => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack
+        .into_iter()
+        .rev()
+        .find(|index| *index != usize::MAX)
+}
+
+/// True when `op_index` is the **only** showing operation between `bdc_index` and its `EMC`.
+fn span_is_this_operation(operations: &[Operation], bdc_index: usize, op_index: usize) -> bool {
+    let mut depth = 0usize;
+    for (index, operation) in operations.iter().enumerate().skip(bdc_index) {
+        if index != bdc_index {
+            match operation.operator.as_str() {
+                "BDC" | "BMC" => depth += 1,
+                "EMC" => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                // A nested sequence's text belongs to the nested span, not to this one.
+                _ if depth == 0
+                    && index != op_index
+                    && !text_operand_paths(operation).is_empty() =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+    }
+    true
 }
 
 /// Installs a standard-14 substitute font as a resource on `page_id` and rewrites the

@@ -859,6 +859,10 @@ pub struct TextEditResult {
     /// The disclosure sentence shown to the user when MECH-A fired (T10). Substitution is
     /// never silent; when this is `Some`, the edit changed the document's typeface.
     pub note: Option<String>,
+    /// False when the edited run sat under an `/ActualText` this edit could not update
+    /// (P2.7.1 T30): the page now renders the new text while the document's accessible text
+    /// still states the old one.
+    pub actual_text_preserved: bool,
 }
 
 /// Applies a Stage-2 in-place text edit and saves it to a **new** file
@@ -977,6 +981,7 @@ pub async fn edit_page_text(
         text: replacement,
         substitution: outcome.substitution,
         note: outcome.note,
+        actual_text_preserved: outcome.actual_text_preserved,
     })
 }
 

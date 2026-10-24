@@ -2025,3 +2025,246 @@ fn t26_a_range_across_lines_is_refused() {
     assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
     assert!(error.to_string().contains("selection-range"), "{error}");
 }
+
+// --- P2.7.1 T27/T28: marked-content boundaries ---------------------------------
+
+/// T27: two fragments whose geometry is *identical* to a legitimate merge, but which sit in
+/// different `MCID`s, must stay two runs.
+///
+/// This is the silent-wrong-write case: a table cell beside its neighbour, or two short
+/// paragraphs on one baseline. Nothing in the old predicates could see it — same style, same
+/// size, zero gap — so only the document's own structure separates them.
+#[test]
+fn mcid_boundary_stops_a_geometric_merge() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("mcid-boundaries.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
+
+    assert_eq!(runs.len(), 2, "one run per tagged unit");
+    assert_eq!(runs[0].mcid, Some(5));
+    assert_eq!(runs[1].mcid, Some(6));
+    assert_eq!(runs[0].text, "ALPHA ");
+    assert_eq!(runs[1].text, "BETA");
+    assert_eq!(runs[0].fragment_count, 1);
+    assert_eq!(runs[1].fragment_count, 1);
+}
+
+/// T28: the same geometry, untagged, still merges into one run exactly as in 0.4.5.
+///
+/// The pair of assertions is the phase's whole safety argument: the boundary changes
+/// behaviour only where the document has structure to offer.
+#[test]
+fn untagged_adjacent_runs_still_merge() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("two-run-line.pdf");
+    let document = load(&path);
+    let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+        .unwrap();
+
+    assert_eq!(runs.len(), 1, "untagged: one editable run");
+    assert_eq!(runs[0].fragment_count, 2);
+    assert_eq!(runs[0].text, "ALPHA BETA");
+    assert_eq!(runs[0].mcid, None, "no structure to report");
+}
+
+/// T30: an editable run under `/Span <</ActualText …>>` has its `ActualText` rewritten with
+/// the edit, in the same pass, with no second save.
+#[test]
+fn actualtext_is_rewritten_with_the_edit() {
+    let path = fixture("actualtext-span.pdf");
+    let mut document = load(&path);
+    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].marked_content[0].actual_text.as_deref(),
+        Some("ALPHA")
+    );
+
+    let outcome = edit_with(
+        &mut document,
+        0,
+        runs[0].id.clone(),
+        "ALPHA",
+        "OMEGA",
+        70.0,
+        70.0,
+    )
+    .unwrap();
+    assert!(
+        outcome.actual_text_preserved,
+        "an inline ActualText is the one case we can rewrite"
+    );
+
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let content = textlocate::decoded_content(&document, page_id).unwrap();
+    let actual = content
+        .operations
+        .iter()
+        .find(|operation| operation.operator == "BDC")
+        .and_then(|operation| operation.operands.get(1))
+        .and_then(|operand| operand.as_dict().ok())
+        .and_then(|properties| properties.get(b"ActualText").ok())
+        .and_then(|object| object.as_str().ok())
+        .expect("ActualText survives the edit");
+    assert_eq!(actual[0], 0xFE);
+    assert_eq!(actual[1], 0xFF);
+    let units: Vec<u16> = actual[2..]
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    assert_eq!(String::from_utf16(&units).unwrap(), "OMEGA");
+}
+
+/// T30: a **named** `/Properties` entry cannot be rewritten in place — another sequence may
+/// share it — so the edit lands and the caller is told the accessible text diverged.
+#[test]
+fn shared_actualtext_is_reported_not_rewritten() {
+    let path = fixture("actualtext-named-property.pdf");
+    let mut document = load(&path);
+    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+
+    let outcome = edit_with(
+        &mut document,
+        0,
+        runs[0].id.clone(),
+        "ALPHA",
+        "OMEGA",
+        70.0,
+        70.0,
+    )
+    .unwrap();
+    assert!(
+        !outcome.actual_text_preserved,
+        "a shared named property is reported, never silently rewritten"
+    );
+    assert_eq!(outcome.inverse.new_bytes, b"OMEGA", "the edit itself lands");
+}
+
+/// T31: malformed marked content must not make a page uneditable.
+#[test]
+fn unbalanced_marked_content_does_not_refuse() {
+    use lopdf::content::{Content, Operation};
+
+    let mut document = lopdf::Document::load(fixture("simple-winansi.pdf")).unwrap();
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let mut content = textlocate::decoded_content(&document, page_id).unwrap();
+    // An `EMC` with nothing open, then a `BDC` that is never closed.
+    content.operations.insert(0, Operation::new("EMC", vec![]));
+    content.operations.insert(
+        1,
+        Operation::new(
+            "BDC",
+            vec![
+                "P".into(),
+                lopdf::Object::Dictionary(lopdf::dictionary! { "MCID" => 3 }),
+            ],
+        ),
+    );
+    let encoded = Content {
+        operations: content.operations,
+    }
+    .encode()
+    .unwrap();
+    document.change_page_content(page_id, encoded).unwrap();
+
+    let runs = textlocate::locate_runs(&document, page_id).unwrap();
+    assert!(
+        runs.len() >= 2,
+        "the page still yields its runs; a broken tag stream is not a refusal"
+    );
+    assert_eq!(
+        runs[0].innermost_mcid(),
+        Some(3),
+        "the unclosed BDC still scopes the text that follows it"
+    );
+}
+
+/// T32: `Tc` moves the pen, so the second fragment of a `TJ` array starts where the page
+/// draws it. Before P2.7.1 the walk ignored `Tc` and every seam after a spaced glyph was
+/// `Tc` too narrow — enough to break a merge, or (worse) to merge the wrong pair.
+#[test]
+fn char_spacing_advances_the_tj_pen() {
+    let path = fixture("char-spacing-tj.pdf");
+    let document = load(&path);
+    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
+        .unwrap();
+
+    let first = runs.iter().find(|run| run.text == "AB").expect("AB");
+    let second = runs.iter().find(|run| run.text == "CD").expect("CD");
+
+    // Helvetica `A`+`B` at 24pt is 32.016pt of glyph; `Tc 5` adds 5pt after each of the two.
+    assert!(
+        (first.advance - 42.016).abs() < 0.05,
+        "advance {:.3} must include 2 x Tc on top of 32.016pt of glyph",
+        first.advance
+    );
+    // The pen moves by exactly that advance -- the second fragment starts where it is drawn.
+    assert!(
+        (second.origin.0 - first.origin.0 - first.advance).abs() < 0.05,
+        "second origin gap {:.3} should equal the spaced advance {:.3}",
+        second.origin.0 - first.origin.0,
+        first.advance
+    );
+    assert_eq!(runs.len(), 2);
+}
+
+/// The block rule itself, on the real tagged document: `MCID`s 5/6/7 of page 3 are sibling
+/// `Span`s under one `P`, so they are one merge scope even though their `MCID`s differ.
+///
+/// This is the correction that keeps T25/T26 green. If it regresses, a paragraph in every
+/// InDesign-produced PDF becomes uneditable piece by piece.
+#[test]
+fn sibling_spans_share_one_merge_scope() {
+    let path = fixture("real-maastricht-brochure.pdf");
+    let document = load(&path);
+    let page_id = textlocate::page_id(&document, 2).unwrap();
+    let runs = textlocate::locate_runs(&document, page_id).unwrap();
+
+    let spans: Vec<&textlocate::RawRun> = runs
+        .iter()
+        .filter(|run| matches!(run.innermost_mcid(), Some(5..=7)))
+        .collect();
+    assert!(!spans.is_empty(), "the fixture must still be tagged");
+    assert!(
+        spans.iter().any(|run| run.innermost_mcid() != spans[0].innermost_mcid()),
+        "the sample must actually span more than one MCID, or it proves nothing"
+    );
+    let scope = spans[0].merge_scope();
+    assert!(
+        matches!(scope, Some(textlocate::MergeScope::Block(_))),
+        "a resolvable /ParentTree must yield a block scope, got {scope:?}"
+    );
+    assert!(
+        spans.iter().all(|run| run.merge_scope() == scope),
+        "sibling spans under one P are one scope"
+    );
+}
+
+/// T30, the case that matters most in practice: a **named** `/Properties` bundle that holds
+/// only an `MCID` declares no `ActualText`, so there is nothing to preserve and nothing to
+/// warn about. Treating "named" as "shared ActualText" would raise the accessibility warning
+/// on almost every InDesign-produced page.
+#[test]
+fn named_properties_without_actualtext_is_not_a_warning() {
+    let path = fixture("named-property-no-actualtext.pdf");
+    let mut document = load(&path);
+    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+
+    let outcome = edit_with(&mut document, 0, runs[0].id.clone(), "ALPHA", "OMEGA", 70.0, 70.0)
+        .unwrap();
+    assert!(
+        outcome.actual_text_preserved,
+        "no ActualText was declared, so the edit preserved all there was"
+    );
+}

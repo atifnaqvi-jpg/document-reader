@@ -102,6 +102,15 @@ interface EditorContextValue {
   /** Clears the substitution toast after the user has acknowledged it. */
   clearSubstitution: () => void;
   /**
+   * The accessibility notice from the most recent edit, or `null` (P2.7.1 T30).
+   *
+   * Set when the edited run sat under an `/ActualText` the write could not update: the page
+   * reads the new text while the document's accessible text still states the old one.
+   */
+  actualTextNotice: string | null;
+  /** Clears the accessibility notice after the user has acknowledged it. */
+  clearActualTextNotice: () => void;
+  /**
    * The O-ST2-4 toggle. When off, a run whose font cannot set the replacement refuses
    * (`SUBSTITUTE_REFUSED`) instead of being switched to a standard-14 font. Defaults on.
    */
@@ -217,6 +226,7 @@ export function EditorProvider({
   // Stage 2: the O-ST2-4 toggle (default on) and the T10 disclosure from the last edit.
   const [allowSubstitution, setAllowSubstitution] = useState(true);
   const [substitution, setSubstitution] = useState<SubstitutionNote | null>(null);
+  const [actualTextNotice, setActualTextNotice] = useState<string | null>(null);
 
   // Per-document stacks (D7). Kept in one map keyed by document rather than one stack
   // reset on switch, so moving between documents does not destroy either one's history.
@@ -525,6 +535,14 @@ export function EditorProvider({
             ? { baseFont: result.substitution, message: result.note ?? "" }
             : null,
         );
+        // P2.7.1 T30: an `/ActualText` we could not rewrite is a silent divergence between
+        // what the page shows and what the document says it shows. Say so.
+        setActualTextNotice(
+          result.actualTextPreserved === false
+            ? "This text is tagged with accessibility text (ActualText) that could not be " +
+              "updated; screen readers will still read the previous wording."
+            : null,
+        );
         // T5: the inverse is a ContentOperation, so undo re-applies the previous bytes to
         // the file this edit wrote. Redo replays the edit on *that* file, so each entry
         // tracks the path its own inverse describes: an edit made after this one would
@@ -560,6 +578,7 @@ export function EditorProvider({
   );
 
   const clearSubstitution = useCallback(() => setSubstitution(null), []);
+  const clearActualTextNotice = useCallback(() => setActualTextNotice(null), []);
 
   const decryptCopyToFile = useCallback(
     async (password: string): Promise<DecryptOutcome | null> => {
@@ -662,6 +681,8 @@ export function EditorProvider({
       editText,
       substitution,
       clearSubstitution,
+      actualTextNotice,
+      clearActualTextNotice,
       allowSubstitution,
       setAllowSubstitution,
       decryptCopyToFile,
@@ -692,6 +713,8 @@ export function EditorProvider({
       editText,
       substitution,
       clearSubstitution,
+      actualTextNotice,
+      clearActualTextNotice,
       allowSubstitution,
       decryptCopyToFile,
       pageRuns,

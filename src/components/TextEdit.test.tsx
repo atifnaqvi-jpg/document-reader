@@ -252,6 +252,68 @@ describe("P2.4 Stage 2: font substitution is disclosed and toggleable", () => {
     await waitFor(() => expect(screen.queryByText(note)).toBeNull());
   });
 
+  it("warns when a tagged run's ActualText could not be updated (P2.7.1 T30)", async () => {
+    const run = makeRun();
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [run]);
+
+    mounted.backend.on("edit_page_text", () => ({
+      path: "/books/a (edited 1).pdf",
+      inverse: { page: 0, opIndex: 7, operandPath: [1], oldBytes: [104], newBytes: [106] },
+      text: "jello",
+      substitution: null,
+      note: null,
+      // The span's ActualText is shared with another sequence, so the write left it alone.
+      actualTextPreserved: false,
+    }));
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    await userEvent.click(within(list).getByRole("button", { name: /hello/ }));
+    const field = await screen.findByLabelText(/Replace hello with/);
+    await userEvent.clear(field);
+    await userEvent.type(field, "jello");
+    await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
+
+    // Silence here would leave the page and its accessible text disagreeing unremarked.
+    await screen.findByText(/screen readers will still read the previous wording/);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss accessibility text notice" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/screen readers will still read/)).toBeNull(),
+    );
+  });
+
+  it("shows no accessibility warning when ActualText was rewritten or absent", async () => {
+    const run = makeRun();
+    const mounted = mountEditor();
+    open = mounted.backend;
+    mounted.backend.on("get_page_text_runs", () => [run]);
+    mounted.backend.on("edit_page_text", () => ({
+      path: "/books/a (edited 1).pdf",
+      inverse: { page: 0, opIndex: 7, operandPath: [1], oldBytes: [104], newBytes: [106] },
+      text: "jello",
+      substitution: null,
+      note: null,
+      actualTextPreserved: true,
+    }));
+
+    await startEditing();
+    const list = await screen.findByRole("list", { name: "Text runs on this page" });
+    await userEvent.click(within(list).getByRole("button", { name: /hello/ }));
+    const field = await screen.findByLabelText(/Replace hello with/);
+    await userEvent.clear(field);
+    await userEvent.type(field, "jello");
+    await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
+
+    await waitFor(() =>
+      expect(mounted.backend.callsTo("edit_page_text")).toHaveLength(1),
+    );
+    expect(screen.queryByText(/screen readers will still read/)).toBeNull();
+  });
+
   it("sends allowSubstitution=false once the toggle is turned off (O-ST2-4)", async () => {
     const run = makeRun();
     const mounted = mountEditor();

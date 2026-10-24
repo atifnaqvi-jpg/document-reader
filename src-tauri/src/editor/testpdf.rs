@@ -1294,3 +1294,182 @@ pub fn two_run_line() -> Document {
         ]],
     )
 }
+
+/// Two adjacent operands on one line, each inside its own tagged unit (P2.7.1).
+///
+/// The geometry is identical to [`two_run_line`] -- same font, same size, zero gap -- so
+/// nothing but the `MCID` can separate them. A merge here would be the silent wrong write
+/// the phase exists to prevent.
+pub fn mcid_boundaries() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new(
+                "BDC",
+                vec![
+                    "P".into(),
+                    Object::Dictionary(dictionary! { "MCID" => 5 }),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ALPHA ")]),
+            Operation::new("EMC", vec![]),
+            Operation::new(
+                "BDC",
+                vec![
+                    "P".into(),
+                    Object::Dictionary(dictionary! { "MCID" => 6 }),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("BETA")]),
+            Operation::new("EMC", vec![]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
+/// One operand wrapped in `/Span <</ActualText …>>` (P2.7.1 T30), UTF-16BE with its BOM.
+pub fn actualtext_span() -> Document {
+    let actual: Vec<u8> = vec![0xFE, 0xFF]
+        .into_iter()
+        .chain("ALPHA".encode_utf16().flat_map(|unit| unit.to_be_bytes()))
+        .collect();
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new(
+                "BDC",
+                vec![
+                    "Span".into(),
+                    Object::Dictionary(dictionary! {
+                        "ActualText" => Object::String(actual, lopdf::StringFormat::Literal),
+                    }),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ALPHA")]),
+            Operation::new("EMC", vec![]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
+/// A named `/Properties` resource: the `ActualText` a write must not rewrite in place,
+/// because another sequence may share it (P2.7.1 T30).
+pub fn actualtext_named_property() -> Document {
+    let actual: Vec<u8> = vec![0xFE, 0xFF]
+        .into_iter()
+        .chain("ALPHA".encode_utf16().flat_map(|unit| unit.to_be_bytes()))
+        .collect();
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(winansi_helvetica());
+    let properties_id = document.add_object(dictionary! {
+        "P0" => dictionary! {
+            "ActualText" => Object::String(actual, lopdf::StringFormat::Literal),
+        },
+    });
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+        "Properties" => properties_id,
+    });
+    let content_id = document.add_object(page_body(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("BDC", vec!["Span".into(), "P0".into()]),
+        Operation::new("Tj", vec![Object::string_literal("ALPHA")]),
+        Operation::new("EMC", vec![]),
+        Operation::new("ET", vec![]),
+    ]));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog_id);
+    document
+}
+
+/// Two runs in one `TJ` array with `Tc 5`: the pen advance must include the character
+/// spacing, or the second fragment appears 15pt to the left of where it is drawn (P2.7.1).
+pub fn char_spacing_tj() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Tc", vec![5.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new(
+                "TJ",
+                vec![Object::Array(vec![
+                    Object::string_literal("AB"),
+                    Object::string_literal("CD"),
+                ])],
+            ),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
+/// A `BDC` whose properties are **named** but carry only an `MCID`: no `ActualText` at all.
+/// This is the overwhelmingly common InDesign shape, and the write path must not report a
+/// divergence for it (P2.7.1 T30).
+pub fn named_property_without_actualtext() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(winansi_helvetica());
+    let properties_id = document.add_object(dictionary! {
+        "P0" => dictionary! { "MCID" => 0 },
+    });
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+        "Properties" => properties_id,
+    });
+    let content_id = document.add_object(page_body(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("BDC", vec!["Span".into(), "P0".into()]),
+        Operation::new("Tj", vec![Object::string_literal("ALPHA")]),
+        Operation::new("EMC", vec![]),
+        Operation::new("ET", vec![]),
+    ]));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document
+}

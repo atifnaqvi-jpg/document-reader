@@ -280,6 +280,14 @@ pub struct PageTextRun {
     /// ordinary run, whose own fields already describe its single operand.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragments: Vec<PageTextRun>,
+    /// The innermost marked-content id this run sits in (P2.7.1), when the page is tagged.
+    /// Advisory: it explains why a visually continuous line is two runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcid: Option<i64>,
+    /// False when the run sits under an `/ActualText` that could not be updated with the edit
+    /// (P2.7.1 T30), so the UI can warn that the document's accessible text still reads the
+    /// old string. Always true for an untagged run.
+    pub actual_text_preserved: bool,
 }
 
 impl PageTextRun {
@@ -1077,6 +1085,11 @@ fn mergeable(
     next_span: Option<CharSpan>,
 ) -> bool {
     head.style_class == next.style_class
+        // P2.7.1 T27/T28: a tagged unit is a boundary the document itself drew. Two fragments
+        // in different `MCID`s are not one editable run, however perfectly their geometry
+        // abuts -- a table cell beside its neighbour, a caption under its figure. Untagged
+        // pages compare `None == None` and are unchanged.
+        && head.merge_scope() == next.merge_scope()
         && sizes_match(head.font_size, next.font_size)
         && (head.origin.1 - next.origin.1).abs() <= BASELINE_TOLERANCE
         && {
@@ -1427,6 +1440,8 @@ fn describe_group(
     }
 
     let head = &fragments[0];
+    // Captured before `fragments` is moved into the returned struct (P2.7.1).
+    let mcid = head.mcid;
     // P2.6 T26 item 4: a seam PDFium reconstructed as a word space is shown as one. The
     // fragments' bytes have no `0x20` there (the space lived in the kern), but the page reads
     // as two words, and the picker must agree with the page. Only the display text gains the
@@ -1527,6 +1542,8 @@ fn describe_group(
         // O-Pair-3: only a genuinely merged run carries the second display level; a single
         // run's own fields already describe its operand.
         fragments: if group.len > 1 { fragments } else { Vec::new() },
+        mcid,
+        actual_text_preserved: true,
     })
 }
 
@@ -1659,6 +1676,8 @@ fn describe_single(
         pair_confidence: pair.map(|pair| pair.confidence),
         fragment_count: 1,
         fragments: Vec::new(),
+        mcid: run.innermost_mcid(),
+        actual_text_preserved: true,
     })
 }
 
@@ -1791,6 +1810,8 @@ pub struct EditOutcome {
     pub substitution: Option<String>,
     /// The disclosure sentence shown to the user when MECH-A fired (T10).
     pub note: Option<String>,
+    /// False when the run sat under an `/ActualText` that could not be updated (P2.7.1 T30).
+    pub actual_text_preserved: bool,
 }
 
 /// Applies a Stage-2 edit, returning the inverse operation for undo (T5).
@@ -1941,13 +1962,16 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     let merged = textlocate::MergedWrite {
         fragments: writes,
         substitute: substitution.as_deref(),
+        replacement: Some(&request.replacement),
     };
-    let inverse = textlocate::apply_merged(document, request.page, page_id, &merged)?;
+    let (inverse, actual_text_preserved) =
+        textlocate::apply_merged(document, request.page, page_id, &merged)?;
 
     Ok(EditOutcome {
         inverse,
         substitution,
         note,
+        actual_text_preserved,
     })
 }
 
@@ -2160,6 +2184,7 @@ mod tests {
             // Tests name the font by its style class, so a "different resource, same class"
             // case is expressed by passing the same `font` twice (P2.6 T26).
             style_class: font.to_string(),
+            marked_content: Vec::new(),
         }
     }
 

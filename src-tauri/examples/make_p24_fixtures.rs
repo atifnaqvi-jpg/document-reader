@@ -132,6 +132,28 @@ fn main() {
             "two-run-line.pdf",
             testpdf::bytes(&testpdf::two_run_line()),
         ),
+        // P2.7.1: tagged structure as a merge boundary, and the ActualText shapes a write
+        // must (and must not) rewrite.
+        (
+            "mcid-boundaries.pdf",
+            testpdf::bytes(&testpdf::mcid_boundaries()),
+        ),
+        (
+            "actualtext-span.pdf",
+            testpdf::bytes(&testpdf::actualtext_span()),
+        ),
+        (
+            "actualtext-named-property.pdf",
+            testpdf::bytes(&testpdf::actualtext_named_property()),
+        ),
+        (
+            "named-property-no-actualtext.pdf",
+            testpdf::bytes(&testpdf::named_property_without_actualtext()),
+        ),
+        (
+            "char-spacing-tj.pdf",
+            testpdf::bytes(&testpdf::char_spacing_tj()),
+        ),
     ];
 
     for (name, bytes) in fixtures {
