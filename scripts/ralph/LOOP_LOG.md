@@ -200,3 +200,42 @@ when `ink_y` is reverted to `run.origin.1`.
     `b".."`.
   - Fixture regeneration still rewrites `encrypted-aes.pdf` (random AES salt) — `git checkout --`
     it every time, as the T-2 entry says.
+
+## Iteration 6 — T-4 — green
+
+- Task: bump the release to 0.5.0 across every carrier and ship release notes for it
+- Test: `every_release_carrier_reports_the_same_version` (red before: **yes** — `the release
+  version is 0.4.5, but package-lock.json root version says 0.2.1, package-lock.json
+  packages[""].version says 0.2.1`), `the_shipped_version_has_release_notes` (red before:
+  **yes** — `no release notes for 0.5.0`), `the_0_5_0_release_notes_cover_every_change_the_plan_claims`
+  (red before: **yes** — the file did not exist; then, once written, it failed on the missing
+  copy-on-write mention, so it is not a test that cannot fail)
+- Files: `src-tauri/tests/release_version.rs` (new), `docs/RELEASE-NOTES.md` (new),
+  `package.json`, `package-lock.json`, `src-tauri/{Cargo.toml,Cargo.lock,tauri.conf.json}`,
+  `docs/P2.7.1-mcid-DESIGN.md`, `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`,
+  `scripts/ralph/IMPLEMENTATION_PLAN.md`
+- Gate: cargo test 334 lib + 1 + 6 + 10 + 2 + 3 + 3 + 3 + 54 integration = 416 passed, clippy
+  clean (0 warnings), tsc clean, vitest 62 passed
+- Commit: see `chore(p2.7.1): release 0.5.0`
+- Learned:
+  - **The version carriers had already drifted and nothing noticed.** `package-lock.json` was
+    still at **0.2.1** while `package.json`, `tauri.conf.json`, `Cargo.toml` and `Cargo.lock`
+    all said 0.4.5. Nothing reads that file at build time, so no test or build ever failed:
+    the only symptom would have been an installer whose internal version disagrees with its
+    filename. Six carriers now move together and a test pins it, which retires the
+    "bump five files" checklist as the only guard.
+  - `Cargo.lock` does **not** follow `Cargo.toml` by itself: `cargo metadata --no-deps` leaves
+    it alone and `cargo check` refreshes it. Editing it by hand (the `[[package]] name =
+    "document-reader"` entry, not the first `version =` in the file) is what the bump commits
+    before this one did too.
+  - Release notes are one file with one `## <version>` section per release, not
+    `RELEASE-<version>.md`: the test looks up the version from `Cargo.toml`, so a forgotten
+    section fails the build while a stale section costs nothing.
+  - Docs that "list the version bump as a prerequisite" become wrong the moment the bump lands:
+    P2.7.1 §7 still said `Ts` was unimplemented and the parity plan still called rotation
+    "silently mis-measured". Both corrected here, because a design doc that contradicts a
+    shipped release is the same class of defect as the stale `ActualText`.
+  - **New task found (T-4b, unchecked):** the release workflow triggers on tags matching `v*`,
+    but every real release was tagged `version-0.4.4`. 0.4.4 built only because the tag pointed
+    at the branch head pushed in the same event. Tagging 0.5.0 `version-0.5.0` on a commit that
+    is not the branch head produces **no installer**. Fix the glob before the release tag.

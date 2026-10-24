@@ -81,8 +81,20 @@ under P2.7.4.
       page it built a fresh dict holding just its own font — dropping every font and XObject the
       page resolved — and reused the name `/F1`, redrawing the page's own text in Helvetica. It
       now uses the same resolver and its own name, `WmkFont`.
-- [ ] **T-4** Version bump to 0.5.0 (`Cargo.toml`, `package.json`, `tauri.conf.json`), release
+- [x] **T-4** Version bump to 0.5.0 (`Cargo.toml`, `package.json`, `tauri.conf.json`), release
       notes listing `Ts`, PDFDocEncoding, copy-on-write, and the MCID work.
+      **Done.** Six carriers agree (`Cargo.toml`, `Cargo.lock`, `package.json`, both
+      `package-lock.json` entries, `tauri.conf.json`) and `docs/RELEASE-NOTES.md` carries the
+      0.5.0 section. `src-tauri/tests/release_version.rs` is the guard, because the checklist
+      had already failed silently: `package-lock.json` was still at **0.2.1** while every other
+      carrier said 0.4.5, which builds an installer named one version that reports another.
+      `the_0_5_0_release_notes_cover_every_change_the_plan_claims` fails if any of the four
+      shipped changes goes unmentioned.
+- [ ] **T-4b Release tag does not trigger the installer.** `.github/workflows/release-windows.yml`
+      triggers on tags matching `v*`; both real releases were tagged `version-0.4.4`, which does
+      **not** match. The 0.4.4 build fired only because the tag pointed at the branch head that
+      was pushed in the same event; a `version-*` tag on any other commit gets no build and no
+      release asset. Fix the glob (or adopt `v*` tags) before tagging 0.5.0.
 - [ ] **T-5** Commit the P2.7.1 body (code + fixtures + docs) as one feature commit, separate
       from H0.
 
