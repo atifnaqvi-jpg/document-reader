@@ -1746,8 +1746,13 @@ const SUBSTITUTE_NAME: &[u8] = b"FS1";
 /// dictionary for `base_font` (P2.4 Stage 2 T15).
 ///
 /// Standard-14 needs no program: the entry is a document-local `/Type1` dictionary with
-/// `/Encoding /WinAnsiEncoding`. No stream, no CMap. The page's `/Resources` may be an
-/// indirect reference or an inline dictionary; both are handled.
+/// `/Encoding /WinAnsiEncoding`. No stream, no CMap.
+///
+/// The entry must land in the dictionary **this page resolves**, and must not be visible to
+/// any other page (ruling B-7). Both requirements fail on a page whose `/Resources` is
+/// inherited or shared, so such a page is given a private copy first. Writing to the
+/// inherited dictionary instead would leave the edited page naming a font it cannot resolve
+/// — the text would stop rendering — while editing an object other pages also read.
 fn ensure_substitute_resource(
     document: &mut Document,
     page_id: ObjectId,
@@ -1760,43 +1765,133 @@ fn ensure_substitute_resource(
     font_dictionary.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
     let substitute_id = document.add_object(font_dictionary);
 
-    // `get_page_resources` walks the page and its `/Parent` chain; the first reference it
-    // reports is the page's own `/Resources` when that is indirect. An inline `/Resources`
-    // (or an absent one) reports nothing and is handled on the page dictionary itself.
-    let (_, resource_ids) = document
-        .get_page_resources(page_id)
-        .map_err(|error| AppError::Other(format!("could not read page resources: {error}")))?;
-
-    if let Some(resources_id) = resource_ids.first().copied() {
-        let resources = document
-            .get_object_mut(resources_id)
-            .map_err(|error| AppError::Other(format!("page resources unreadable: {error}")))?
-            .as_dict_mut()
-            .map_err(|error| {
-                AppError::Other(format!("page resources not a dictionary: {error}"))
-            })?;
-        set_font_entry(resources, substitute_id)?;
-    } else {
-        let page = document
-            .get_object_mut(page_id)
-            .map_err(|error| AppError::Other(format!("page object unreadable: {error}")))?
-            .as_dict_mut()
-            .map_err(|error| AppError::Other(format!("page object not a dictionary: {error}")))?;
-        if !page.has(b"Resources") {
-            page.set(b"Resources", Object::Dictionary(lopdf::Dictionary::new()));
-        }
-        let resources = page
-            .get_mut(b"Resources")
-            .and_then(Object::as_dict_mut)
-            .map_err(|_| {
-                AppError::Other(
-                    "page /Resources is an indirect reference MECH-A cannot rewrite".to_string(),
-                )
-            })?;
-        set_font_entry(resources, substitute_id)?;
-    }
+    let resources = writable_resources_mut(document, page_id)?;
+    set_font_entry(resources, substitute_id)?;
 
     Ok(substitute_id)
+}
+
+/// The resources dictionary a write to `page_id` must go through, giving the page a private
+/// copy of what it inherits when it does not own one.
+///
+/// Callers must not write into an inherited or shared dictionary: a page's own `/Resources`
+/// replaces an inherited one outright, so a write to the ancestor is invisible on the page it
+/// was meant for, and a shared object is another page's to keep (ruling B-7).
+pub(crate) fn writable_resources_mut(
+    document: &mut Document,
+    page_id: ObjectId,
+) -> Result<&mut lopdf::Dictionary, AppError> {
+    match resources_slot(document, page_id) {
+        ResourcesSlot::Page => private_page_resources(document, page_id),
+        ResourcesSlot::Object(resources_id) => document
+            .get_dictionary_mut(resources_id)
+            .map_err(|error| AppError::Other(format!("page resources unreadable: {error}"))),
+        ResourcesSlot::Shared => {
+            let copy = effective_resources(document, page_id).unwrap_or_default();
+            let page = document
+                .get_object_mut(page_id)
+                .map_err(|error| AppError::Other(format!("page object unreadable: {error}")))?
+                .as_dict_mut()
+                .map_err(|error| {
+                    AppError::Other(format!("page object not a dictionary: {error}"))
+                })?;
+            page.set(b"Resources", Object::Dictionary(copy));
+            private_page_resources(document, page_id)
+        }
+    }
+}
+
+/// How far up the `/Parent` chain resource inheritance is followed. PDF specifies no depth
+/// limit; the bound only stops a malformed cyclic tree from looping.
+const MAX_PARENT_DEPTH: usize = 64;
+
+/// Where the `/Font` map a page must be edited through actually is.
+enum ResourcesSlot {
+    /// The page carries its own inline `/Resources` dictionary.
+    Page,
+    /// The page's `/Resources` is an indirect object no other page references.
+    Object(ObjectId),
+    /// `/Resources` is inherited from the page tree, or its object is referenced by more
+    /// than one page. Either way it is not this page's to write into (ruling B-7).
+    Shared,
+}
+
+/// The page's own `/Resources`, resolved as a viewer resolves it.
+///
+/// A page's own `/Resources` **replaces** an inherited one outright (ISO 32000-1 §7.7.3.4);
+/// `/Font` is not merged across the page tree. `Document::get_page_fonts` unions them, which
+/// answers "can this font be found at all" rather than "does this page resolve the name its
+/// content stream writes".
+pub(crate) fn effective_resources(
+    document: &Document,
+    page_id: ObjectId,
+) -> Option<lopdf::Dictionary> {
+    let mut node_id = page_id;
+    for _ in 0..MAX_PARENT_DEPTH {
+        let node = document.get_dictionary(node_id).ok()?;
+        if let Ok(resources) = node.get(b"Resources") {
+            let (_, resolved) = document.dereference(resources).ok()?;
+            return resolved.as_dict().ok().cloned();
+        }
+        node_id = node.get(b"Parent").ok()?.as_reference().ok()?;
+    }
+    None
+}
+
+/// How many objects reference `id`, so a write can tell a private resource object from a
+/// shared one.
+fn reference_count(document: &Document, id: ObjectId) -> usize {
+    fn count(object: &Object, id: ObjectId) -> usize {
+        match object {
+            Object::Reference(reference) => usize::from(*reference == id),
+            Object::Array(entries) => entries.iter().map(|entry| count(entry, id)).sum(),
+            Object::Dictionary(dictionary) => {
+                dictionary.iter().map(|(_, value)| count(value, id)).sum()
+            }
+            Object::Stream(stream) => {
+                stream.dict.iter().map(|(_, value)| count(value, id)).sum()
+            }
+            _ => 0,
+        }
+    }
+    document.objects.values().map(|object| count(object, id)).sum()
+}
+
+/// Classifies the page's `/Resources` for a write.
+fn resources_slot(document: &Document, page_id: ObjectId) -> ResourcesSlot {
+    let Ok(page) = document.get_dictionary(page_id) else {
+        return ResourcesSlot::Shared;
+    };
+    match page.get(b"Resources") {
+        Ok(Object::Dictionary(_)) => ResourcesSlot::Page,
+        Ok(resources) => match resources.as_reference() {
+            Ok(id) if reference_count(document, id) == 1 => ResourcesSlot::Object(id),
+            _ => ResourcesSlot::Shared,
+        },
+        Err(_) => ResourcesSlot::Shared,
+    }
+}
+
+/// The page's own inline `/Resources` dictionary, for writing.
+fn private_page_resources(
+    document: &mut Document,
+    page_id: ObjectId,
+) -> Result<&mut lopdf::Dictionary, AppError> {
+    let page = document
+        .get_object_mut(page_id)
+        .map_err(|error| AppError::Other(format!("page object unreadable: {error}")))?
+        .as_dict_mut()
+        .map_err(|error| AppError::Other(format!("page object not a dictionary: {error}")))?;
+    if !page.has(b"Resources") {
+        page.set(b"Resources", Object::Dictionary(lopdf::Dictionary::new()));
+    }
+    page.get_mut(b"Resources")
+        .and_then(Object::as_dict_mut)
+        .map_err(|_| {
+            AppError::Other(
+                "page /Resources is an indirect reference MECH-A cannot rewrite".to_string(),
+            )
+        })
 }
 
 /// Sets `/Font /FS1` in a resources dictionary, creating `/Font` when absent.

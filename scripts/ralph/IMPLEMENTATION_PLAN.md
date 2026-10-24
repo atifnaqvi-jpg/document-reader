@@ -61,11 +61,26 @@ under P2.7.4.
       for an *inline* `/Resources`, so on the usual file (indirect `/Resources`) no named
       `/ActualText` was visible to the locator at all. Reader and writer now share
       `page_properties_dict`.
-- [ ] **T-3b Regression fixture gap.** The P2.7.1 suite never exercised a page whose
+- [x] **T-3b Regression fixture gap.** The P2.7.1 suite never exercised a page whose
       `/Resources` is an **indirect object** — the form real producers write — which is how the
       reader bug above stayed invisible. Audit the other page-resource readers (font lookup,
       `ensure_substitute_resource`, XObject lookup) for the same inline-only assumption and add
       an indirect-`/Resources` variant of an existing fixture to each.
+      **Done.** New fixture `indirect-resources-inherited.pdf`: `/Resources` on the `/Pages`
+      node, page 1 shadowing `/F1` with an inline dict, pages 2–3 inheriting one shared object.
+      Audit result: the *read* paths (`get_page_fonts`, `FontMetrics::resolve`,
+      `embedded_font_program`, `simple_widths`, `properties_slot`) all handle both forms; **two
+      writers did not** and are fixed here:
+      (1) `ensure_substitute_resource` wrote into `get_page_resources().1.first()`, i.e. the
+      first *referenced* resources object up the `/Parent` chain. On a shadowing page that is
+      the ancestor's dict, which the page cannot resolve — the edited run named `FS1` and
+      stopped rendering; on an inheriting page it mutated an object two pages read (B-7
+      violation). It now resolves the slot (`writable_resources_mut`) and gives the page a
+      private copy of what it inherits.
+      (2) `export::watermark` read only the page's *inline* `/Resources`, so on an inheriting
+      page it built a fresh dict holding just its own font — dropping every font and XObject the
+      page resolved — and reused the name `/F1`, redrawing the page's own text in Helvetica. It
+      now uses the same resolver and its own name, `WmkFont`.
 - [ ] **T-4** Version bump to 0.5.0 (`Cargo.toml`, `package.json`, `tauri.conf.json`), release
       notes listing `Ts`, PDFDocEncoding, copy-on-write, and the MCID work.
 - [ ] **T-5** Commit the P2.7.1 body (code + fixtures + docs) as one feature commit, separate

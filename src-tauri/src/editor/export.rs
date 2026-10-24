@@ -18,6 +18,7 @@ use std::path::Path;
 use lopdf::content::{Content, Operation};
 use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 
+use crate::editor::textlocate;
 use crate::model::{Annotation, AnnotationKind, AppError};
 use crate::provider::PdfProvider;
 
@@ -254,6 +255,13 @@ fn contents_array(document: &Document, page_id: ObjectId) -> Result<Vec<Object>,
     }
 }
 
+/// The resource name the watermark's own font is installed under.
+///
+/// Not `F1`: a page's content stream almost always draws with `F1`, and taking that name over
+/// redraws the page's own text in the watermark's font. The name is unlikely to collide, and
+/// `watermark` reuses one font object per page rather than adding one per pass.
+const WATERMARK_FONT: &[u8] = b"WmkFont";
+
 /// Smallest font size a fitted watermark will use, in points.
 const FONT_SIZE_FLOOR: f32 = 6.0;
 
@@ -361,7 +369,7 @@ pub fn watermark(document: &mut Document, text: &str) -> Result<usize, AppError>
             ),
             Operation::new("rg", vec![0.5.into(), 0.5.into(), 0.5.into()]),
             Operation::new("BT", vec![]),
-            Operation::new("Tf", vec!["F1".into(), fitted.into()]),
+            Operation::new("Tf", vec![Object::Name(WATERMARK_FONT.to_vec()), fitted.into()]),
             // Half the text's own extent, because `Tj` draws from the *baseline start* and
             // would otherwise centre the beginning of the text rather than the text.
             Operation::new(
@@ -390,25 +398,17 @@ pub fn watermark(document: &mut Document, text: &str) -> Result<usize, AppError>
             .map_err(|error| AppError::Other(format!("page unreadable: {error}")))?
             .as_dict_mut()
             .map_err(|error| AppError::Other(format!("page is not a dictionary: {error}")))?;
+        page.set(b"Contents", Object::Array(array));
 
-        let mut resources = page
-            .get(b"Resources")
-            .ok()
-            .and_then(|object| object.as_dict().ok())
-            .cloned()
-            .unwrap_or_default();
+        let resources = textlocate::writable_resources_mut(document, page_id)?;
         let mut fonts = resources
             .get(b"Font")
             .ok()
             .and_then(|object| object.as_dict().ok())
             .cloned()
             .unwrap_or_default();
-        // `F1` is the name the content stream above draws with; if the page already has an
-        // F1 the watermark reuses it rather than shadowing the page's own font.
-        fonts.set("F1", Object::Reference(font_id));
-        resources.set("Font", Object::Dictionary(fonts));
-        page.set("Resources", Object::Dictionary(resources));
-        page.set("Contents", Object::Array(array));
+        fonts.set(WATERMARK_FONT, Object::Reference(font_id));
+        resources.set(b"Font", Object::Dictionary(fonts));
     }
 
     Ok(document.get_pages().len())

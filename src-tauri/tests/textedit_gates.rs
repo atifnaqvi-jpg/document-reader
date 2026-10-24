@@ -2420,6 +2420,136 @@ fn a_shared_named_property_is_cloned_not_rewritten_in_place() {
     std::fs::remove_file(&saved).unwrap();
 }
 
+// --- T-3b: a page's `/Resources` may be an indirect object, or inherited ---------
+
+/// The `/BaseFont` each name in a page's `/Font` resources resolves to **as a viewer sees
+/// it**: a page's own `/Resources` replaces an inherited one outright (ISO 32000-1 §7.7.3.4),
+/// so nothing is merged across the page tree.
+///
+/// Deliberately not `Document::get_page_fonts`, which unions the page's dictionary with every
+/// referenced one: that is the right question for "can this font be found at all", and the
+/// wrong one for "will the viewer resolve the name the content stream writes".
+fn page_fonts(document: &lopdf::Document, page: u32) -> Vec<(String, String)> {
+    let page_id = textlocate::page_id(document, page).unwrap();
+    let page = document.get_dictionary(page_id).unwrap();
+    let mut node = page;
+    let resources = loop {
+        if let Ok(resources) = node.get(b"Resources") {
+            break document.dereference(resources).unwrap().1.as_dict().unwrap().clone();
+        }
+        let Ok(parent) = node.get(b"Parent").and_then(lopdf::Object::as_reference) else {
+            break lopdf::Dictionary::new();
+        };
+        node = document.get_dictionary(parent).unwrap();
+    };
+    let fonts = resources
+        .get(b"Font")
+        .ok()
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(_, object)| object.as_dict().ok())
+        .cloned()
+        .unwrap_or_default();
+    let mut names: Vec<(String, String)> = fonts
+        .iter()
+        .filter_map(|(name, font)| {
+            let font = document.dereference(font).ok()?.1.as_dict().ok()?;
+            let base = font.get(b"BaseFont").ok()?.as_name().ok()?;
+            Some((
+                String::from_utf8_lossy(name).into_owned(),
+                String::from_utf8_lossy(base).into_owned(),
+            ))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// T-3b, read side: with `/Resources` on the page tree, a page that shadows `/F1` sees its own
+/// font and a page that inherits sees the ancestor's. `get_page_fonts` merges the page's inline
+/// dictionary with the referenced ones, so the shadowing entry must win.
+#[test]
+fn an_inherited_resources_page_reads_the_font_it_actually_uses() {
+    let document = load(&fixture("indirect-resources-inherited.pdf"));
+
+    assert_eq!(
+        page_fonts(&document, 0),
+        vec![("F1".to_string(), "ABCDEF+Shadowed".to_string())],
+        "the shadowing page reads its own /Resources, not the inherited one"
+    );
+    assert_eq!(
+        page_fonts(&document, 1),
+        vec![("F1".to_string(), "ABCDEF+Inherited".to_string())],
+        "a page with no /Resources of its own reads the inherited one"
+    );
+}
+
+/// T-3b, write side: the substitute must land in the resources dictionary **the edited page
+/// actually resolves**. On a page that shadows an inherited `/Resources`, writing to the
+/// ancestor's dictionary leaves the page pointing at a font name (`FS1`) it cannot resolve,
+/// so the edited text stops rendering — a silent wrong write, not a refusal.
+#[test]
+fn a_substitute_lands_on_the_page_that_shadows_its_inherited_resources() {
+    let mut document = load(&fixture("indirect-resources-inherited.pdf"));
+    let run = first_run(&document, 0);
+    assert_eq!(run.text, "SUBSET");
+
+    edit_with(&mut document, 0, run.id, "SUBSET", "OMEGA", 200.0, 5.0)
+        .expect("a subset run on a shadowing page is editable");
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("edited.pdf");
+    document.save(&target).unwrap();
+    let reread = load(&target);
+
+    let fonts = page_fonts(&reread, 0);
+    assert!(
+        fonts.iter().any(|(name, base)| name == "FS1" && base == "Helvetica"),
+        "the substitute must be visible to the page it was installed for, got {fonts:?}"
+    );
+    let runs = textlocate::locate_runs(&reread, textlocate::page_id(&reread, 0).unwrap()).unwrap();
+    assert_eq!(runs.len(), 1, "the edited run must still be locatable");
+    assert_eq!(runs[0].text, "OMEGA");
+    assert_eq!(
+        runs[0].font_key, b"FS1",
+        "the run names the substitute it was swapped to"
+    );
+}
+
+/// T-3b + ruling B-7: two pages inheriting one `/Resources` object must not be edited through
+/// each other. Substituting on one page gives **that** page its own copy; its sibling's font
+/// resources stay exactly as they were.
+#[test]
+fn a_substitution_on_an_inheriting_page_does_not_reach_its_sibling() {
+    let mut document = load(&fixture("indirect-resources-inherited.pdf"));
+    let run = first_run(&document, 1);
+    assert_eq!(run.text, "ALPHA");
+
+    edit_with(&mut document, 1, run.id, "ALPHA", "OMEGA", 200.0, 5.0)
+        .expect("a subset run on an inheriting page is editable");
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("edited.pdf");
+    document.save(&target).unwrap();
+    let reread = load(&target);
+
+    let edited = page_fonts(&reread, 1);
+    assert!(
+        edited.iter().any(|(name, base)| name == "FS1" && base == "Helvetica"),
+        "the edited page resolves its substitute, got {edited:?}"
+    );
+
+    assert_eq!(
+        page_fonts(&reread, 2),
+        vec![("F1".to_string(), "ABCDEF+Inherited".to_string())],
+        "the sibling page shares the inherited dictionary and must not have changed"
+    );
+    let sibling =
+        textlocate::locate_runs(&reread, textlocate::page_id(&reread, 2).unwrap()).unwrap();
+    assert_eq!(sibling.len(), 1);
+    assert_eq!(sibling[0].text, "BRAVO");
+    assert_eq!(sibling[0].font_key, b"F1");
+}
+
 /// One `/Properties` entry's raw `ActualText` bytes, read back through the page resources.
 fn page_property_entry(document: &lopdf::Document, page_id: lopdf::ObjectId, name: &[u8]) -> Vec<u8> {
     let page = document.get_dictionary(page_id).unwrap();

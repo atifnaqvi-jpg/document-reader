@@ -308,6 +308,60 @@ fn flattening_leaves_annotations_it_did_not_write_alone() {
     );
 }
 
+/// T-3b: a page's `/Resources` may be inherited from the page tree, which is the shape real
+/// producers write. The watermark used to read only the page's *own* `/Resources`, so on an
+/// inheriting page it built a fresh dictionary containing just its own font — silently
+/// dropping every font, XObject and colour space the page resolves — and it reused the name
+/// `F1`, so on a page that already has an `F1` the page's own text was redrawn in the
+/// watermark's font.
+#[test]
+fn a_watermark_keeps_the_resources_the_page_inherits() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("indirect-resources-inherited.pdf");
+    let mut document = lopdf::Document::load(&path).unwrap();
+    watermark(&mut document, "DRAFT").unwrap();
+
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    let reread = lopdf::Document::load_mem(&bytes).unwrap();
+
+    // Page 3 inherits its resources and has no `F1` of its own.
+    let page_id = *reread.get_pages().get(&3).unwrap();
+    let fonts = reread.get_page_fonts(page_id).unwrap();
+    let base = |name: &[u8]| -> String {
+        let font = fonts.get(name).unwrap_or_else(|| panic!("{:?} is not a resource", name));
+        String::from_utf8_lossy(font.get(b"BaseFont").unwrap().as_name().unwrap()).into_owned()
+    };
+    assert_eq!(
+        base(b"F1".as_slice()),
+        "ABCDEF+Inherited",
+        "the fonts the page inherited must still resolve after a watermark"
+    );
+    let watermark_font = fonts
+        .keys()
+        .find(|name| name.as_slice() != b"F1")
+        .expect("the watermark adds its own font under a name of its own")
+        .clone();
+    assert_eq!(
+        base(&watermark_font),
+        "Helvetica",
+        "the watermark draws with its own font, not the page's"
+    );
+
+    // Page 1 has an `F1` of its own and inherits nothing: the watermark must not take the
+    // name over, or the page's text is redrawn in a different face.
+    let page_id = *reread.get_pages().get(&1).unwrap();
+    let fonts = reread.get_page_fonts(page_id).unwrap();
+    let own = fonts.get(b"F1".as_slice()).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(own.get(b"BaseFont").unwrap().as_name().unwrap()),
+        "ABCDEF+Shadowed",
+        "the page's own font keeps the name its content stream writes"
+    );
+}
+
 #[test]
 fn an_empty_watermark_is_rejected_rather_than_written() {
     // A blank watermark would silently produce a file the user believes is stamped.

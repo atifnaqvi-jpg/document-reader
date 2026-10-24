@@ -1658,3 +1658,72 @@ pub fn named_property_without_actualtext() -> Document {
     document.trailer.set("Root", catalog_id);
     document
 }
+
+/// A three-page document whose `/Resources` are **inherited and indirect**, the shape real
+/// producers write: the `/Pages` node carries the resource dictionary, page 1 shadows it
+/// with an inline `/Resources` of its own, and pages 2 and 3 inherit it (P2.7.1 T-3b).
+///
+/// The shadowing page resolves the same resource *name* (`F1`) to a different font, so the
+/// base names (`ABCDEF+Shadowed` / `ABCDEF+Inherited`) prove which dictionary a reader
+/// consulted. The two inheriting pages share one dictionary object, which is what makes an
+/// in-place write to it observable on the page that was not edited.
+///
+/// Every font is subset-flagged with no program, so any page substitutes `Helvetica`.
+pub fn indirect_resources_inherited() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let inherited_font_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "ABCDEF+Inherited",
+        "Encoding" => "WinAnsiEncoding",
+    });
+    let inherited_resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => inherited_font_id },
+    });
+    let shadowed_font_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "ABCDEF+Shadowed",
+        "Encoding" => "WinAnsiEncoding",
+    });
+
+    let shadowed_content = document.add_object(page_body(single_run("SUBSET")));
+    let shadowed_page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => shadowed_content,
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => shadowed_font_id } },
+    });
+
+    let mut inherited_pages = Vec::new();
+    for text in ["ALPHA", "BRAVO"] {
+        let content = document.add_object(page_body(single_run(text)));
+        inherited_pages.push(Object::Reference(document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content,
+        })));
+    }
+
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => std::iter::once(Object::Reference(shadowed_page_id))
+                .chain(inherited_pages)
+                .collect::<Vec<_>>(),
+            "Count" => 3,
+            "Resources" => inherited_resources_id,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}

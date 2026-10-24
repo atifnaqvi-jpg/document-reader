@@ -166,6 +166,12 @@ fn main() {
             "char-spacing-tj.pdf",
             testpdf::bytes(&testpdf::char_spacing_tj()),
         ),
+        // P2.7.1 T-3b: a page's `/Resources` is inherited from the `/Pages` node, the form
+        // the P2.7.1 fixtures never exercised.
+        (
+            "indirect-resources-inherited.pdf",
+            testpdf::bytes(&testpdf::indirect_resources_inherited()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

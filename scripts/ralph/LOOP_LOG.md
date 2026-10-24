@@ -153,3 +153,50 @@ when `ink_y` is reverted to `run.origin.1`.
     server death, one "restart during tool execution"). Running the command with output
     redirected to a file in the background and polling the file is the reliable pattern here;
     `cargo` output is otherwise truncated by the tool.
+
+## Iteration 5 — T-3b — green
+
+- Task: audit the page-resource readers/writers for the inline-only `/Resources` assumption and
+  add an indirect-`/Resources` fixture to each path that needed one.
+- Test: `an_inherited_resources_page_reads_the_font_it_actually_uses` (red before: **no** — the
+  read path was already correct; it is the control that proves the fixture says what it claims),
+  `a_substitute_lands_on_the_page_that_shadows_its_inherited_resources` (red before: **yes** —
+  `the substitute must be visible to the page it was installed for, got [("F1",
+  "ABCDEF+Shadowed")]`), `a_substitution_on_an_inheriting_page_does_not_reach_its_sibling` (red
+  before: **yes** — the sibling reported `[("F1","ABCDEF+Inherited"),("FS1","Helvetica")]`),
+  `a_watermark_keeps_the_resources_the_page_inherits` (red before: **yes** — `left: "Helvetica",
+  right: "ABCDEF+Inherited"`).
+- Files: `src-tauri/src/editor/textlocate.rs`, `src-tauri/src/editor/export.rs`,
+  `src-tauri/src/editor/testpdf.rs`, `src-tauri/examples/make_p24_fixtures.rs`,
+  `src-tauri/tests/textedit_gates.rs`, `src-tauri/tests/export.rs`,
+  `src-tauri/tests/fixtures/indirect-resources-inherited.pdf`,
+  `scripts/ralph/IMPLEMENTATION_PLAN.md`
+- Gate: cargo test 334 lib + 54 gates + 25 other integration = 413 passed, clippy clean,
+  tsc clean, vitest 62 passed
+- Commit: see `fix(p2.7.1): resolve inherited and shared page resources before writing`
+- Learned:
+  - **A page's own `/Resources` *replaces* an inherited one; it is not merged** (ISO 32000-1
+    §7.7.3.4). `Document::get_page_fonts` **unions** the page dict with every referenced one up
+    the `/Parent` chain, which is right for "can this font be found at all" and **wrong** for
+    "does the page resolve the name its content stream writes". Do not use it to answer the second
+    question, and do not use it in a test that asserts what a viewer sees.
+  - `get_page_resources(...).1` is the list of *referenced* resources objects following
+    `/Parent`, page's own first **if indirect**. It is non-empty whenever any ancestor has an
+    indirect `/Resources`, which is exactly how the old `ensure_substitute_resource` fell into
+    writing to the ancestor.
+  - Two silent-wrongness bugs, both from that one assumption, both now fixed:
+    substitution on a shadowing page installed `FS1` where the page could not see it (edited text
+    stops rendering); `export::watermark` rebuilt `/Resources` from the page's inline dict only
+    (dropping inherited fonts/XObjects) and took the name `/F1` over (page text redrawn in
+    Helvetica). Watermark's font name is now `WmkFont`.
+  - The resolver is one shared helper, `textlocate::writable_resources_mut` (+
+    `effective_resources`, `resources_slot`, `reference_count`). Any future page-resource writer
+    must go through it rather than reaching for `get_page_resources`.
+  - "Shared" is decided by counting references to the resources object across `document.objects`.
+    A page whose `/Resources` is an indirect object used once is still writable in place; one used
+    twice gets copied. Reference counting is O(objects) and runs once per write, not per run.
+  - `Object: From<&[u8]>` does **not** exist; a `/Name` operand needs
+    `Object::Name(bytes.to_vec())`. `BTreeMap<Vec<u8>, _>::get` needs `b"..".as_slice()`, not
+    `b".."`.
+  - Fixture regeneration still rewrites `encrypted-aes.pdf` (random AES salt) — `git checkout --`
+    it every time, as the T-2 entry says.
