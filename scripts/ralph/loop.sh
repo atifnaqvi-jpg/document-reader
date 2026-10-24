@@ -79,7 +79,14 @@ for iteration in $(seq 1 "$MAX_ITERATIONS"); do
 
   if [ "${RALPH_GATE_ONLY:-0}" != "1" ]; then
     # shellcheck disable=SC2086
-    $AGENT_CMD || log "agent exited non-zero; continuing to gate"
+    if ! $AGENT_CMD; then
+      # A run that exits non-zero (timeout, step-ceiling truncation, no verdict) has not
+      # completed its task. Falling through to "no commit => nothing was completed" reports
+      # a truncation as a clean stop and hides the unfinished work, so stop here instead.
+      fail "agent exited non-zero — the iteration is truncated, not complete"
+      log "leaving the tree as-is for inspection; not proceeding"
+      exit 1
+    fi
   fi
 
   if run_gate; then
@@ -97,6 +104,14 @@ for iteration in $(seq 1 "$MAX_ITERATIONS"); do
 
   new_sha="$(git rev-parse --short HEAD)"
   if [ "$new_sha" = "$start_sha" ]; then
+    # Exit 0 here means "the agent ran, chose to finish, and committed nothing" — a normal
+    # BLOCKED. It must not be reachable after a truncation, which is why a non-zero agent exit
+    # stops the loop above. A dirty tree means work was done and left uncommitted.
+    if [ -n "$(git status --porcelain)" ]; then
+      git status --short
+      fail "no commit since $start_sha, but the tree is dirty — the iteration did not finish"
+      exit 1
+    fi
     log "no commit since $start_sha; stopping (nothing was completed)"
     exit 0
   fi

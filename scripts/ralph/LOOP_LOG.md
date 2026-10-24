@@ -443,3 +443,40 @@ when `ink_y` is reverted to `run.origin.1`.
   - **Next unblocked task is still none.** Remaining: P2.7.3 (needs `P2.7.3-xobject-DESIGN.md`
     + a nesting-depth ruling), P2.7.4 (design doc), P2.7.5 (design doc + C-4), P2.7.6 (C-5),
     P2.8 (design doc + C-6 undo infrastructure).
+
+## Iteration 11 — 2026-09-20 — P2.7.3 X1 (address model + Form XObject discovery)
+
+- Task: X1 of P2.7.3. `RunId`/`PageTextRun` gain `xobject_path`; `locate_runs` descends
+  `Do` into `/Subtype /Form`; `nested-xobject` gate; drop `PageTextRun.mcid`.
+- Files: `src-tauri/src/editor/{textlocate,textedit,testpdf,substitute}.rs`,
+  `src-tauri/tests/textedit_gates.rs`, `src/api/types.ts`,
+  `src/components/{TextEdit.tsx,TextEdit.test.tsx}`, `src/state/EditorProvider.tsx`,
+  `docs/P2.7-STOCK-TAKE.md`, `scripts/ralph/{loop.sh,run-iteration.sh}`.
+- Gate: cargo test 351 lib + 60 integration passed, clippy clean, tsc clean, vitest 63 passed.
+- Commit: `cdce29d`.
+- Learned:
+  - **The iteration hit the 200-step ceiling after the gate was already green, and the loop
+    reported that as "nothing was completed" and exited 0.** Two harness defects, both fixed
+    here: `loop.sh` discarded `run-iteration.sh`'s non-zero exit (a truncated conversation
+    looks exactly like a BLOCKED one), and the "no commit" arm accepted a dirty tree. A
+    truncated iteration must fail loudly — otherwise the next iteration starts on top of
+    half-finished work and the log loses the reason. Step ceiling raised to 400, and the
+    truncation path is covered by a stub-agent test.
+  - **`opIndex + operandPath` stopped being a unique address the moment a form could be drawn
+    at the same op index as a page run.** The TS identity helpers (`textRunIdKey`,
+    `sameTextRunId`) and three React `key`s all used it, so a page run and a form run could
+    collide in a list and in selection. The address now includes the XObject names in order.
+  - **The depth cap is what pins Q1's reading.** Cutting `MAX_XOBJECT_DEPTH` from 8 to 1 must
+    fail `depth_nine_refuses_with_nested_xobject` *and* `a_run_inside_a_nested_form_is_located`
+    — the second is the test that distinguishes "descend a level at a time" from a literal
+    one-level walk. Both were confirmed to fail under the mutation.
+  - **A placeholder must be refused by the write path, not only hidden by the UI.** A `Do`
+    placeholder carries no text operand; `edit()` refuses it with `nested-xobject` on its own,
+    so a request that skips the picker cannot rewrite a name operand.
+  - Per-key resource inheritance, not whole-dictionary: a form that omits `/Font` still sees
+    the parent's fonts, but a form that defines `/Font F9` must win. Resolving the page's
+    dictionary wholesale would decode a form's text through an unrelated font and corrupt
+    `advance`.
+  - Next: X2 (copy-on-write per draw). The design's warning stands — `change_content_stream`,
+    never `change_page_content`; address by resource name, because `renumber_objects`
+    invalidates ids on save.
