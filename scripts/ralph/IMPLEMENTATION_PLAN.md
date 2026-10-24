@@ -37,12 +37,16 @@ under P2.7.4.
       Acceptance: a fixture with `Ts 5` pairs to a box offset by 5pt; `advance` is unchanged.
       **Done.** `a_raised_run_pairs_to_the_box_offset_by_its_rise` fails if pairing reads the
       pen instead of the ink (`left: 0, right: 1`), so it is not a test that cannot fail.
-- [ ] **T-2 (B-6) PDFDocEncoding.** Replace `byte as char` with the real PDFDocEncoding table
+- [x] **T-2 (B-6) PDFDocEncoding.** Replace `byte as char` with the real PDFDocEncoding table
       (Latin-1 plus the `0x80`–`0x9F` and `0xA0`–`0xFF` exceptions per ISO 32000-1 Annex D).
       If a byte cannot be decoded, treat the `ActualText` as absent and set
       `actual_text_preserved = false` rather than rewriting a different string.
       Acceptance: a fixture whose `ActualText` contains `0x80` decodes to `•` (bullet), not
       U+0080; an undecodable byte refuses to rewrite.
+      **Done.** The table is exhaustive-tested byte by byte (`pdfdocencoding_table_matches_the_standard`),
+      cross-checked against qpdf/poppler. Undefined codes are `0x7F`, `0x9F`, `0xAD` — not
+      `0xA0`, which is the euro sign. `undecodable_actualtext_is_reported_not_rewritten` fails
+      independently of the decoder change if the refusal branch is removed.
 - [ ] **T-3 (B-7) Copy-on-write for named `/Properties`.** Clone the named entry, repoint the
       `BDC`, rewrite the clone. Fall back to disclosure only if the clone cannot be made.
       Acceptance: two `BDC`s sharing `/P0` — editing one updates only that one; the other's

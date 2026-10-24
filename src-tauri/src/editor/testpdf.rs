@@ -1436,6 +1436,58 @@ pub fn actualtext_span() -> Document {
     )
 }
 
+/// `ActualText` in **PDFDocEncoding** (no `FE FF` BOM) carrying the bytes where that encoding
+/// departs from Latin-1: `0x80` is a bullet and `0xA0` a euro sign (P2.7.1 T-2).
+pub fn actualtext_pdf_doc_encoding() -> Document {
+    let actual: Vec<u8> = b"ALPHA \x80 5\xA0".to_vec();
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new(
+                "BDC",
+                vec![
+                    "Span".into(),
+                    Object::Dictionary(dictionary! {
+                        "ActualText" => Object::String(actual, lopdf::StringFormat::Hexadecimal),
+                    }),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ALPHA")]),
+            Operation::new("EMC", vec![]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
+/// `ActualText` whose last byte (`0xAD`, the soft hyphen) is **undefined** in PDFDocEncoding
+/// table D.2, so it decodes to no character at all (P2.7.1 T-2).
+pub fn actualtext_undecodable() -> Document {
+    let actual: Vec<u8> = b"ALPHA\xAD".to_vec();
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new(
+                "BDC",
+                vec![
+                    "Span".into(),
+                    Object::Dictionary(dictionary! {
+                        "ActualText" => Object::String(actual, lopdf::StringFormat::Hexadecimal),
+                    }),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ALPHA")]),
+            Operation::new("EMC", vec![]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
 /// A named `/Properties` resource: the `ActualText` a write must not rewrite in place,
 /// because another sequence may share it (P2.7.1 T30).
 pub fn actualtext_named_property() -> Document {

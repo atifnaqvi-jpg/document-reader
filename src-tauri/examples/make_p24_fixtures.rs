@@ -143,6 +143,14 @@ fn main() {
             testpdf::bytes(&testpdf::actualtext_span()),
         ),
         (
+            "actualtext-pdfdocencoding.pdf",
+            testpdf::bytes(&testpdf::actualtext_pdf_doc_encoding()),
+        ),
+        (
+            "actualtext-undecodable.pdf",
+            testpdf::bytes(&testpdf::actualtext_undecodable()),
+        ),
+        (
             "actualtext-named-property.pdf",
             testpdf::bytes(&testpdf::actualtext_named_property()),
         ),

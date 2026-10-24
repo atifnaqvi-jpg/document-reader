@@ -2149,6 +2149,64 @@ fn shared_actualtext_is_reported_not_rewritten() {
     assert_eq!(outcome.inverse.new_bytes, b"OMEGA", "the edit itself lands");
 }
 
+/// T-2 (B-6): `ActualText` written in PDFDocEncoding must decode with the standard's table,
+/// not Latin-1. `0x80` is a bullet and `0xA0` the euro sign; reading them as U+0080/U+00A0
+/// would make the rewrite write back a different string than the one on the page.
+#[test]
+fn pdfdocencoding_actualtext_decodes_to_the_standard_characters() {
+    let path = fixture("actualtext-pdfdocencoding.pdf");
+    let document = load(&path);
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let runs = textlocate::locate_runs(&document, page_id).unwrap();
+
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].marked_content[0].actual_text.as_deref(),
+        Some("ALPHA \u{2022} 5\u{20ac}"),
+        "0x80 is a bullet and 0xA0 a euro sign in PDFDocEncoding"
+    );
+}
+
+/// T-2 (B-6): an `ActualText` containing a code the standard leaves undefined cannot be
+/// read, so it must not be silently replaced. The edit lands; the caller is told the
+/// accessible text was not preserved.
+#[test]
+fn undecodable_actualtext_is_reported_not_rewritten() {
+    let path = fixture("actualtext-undecodable.pdf");
+    let mut document = load(&path);
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let runs = textlocate::locate_runs(&document, page_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].marked_content[0].actual_text, None,
+        "a string with an undefined PDFDocEncoding code decodes to nothing"
+    );
+
+    let outcome = edit_with(&mut document, 0, runs[0].id.clone(), "ALPHA", "OMEGA", 70.0, 70.0)
+        .unwrap();
+    assert!(
+        !outcome.actual_text_preserved,
+        "text we could not read must never be overwritten as 'preserved'"
+    );
+    assert_eq!(outcome.inverse.new_bytes, b"OMEGA", "the edit itself lands");
+
+    let content = textlocate::decoded_content(&document, page_id).unwrap();
+    let actual = content
+        .operations
+        .iter()
+        .find(|operation| operation.operator == "BDC")
+        .and_then(|operation| operation.operands.get(1))
+        .and_then(|operand| operand.as_dict().ok())
+        .and_then(|properties| properties.get(b"ActualText").ok())
+        .and_then(|object| object.as_str().ok())
+        .expect("the original ActualText survives untouched");
+    assert_eq!(
+        actual,
+        b"ALPHA\xAD",
+        "an undecodable ActualText is left byte-identical"
+    );
+}
+
 /// T31: malformed marked content must not make a page uneditable.
 #[test]
 fn unbalanced_marked_content_does_not_refuse() {

@@ -75,3 +75,39 @@ against the *old* code too (both boxes contained the pen y), which is the exact 
 the prompt's "confirm it fails for the right reason" step exists to catch — the fixture was
 rebuilt so the two readings select different boxes, and it now fails with `left: 0, right: 1`
 when `ink_y` is reverted to `run.origin.1`.
+
+## Iteration 3 — T-2 (B-6) — green
+
+- Task: decode `ActualText` with the real PDFDocEncoding table, and refuse to rewrite a value
+  we could not decode
+- Test: `pdfdocencoding_table_matches_the_standard` (all 256 codes, red before: **yes** —
+  perturbing one entry fails with `byte 0x85 must decode to Some('–')`);
+  `pdfdocencoding_actualtext_decodes_to_the_standard_characters` (red before: **yes** — old
+  Latin-1 decoder returned `"ALPHA \u{80} 5\u{a0}"`); `undecodable_actualtext_is_reported_not_rewritten`
+  (red before: **yes**, and independently of the decoder — with only the refusal branch removed
+  it still fails at `text we could not read must never be overwritten as 'preserved'`)
+- Files: `src-tauri/src/editor/textlocate.rs`, `src-tauri/src/editor/testpdf.rs`,
+  `src-tauri/examples/make_p24_fixtures.rs`, `src-tauri/tests/textedit_gates.rs`,
+  `src-tauri/tests/fixtures/actualtext-{pdfdocencoding,undecodable}.pdf`,
+  `docs/P2.7.1-mcid-DESIGN.md`, `docs/P2.7-REVIEW-OPEN-QUESTIONS.md`
+- Gate: cargo test 333 lib + 50 gates + 24 other integration = 407 passed, clippy clean,
+  tsc clean, vitest 62 passed
+- Commit: see `fix(p2.7.1): decode ActualText with real PDFDocEncoding`
+- Learned:
+  - **The plan's own wording for T-2 was wrong.** It listed `0xA0`–`0xFF` as exception
+    ranges; in table D.2 only `0xA0` is exceptional (euro). `0xA1`–`0xFF` *are* Latin-1, and
+    `0xAD` is one of the three **undefined** codes (with `0x7F` and `0x9F`), not a soft hyphen.
+    Do not build the table from the plan text; build it from the standard.
+  - Three independent sources agree (qpdf `QUtil.cc` `pdf_doc_to_unicode`,
+    poppler `libpoppler.so` `pdfDocEncodingToUnicode`, pypdf `_codecs/pdfdoc.py`). Extracting
+    poppler's table is cheap: search the .so for eight `<I` LE words starting `0x02d8`; the
+    table then starts `0x18` entries earlier. That is how the 256-entry expectation was
+    cross-checked rather than hand-typed.
+  - lopdf's `lopdf::encodings::PDF_DOC_ENCODING` exists but is **not** public API
+    (`pub use encodings::{Encoding, encode_utf8, encode_utf16_be}`), so it cannot be reused
+    from here; we own a 32-entry exception table instead.
+  - **Fixture regeneration side effect:** `scripts/make-p24-fixtures.sh` rewrites every fixture
+    including `encrypted-aes.pdf`, whose AES salt is random, so it always shows as modified.
+    Revert it with `git checkout --` after regenerating; commit only the new PDFs.
+  - Non-string `ActualText` now discloses (`actual_text_preserved = false`) rather than
+    erroring the whole edit — an unreadable property must not block the text change.

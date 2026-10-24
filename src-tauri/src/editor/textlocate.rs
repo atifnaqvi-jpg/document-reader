@@ -954,16 +954,47 @@ impl<'a> MarkedContentStack<'a> {
 /// `ActualText` is required to be UTF-16BE with a `FE FF` byte-order mark when it carries
 /// non-ASCII; producers that ignore that write the text in PDFDocEncoding. Both are decoded
 /// here, and an undecodable string is treated as absent — a value we cannot read is one we
-/// must not rewrite (T30).
+/// must not rewrite (T30, ruling B-6).
 fn decode_text_string(bytes: &[u8]) -> Option<String> {
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        let units: Vec<u16> = bytes[2..]
+        let body = &bytes[2..];
+        if body.len() % 2 != 0 {
+            // A trailing odd byte means the string is not valid UTF-16. Dropping it would
+            // read a different string than the one on the page.
+            return None;
+        }
+        let units: Vec<u16> = body
             .chunks_exact(2)
             .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
             .collect();
         return String::from_utf16(&units).ok();
     }
-    Some(bytes.iter().map(|byte| *byte as char).collect())
+    bytes.iter().map(|byte| pdf_doc_encoding_char(*byte)).collect()
+}
+
+/// The character a byte stands for in PDFDocEncoding (ISO 32000-1 Annex D, table D.2).
+///
+/// Latin-1 is **not** PDFDocEncoding: codes `0x18`–`0x1F` are spacing accents, `0x80`–`0x9E`
+/// are typographic punctuation, and `0xA0` is the euro sign rather than a no-break space.
+/// Reading them as Latin-1 would let a rewrite write back a different character than it read.
+///
+/// `None` for the three codes the standard leaves undefined (`0x7F`, `0x9F`, `0xAD`): a
+/// string containing one cannot be decoded, so it cannot be preserved either.
+fn pdf_doc_encoding_char(byte: u8) -> Option<char> {
+    const LOW: [char; 8] = ['\u{02d8}', '\u{02c7}', '\u{02c6}', '\u{02d9}', '\u{02dd}', '\u{02db}', '\u{02da}', '\u{02dc}'];
+    const HIGH: [char; 31] = [
+        '\u{2022}', '\u{2020}', '\u{2021}', '\u{2026}', '\u{2014}', '\u{2013}', '\u{0192}', '\u{2044}',
+        '\u{2039}', '\u{203a}', '\u{2212}', '\u{2030}', '\u{201e}', '\u{201c}', '\u{201d}', '\u{2018}',
+        '\u{2019}', '\u{201a}', '\u{2122}', '\u{fb01}', '\u{fb02}', '\u{0141}', '\u{0152}', '\u{0160}',
+        '\u{0178}', '\u{017d}', '\u{0131}', '\u{0142}', '\u{0153}', '\u{0161}', '\u{017e}',
+    ];
+    match byte {
+        0x18..=0x1f => Some(LOW[(byte - 0x18) as usize]),
+        0x80..=0x9e => Some(HIGH[(byte - 0x80) as usize]),
+        0xa0 => Some('\u{20ac}'),
+        0x7f | 0x9f | 0xad => None,
+        _ => Some(byte as char),
+    }
 }
 
 /// The font resource name in force at `op_index`, i.e. the last `Tf` at or before it.
@@ -1340,6 +1371,8 @@ pub fn apply_merged(
 ///   of both, so the replacement is only part of it);
 /// - the properties operand is a **name** resolving to a shared `/Properties` entry, which other
 ///   sequences in the document may also use;
+/// - the existing `ActualText` does not decode (ruling B-6): rewriting text we could not read
+///   would silently replace an unknown value;
 /// - the new bytes are not decodable text, so there is nothing meaningful to write.
 ///
 /// A malformed stream (no `EMC` for a `BDC`) simply leaves the scan at depth > 0; the span is
@@ -1374,6 +1407,17 @@ fn rewrite_actual_text(
     };
     if properties.get(b"ActualText").is_err() {
         return Ok(true);
+    }
+    // Ruling B-6: we may only claim preservation for text we could actually read. An
+    // `ActualText` that does not decode (an undefined PDFDocEncoding code, a malformed UTF-16
+    // run, or a value that is not a string) is text we never understood, so overwriting it
+    // would destroy a value we cannot reproduce.
+    let existing = properties
+        .get(b"ActualText")
+        .ok()
+        .and_then(|object| object.as_str().ok());
+    if existing.and_then(decode_text_string).is_none() {
+        return Ok(false);
     }
     if !properties_are_inline {
         // Declares `ActualText`, but shared by name: report rather than rewrite.
@@ -2072,5 +2116,62 @@ mod tests {
         let runs = locate_runs(&document, page).unwrap();
         assert_eq!(runs[0].origin, (0.0, 700.0));
         assert_eq!(runs[1].origin, (0.0, 686.0));
+    }
+
+    /// The whole table, not one sample: PDFDocEncoding is Latin-1 **except** for 32 codes, and
+    /// getting any one of them wrong is the silent-corruption path ruling B-6 exists to close.
+    /// The expected string is ISO 32000-1 Annex D table D.2, cross-checked against qpdf's
+    /// `pdf_doc_to_unicode` and poppler's `pdfDocEncodingToUnicode`; `\u{fffd}` marks the three
+    /// codes the standard leaves undefined.
+    #[test]
+    fn pdfdocencoding_table_matches_the_standard() {
+        #[rustfmt::skip]
+        const EXPECTED: &str = concat!(
+            "\u{0}\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}",
+            "\u{8}\u{9}\u{a}\u{b}\u{c}\u{d}\u{e}\u{f}",
+            "\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}\u{17}",
+            "\u{2d8}\u{2c7}\u{2c6}\u{2d9}\u{2dd}\u{2db}\u{2da}\u{2dc}",
+            "\u{20}\u{21}\u{22}\u{23}\u{24}\u{25}\u{26}\u{27}",
+            "\u{28}\u{29}\u{2a}\u{2b}\u{2c}\u{2d}\u{2e}\u{2f}",
+            "\u{30}\u{31}\u{32}\u{33}\u{34}\u{35}\u{36}\u{37}",
+            "\u{38}\u{39}\u{3a}\u{3b}\u{3c}\u{3d}\u{3e}\u{3f}",
+            "\u{40}\u{41}\u{42}\u{43}\u{44}\u{45}\u{46}\u{47}",
+            "\u{48}\u{49}\u{4a}\u{4b}\u{4c}\u{4d}\u{4e}\u{4f}",
+            "\u{50}\u{51}\u{52}\u{53}\u{54}\u{55}\u{56}\u{57}",
+            "\u{58}\u{59}\u{5a}\u{5b}\u{5c}\u{5d}\u{5e}\u{5f}",
+            "\u{60}\u{61}\u{62}\u{63}\u{64}\u{65}\u{66}\u{67}",
+            "\u{68}\u{69}\u{6a}\u{6b}\u{6c}\u{6d}\u{6e}\u{6f}",
+            "\u{70}\u{71}\u{72}\u{73}\u{74}\u{75}\u{76}\u{77}",
+            "\u{78}\u{79}\u{7a}\u{7b}\u{7c}\u{7d}\u{7e}\u{fffd}",
+            "\u{2022}\u{2020}\u{2021}\u{2026}\u{2014}\u{2013}\u{192}\u{2044}",
+            "\u{2039}\u{203a}\u{2212}\u{2030}\u{201e}\u{201c}\u{201d}\u{2018}",
+            "\u{2019}\u{201a}\u{2122}\u{fb01}\u{fb02}\u{141}\u{152}\u{160}",
+            "\u{178}\u{17d}\u{131}\u{142}\u{153}\u{161}\u{17e}\u{fffd}",
+            "\u{20ac}\u{a1}\u{a2}\u{a3}\u{a4}\u{a5}\u{a6}\u{a7}",
+            "\u{a8}\u{a9}\u{aa}\u{ab}\u{ac}\u{fffd}\u{ae}\u{af}",
+            "\u{b0}\u{b1}\u{b2}\u{b3}\u{b4}\u{b5}\u{b6}\u{b7}",
+            "\u{b8}\u{b9}\u{ba}\u{bb}\u{bc}\u{bd}\u{be}\u{bf}",
+            "\u{c0}\u{c1}\u{c2}\u{c3}\u{c4}\u{c5}\u{c6}\u{c7}",
+            "\u{c8}\u{c9}\u{ca}\u{cb}\u{cc}\u{cd}\u{ce}\u{cf}",
+            "\u{d0}\u{d1}\u{d2}\u{d3}\u{d4}\u{d5}\u{d6}\u{d7}",
+            "\u{d8}\u{d9}\u{da}\u{db}\u{dc}\u{dd}\u{de}\u{df}",
+            "\u{e0}\u{e1}\u{e2}\u{e3}\u{e4}\u{e5}\u{e6}\u{e7}",
+            "\u{e8}\u{e9}\u{ea}\u{eb}\u{ec}\u{ed}\u{ee}\u{ef}",
+            "\u{f0}\u{f1}\u{f2}\u{f3}\u{f4}\u{f5}\u{f6}\u{f7}",
+            "\u{f8}\u{f9}\u{fa}\u{fb}\u{fc}\u{fd}\u{fe}\u{ff}",
+        );
+        let expected: Vec<char> = EXPECTED.chars().collect();
+        assert_eq!(expected.len(), 256);
+        for byte in 0u16..=255 {
+            let want = match expected[byte as usize] {
+                '\u{fffd}' => None,
+                other => Some(other),
+            };
+            assert_eq!(
+                pdf_doc_encoding_char(byte as u8),
+                want,
+                "byte 0x{byte:02X} must decode to {want:?}"
+            );
+        }
     }
 }
