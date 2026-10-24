@@ -576,3 +576,37 @@ when `ink_y` is reverted to `run.origin.1`.
     does not apply to it. Everything else is blocked: P2.7.4/P2.7.5/P2.7.6 are `[!]` on a
     design doc and P2.8 is `[!]` on both a design doc and U-1, and **U-1 itself must wait** —
     H2 is `[~]` until the 0.6.0 installer is confirmed, and Q9 forbids building on it.
+
+## Iteration 14 — 2026-10-24 — D-1 (govern the P2.7.3 design doc) — green
+
+- Task: D-1 — put `docs/P2.7.3-xobject-DESIGN.md` under the citation guard, and make the guard
+  able to resolve a bare `x.rs` citation to a file in `examples/`.
+- Test: `governed_docs_cite_only_paths_that_exist` (red before: **yes** — with the doc added to
+  `GOVERNED_DOCS` it reported exactly one missing path — the design doc's bare
+  `make_p24_fixtures.rs` — which is the failure the task predicted). Added
+  `a_bare_stem_from_the_examples_directory_resolves`
+  to pin the widened stem scan; it fails (40 stems, no `make_p24_fixtures.rs`) if `examples/` is
+  dropped from `crate_stems`.
+- Files: `src-tauri/tests/docs_citations.rs`, `docs/P2.7.3-xobject-DESIGN.md`,
+  `scripts/ralph/IMPLEMENTATION_PLAN.md`.
+- Gate: cargo test 358 lib + 104 integration/other passed (8 in docs_citations), clippy clean,
+  tsc clean, vitest 63 passed.
+- Commit: `docs(p2.7): govern the xobject design doc with the citation guard`
+- Learned:
+  - **Widening an exemption is not the same fix as widening a scan.** The task wording said
+    "widen the stem set to `examples/`", but the set was not a constant: it was derived from
+    `rust_sources()`, which only walks `src/` and `tests/`. So the honest change is a new
+    `crate_stems()` walker over the three roots; loosening the *check* (e.g. accepting any bare
+    stem) would have made a typo'd citation pass.
+  - **Listing a doc in `GOVERNED_DOCS` proves nothing on its own** — all five guarded docs could
+    cite only resolvable tokens and the addition would be untested. Mutation is the proof: a
+    bogus path fails the path test, and renaming a live `locate_runs` mention to
+    `locate_runs_all_levels` fails the identifier test, so this doc's prose is genuinely read.
+  - The design doc had **no** `file.rs:NNN` pointers (`governed_docs_point_at_symbols_not_line_numbers`
+    passed unmodified) and its §8 table was already checked by X4; the only defect was the bare
+    generator citation, i.e. the doc was in better shape than the other four when they were added.
+  - Next: **nothing in H3 is startable.** D-1 was the last unblocked task. P2.7.4/P2.7.5/P2.7.6
+    are `[!]` on a design doc, P2.8 is `[!]` on a design doc and U-1, and U-1 must wait for the
+    0.6.0 installer (Q9 — H2 is `[~]`, and an unconfirmed phase must not be built upon).
+    The loop should stop and ask the user to confirm the 0.6.0 installer, or to rule a design
+    doc for the next phase.

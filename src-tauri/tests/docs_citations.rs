@@ -58,6 +58,31 @@ fn rust_sources() -> Vec<(PathBuf, String)> {
     files
 }
 
+/// Every `.rs` stem in the crate, including `examples/`. A bare `x.rs` citation names a file
+/// rather than a path, and the fixtures generator lives in `examples/`, so a stem set built from
+/// `src/` and `tests/` alone would reject a correct citation.
+fn crate_stems() -> BTreeSet<String> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut stems = BTreeSet::new();
+    let mut stack = vec![root.join("src"), root.join("tests"), root.join("examples")];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                if let Some(name) = path.file_name() {
+                    stems.insert(name.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    stems
+}
+
 /// Byte spans covered by `~~…~~`, paired outermost-first. An unclosed `~~` yields no span, so a
 /// typo cannot silently exempt the rest of a document.
 fn strikethrough_spans(text: &str) -> Vec<(usize, usize)> {
@@ -145,8 +170,9 @@ fn cited_paths(text: &str) -> Citations {
 
 /// The documents that make claims about the shipped body and the programme: the phase contract,
 /// the audit that supersedes the plan, the plan itself, and the review whose §A is the record.
-const GOVERNED_DOCS: [&str; 4] = [
+const GOVERNED_DOCS: [&str; 5] = [
     "docs/P2.7.1-mcid-DESIGN.md",
+    "docs/P2.7.3-xobject-DESIGN.md",
     "docs/P2.7-STOCK-TAKE.md",
     "docs/P2.7-REVIEW-OPEN-QUESTIONS.md",
     "docs/P2.7-TEXT-EDITING-PARITY-PLAN.md",
@@ -216,10 +242,7 @@ fn governed_docs_point_at_symbols_not_line_numbers() {
 #[test]
 fn governed_docs_cite_only_paths_that_exist() {
     let root = repo_root();
-    let stem_names: BTreeSet<String> = rust_sources()
-        .iter()
-        .filter_map(|(path, _)| path.file_name().map(|name| name.to_string_lossy().into_owned()))
-        .collect();
+    let stem_names = crate_stems();
     let mut missing = Vec::new();
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for doc in GOVERNED_DOCS {
@@ -241,6 +264,21 @@ fn governed_docs_cite_only_paths_that_exist() {
         missing.is_empty(),
         "these documents promise a file at a path that does not hold one:\n  {}",
         missing.join("\n  ")
+    );
+}
+
+/// A bare `x.rs` citation is resolved against the stem set, and the design docs cite the
+/// fixture generator without a directory. If the scan skipped `examples/`, that citation would
+/// be reported as promising a file that does not exist — a false positive that invites widening
+/// the exemption instead of the scan.
+#[test]
+fn a_bare_stem_from_the_examples_directory_resolves() {
+    let stems = crate_stems();
+    assert!(
+        stems.contains("make_p24_fixtures.rs"),
+        "the stem set must cover `examples/`, or a correct citation is reported missing; it holds \
+         {} stems",
+        stems.len()
     );
 }
 

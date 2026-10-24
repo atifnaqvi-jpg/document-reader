@@ -251,7 +251,7 @@ Do the tasks in order; each is one iteration and one commit.
 Version targets are ruled (Q7): one minor bump per phase. **1.0.0 is reserved for P2.8** — the
 point at which text editing is declared complete. Never reach it by accident.
 
-- [ ] **D-1 Govern the P2.7.3 design doc with the citation guard.** `GOVERNED_DOCS` still lists
+- [x] **D-1 Govern the P2.7.3 design doc with the citation guard.** `GOVERNED_DOCS` still lists
       only the four P2.7.1-era documents, so `P2.7.3-xobject-DESIGN.md`'s live claims are
       unchecked except for its §8 table (X4 added that). Adding it today fails
       `governed_docs_cite_only_paths_that_exist` on its bare `make_p24_fixtures.rs` citation:
@@ -259,6 +259,16 @@ point at which text editing is declared complete. Never reach it by accident.
       `tests/`, and the generator lives in `examples/`. Fix the citation (write
       `examples/make_p24_fixtures.rs`) and widen the stem set to `examples/` in the same task,
       then add the doc. Blocked on nothing: it is a doc-and-guard task, not a phase build.
+      **Done.** `GOVERNED_DOCS` now has five entries, and the stem set comes from a
+      `crate_stems()` scan of `src/`, `tests/` **and** `examples/` — the previous set was built
+      from `rust_sources()`, whose two roots are `src/` and `tests/`. The doc's citation is now
+      `examples/make_p24_fixtures.rs`, the path form the P2.7.1 doc already uses.
+      Non-vacuity, three ways: adding a bogus `ghost_generator.rs` fails the path test, renaming
+      a live `locate_runs` mention to `locate_runs_all_levels` fails the identifier test (so the
+      doc is genuinely *checked*, not merely listed), and a new
+      `a_bare_stem_from_the_examples_directory_resolves` fails if the scan drops `examples/` —
+      without it, widening the exemption would have "fixed" the same false positive while
+      leaving the generator uncheckable.
 - [!] **P2.7.4 Transforms → 0.7.0** — **Blocked on:** design doc. H0/T-7 ship the refusal;
       this phase replaces the refusal with correct measurement. Includes the rotation hotfix
       lineage (H0, T-7).
