@@ -6,7 +6,11 @@ dependencies are met, does it, proves it, and checks it off.
 Ruled decisions live in `docs/P2.7-REVIEW-OPEN-QUESTIONS.md` §F. Where this file and that
 document disagree, that document wins.
 
-Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (needs a ruling)
+Status legend: `[ ]` todo · `[~]` in progress **or gate-green-but-awaiting-installer confirmation** · `[x]` done · `[!]` blocked (needs a ruling)
+
+Ruling **Q9** (2026-09-20): a phase is `[x]` only when its gate is green **and** the user has
+confirmed the installer. Until then it is `[~]`. An untested phase must not be built upon.
+Ruling **Q7**: one minor version bump per phase; **1.0.0 is reserved for P2.8**.
 
 ---
 
@@ -168,16 +172,78 @@ under P2.7.4.
       `refuses_a_run_rotated_by_the_graphics_matrix`; dropping the `Q` restore fails
       `a_rotation_restored_by_q_does_not_flag_the_run`.
 
-## H2. Next phase (order fixed by B-3 and the plan's own rule)
+## H2. Next phase — P2.7.3 XObjects → 0.6.0
 
-- [!] **P2.7.3 XObjects** — copy-on-write per B-7. **Blocked on:** design doc
-      (`P2.7.3-xobject-DESIGN.md`) not written. Needs a ruling on nesting depth.
-- [!] **P2.7.4 Transforms** — **Blocked on:** design doc. H0 ships the refusal; this phase
-      replaces the refusal with correct measurement.
-- [!] **P2.7.5 CID/Identity-H** — **Blocked on:** design doc + the C-4 ceiling decision.
-- [!] **P2.7.6 Embedding (≡ Stage 2 MECH-B)** — **Blocked on:** the C-5 font-bundling decision.
-- [!] **P2.8 Line-level reflow** — **Blocked on:** design doc + C-6 multi-level undo
-      infrastructure. Invariants are already fixed (see the plan §4).
+Design: `docs/P2.7.3-xobject-DESIGN.md` (frozen v1.0). Rulings: Q1 nesting/cycles, Q2 **per
+draw**, Q3 private `/Resources` only when touched, Q6 grouped inverse from the start, B-7.
+Do the tasks in order; each is one iteration and one commit.
+
+- [ ] **X1 Address model + discovery.** Add `XObjectStep { name, op_index }`,
+      `RunId.xobject_path` and the TS `TextRunId` mirror, both `#[serde(default)]` so an empty
+      path means the page and every 0.5.0 payload still works. Make `locate_runs` descend
+      `Do` → `/Subtype /Form`, resolving fonts against the resources **in force at that level**
+      (per-key fallback to the enclosing dict). Add `Gate::NestedXObject` (`nested-xobject`)
+      with a message naming depth or cycle and the way out.
+      Acceptance: `locates_runs_inside_a_form_xobject` (text `ALPHA`, non-empty path);
+      `a_run_inside_a_nested_form_is_located` (depth 2 — this is what distinguishes the
+      level-by-level reading of Q1 from a one-level walk, so it must be present);
+      `a_cycle_refuses_with_nested_xobject_and_is_visible`; `depth_nine_refuses_with_nested_xobject`
+      (depth 8 editable, 9 refused). The refusal must be a visible placeholder run, and
+      `nested-xobject` must outrank `run-mismatch`.
+      While here: **drop `PageTextRun.mcid`** (ruled, stock take #9) and its TS field.
+- [ ] **X2 Copy-on-write per draw.** Clone each level along the path, outermost first; install
+      each clone under a fresh name (`X1_edit1`, mirroring `fresh_property_name`) and repoint
+      the enclosing `Do` at the clone. Copy `/Resources` **only** when the edit will touch it
+      (font substitution or named-`/Properties`), and copy the enclosing resources before
+      adding a name when they are shared by more than one page. Write the clone's stream with
+      **`change_content_stream`, never `change_page_content`** (the latter addresses a page
+      dictionary: it errors on a stream and has a silent `Ok(())` arm when `/Contents` is an
+      unexpected type).
+      Acceptance: `editing_one_draw_leaves_the_other_draw_byte_identical`;
+      `editing_a_shared_form_on_one_page_leaves_the_other_page_untouched`;
+      `a_nested_run_is_editable_and_only_its_draw_changes`;
+      `a_substituted_font_gets_a_private_resources_dict`.
+      Non-vacuity: replacing the clone with an in-place edit must fail the two "leaves
+      untouched" tests.
+- [ ] **X3 Grouped inverse and undo.** Add `XObjectClone` and
+      `ContentOperation.xobject_clones` + `xobject_path`, riding the existing `also` /
+      `font_swap.also` / `property_clone` group rather than a new mechanism. Undo re-validates
+      each `Do` (operator, operand is the `new_name` this edit wrote) before repointing, then
+      restores bytes/font/`ActualText`/`BDC`, repoints `Do` to `old_name`, and removes the
+      clone's name and object so edit-then-undo leaves no orphan.
+      Acceptance: `undo_restores_the_do_and_drops_the_clone`;
+      `undo_leaves_the_other_draw_untouched`. Deleting the `Do` restore must fail both.
+- [ ] **X4 Fixtures + version 0.6.0.** Commit `xobject-single`, `xobject-two-draws`,
+      `xobject-two-pages`, `xobject-nested`, `xobject-cycle`, `xobject-depth-9`,
+      `xobject-shared-resources` through `testpdf.rs` + `make_p24_fixtures.rs`. Bump the three
+      version strings and `docs/RELEASE-NOTES.md` to 0.6.0. Update the parity matrix row A6
+      `Missing → Have` **only after** the installer is confirmed (Q9); until then row A6 stays
+      `Missing` and the task closes on a green gate, with the phase marked `[~]`.
+
+## H3. Remaining phases
+
+Version targets are ruled (Q7): one minor bump per phase. **1.0.0 is reserved for P2.8** — the
+point at which text editing is declared complete. Never reach it by accident.
+
+- [!] **P2.7.4 Transforms → 0.7.0** — **Blocked on:** design doc. H0/T-7 ship the refusal;
+      this phase replaces the refusal with correct measurement. Includes the rotation hotfix
+      lineage (H0, T-7).
+- [!] **P2.7.5 CID/Identity-H → 0.8.0** — **Blocked on:** design doc. **C-4 is now ruled:**
+      refuse today; substitute-with-consent once embedding ships. The design doc must state that
+      explicitly.
+- [!] **P2.7.6 Embedding (≡ Stage 2 MECH-B) → 0.9.0** — **C-5 is now ruled:** bundle Liberation
+      (~350 KB) and add the OFL notice to About/notices in the same task. **Priority-raised by
+      C-4:** it is the gate on real-world CID coverage, not a later nicety. Blocked on: design doc.
+- [ ] **U-1 Multi-level undo / grouped transactions (C-6).** In scope, **before P2.8**, built
+      once. Design the transaction as a group over `ContentOperation`, `FontSwap`,
+      `PropertyClone` and `XObjectClone` so a future phase adds a leg rather than a mechanism.
+      Also spans page operations and annotations (`EditorProvider.push` is already one visible
+      undo per action; the record underneath becomes a group).
+      Acceptance: one XObject edit touching stream + `/Resources` + `/Properties` is **one**
+      undo; a reflow-shaped multi-operand edit is one undo; the inverse refuses rather than
+      partially applying when any leg fails validation.
+- [!] **P2.8 Line-level reflow → 1.0.0** — **Blocked on:** design doc, and on U-1. Invariants
+      are already fixed (see the plan §4).
 
 ## Loop hygiene (do every iteration)
 

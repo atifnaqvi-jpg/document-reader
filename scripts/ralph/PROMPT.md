@@ -8,7 +8,9 @@ previous iterations**; everything you need is in the files named below. Read the
 1. `scripts/ralph/IMPLEMENTATION_PLAN.md` — the task list. The first unchecked, unblocked task
    is yours.
 2. `scripts/ralph/LOOP_LOG.md` — what earlier iterations did, and what they learned.
-3. `docs/P2.7-REVIEW-OPEN-QUESTIONS.md` §F — the **ruled** decisions. These are binding.
+3. `docs/P2.7-REVIEW-OPEN-QUESTIONS.md` §F **and §F.2** — the **ruled** decisions. These are
+   binding. §F.2 (Q1–Q9) covers XObject nesting/per-draw copy, the CID ceiling, font
+   bundling, multi-level undo, version cadence, the stop condition and per-phase gating.
 4. `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` — scope and sequencing.
 5. The design doc for the phase you are touching (e.g. `docs/P2.7.1-mcid-DESIGN.md`).
 
@@ -49,13 +51,22 @@ previous iterations**; everything you need is in the files named below. Read the
 ## Never
 
 - Never weaken an admissibility gate (`fits-width`, `encoding-round-trip`, `run-mismatch`,
-  `selection-range`, `simple-font`, `not-subset`) to make a test pass.
+  `selection-range`, `simple-font`, `not-subset`, `nested-xobject`) to make a test pass.
 - Never edit a shared PDF object in place. Copy-on-write or refuse (ruling B-7).
+- Never copy a Form XObject **per page** — the edit unit is the **draw** (ruling Q2).
+- Never address an XObject by `ObjectId` in a persisted address or inverse: `renumber_objects`
+  invalidates ids on save. Use the resource **name**.
+- Never use `change_page_content` to rewrite a Form XObject's stream: it addresses a *page*
+  dictionary (`Err(ObjectType)` on a stream), and its silent arm returns `Ok(())` without
+  writing when `/Contents` is neither a reference nor an array. Use `change_content_stream`.
 - Never edit the original document on disk (D-2). Edits land in the edited copy.
 - Never mark a task done because the suite was already green.
 - Never leave a probe/example file behind.
 - Never decide something marked "not ruled" in `P2.7-REVIEW-OPEN-QUESTIONS.md`. Mark the task
   `[!]` and stop.
+- Never mark a **phase** closed (`[x]`) on a green gate alone: a phase is `[x]` only when the
+  user has confirmed the installer (ruling Q9). Gate-green-not-yet-confirmed is `[~]`.
+- Never bump to **1.0.0** — it is reserved for P2.8 (ruling Q7).
 - Never commit `target/`, `node_modules/`, or `artifacts/`.
 
 ## Finish
