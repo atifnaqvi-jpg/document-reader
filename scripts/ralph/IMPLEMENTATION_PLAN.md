@@ -38,7 +38,8 @@ under P2.7.4.
       **Done.** `a_raised_run_pairs_to_the_box_offset_by_its_rise` fails if pairing reads the
       pen instead of the ink (`left: 0, right: 1`), so it is not a test that cannot fail.
 - [x] **T-2 (B-6) PDFDocEncoding.** Replace `byte as char` with the real PDFDocEncoding table
-      (Latin-1 plus the `0x80`–`0x9F` and `0xA0`–`0xFF` exceptions per ISO 32000-1 Annex D).
+      (per ISO 32000-1 Annex D, table D.2 — **not** the "Latin-1 plus 0xA0–0xFF exceptions"
+      this line originally claimed, which is wrong: only `0xA0` is exceptional).
       If a byte cannot be decoded, treat the `ActualText` as absent and set
       `actual_text_preserved = false` rather than rewriting a different string.
       Acceptance: a fixture whose `ActualText` contains `0x80` decodes to `•` (bullet), not
