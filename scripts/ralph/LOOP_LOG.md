@@ -364,7 +364,7 @@ when `ink_y` is reverted to `run.origin.1`.
   `docs/P2.7-STOCK-TAKE.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`.
 - Gate: cargo test 430 passed (334 lib + 96 integration), clippy clean, tsc clean, vitest 62
   passed.
-- Commit: see `docs(p2.7): check the review and plan docs against the tree`.
+- Commit: `966431a`.
 - Learned:
   - **The marker was already in the file.** The task proposed inventing `> Defect (fixed):`;
     the audit already used `~~strikethrough~~` for retraction and it renders as retraction to a
