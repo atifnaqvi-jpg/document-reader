@@ -1330,6 +1330,49 @@ pub fn mcid_boundaries() -> Document {
     )
 }
 
+/// Text drawn with a rotated text matrix: `Tm [0 1 -1 0 300 100]` is a 90 degree rotation.
+///
+/// The run's `advance` is measured along the *text* axis, which here is vertical, so it is not
+/// a horizontal width. Before the hotfix this run was editable and `fits-width` compared the
+/// advance against a horizontal box (P2.7 hotfix H0).
+pub fn rotated_text() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    0.into(),
+                    1.into(),
+                    (-1).into(),
+                    0.into(),
+                    300.into(),
+                    100.into(),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
+/// The same text, same font, same size, with an axis-aligned matrix: the control for
+/// [`rotated_text`], proving the refusal is caused by the rotation and nothing else.
+pub fn unrotated_text() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 300.into(), 100.into()]),
+            Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
 /// One operand wrapped in `/Span <</ActualText …>>` (P2.7.1 T30), UTF-16BE with its BOM.
 pub fn actualtext_span() -> Document {
     let actual: Vec<u8> = vec![0xFE, 0xFF]

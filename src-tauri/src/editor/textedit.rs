@@ -43,6 +43,9 @@ pub enum Gate {
     /// (g) the selected runs are not one contiguous, same-style span on one baseline
     /// (P2.6 T26).
     SelectionRange,
+    /// (h) the run's text matrix is rotated or skewed, so its advance is not a horizontal
+    /// width and the width gate would measure the wrong axis (P2.7 hotfix H0).
+    RotatedText,
 }
 
 impl Gate {
@@ -56,6 +59,7 @@ impl Gate {
             Gate::FitsWidth => "fits-width",
             Gate::RunMismatch => "run-mismatch",
             Gate::SelectionRange => "selection-range",
+            Gate::RotatedText => "rotated-text",
         }
     }
 
@@ -82,6 +86,10 @@ impl Gate {
             Gate::RunMismatch => {
                 "this text is not addressable in the page's content stream (or it changed \
                  since it was selected); add a text annotation instead"
+            }
+            Gate::RotatedText => {
+                "this text is rotated or skewed, so its width cannot yet be measured reliably; \
+                 add a text annotation instead"
             }
         }
     }
@@ -145,6 +153,8 @@ pub struct RunGates {
     pub font: FontInfo,
     /// True when `encode_text(decode_text(bytes)) == bytes` for the run's bytes.
     pub round_trips: bool,
+    /// True when the run's text matrix was not axis-aligned (P2.7 hotfix H0).
+    pub rotated: bool,
 }
 
 /// Resolves the font gates for a run.
@@ -175,7 +185,11 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
         })
         .unwrap_or(false);
 
-    Ok(RunGates { font, round_trips })
+    Ok(RunGates {
+        font,
+        round_trips,
+        rotated: run.rotated,
+    })
 }
 
 /// The a/b/c verdict for a run, independent of the width gate (which needs PDFium and
@@ -189,6 +203,12 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
 /// no substitute can cover still refuses, with `GLYPHS_NOT_COVERABLE` or
 /// `SUBSTITUTE_REFUSED`.
 pub fn font_admissibility(gates: &RunGates) -> Admissibility {
+    // A rotated run is refused before anything else: its `advance` is not a horizontal width,
+    // so no downstream measurement (width gate, PDFium pairing) can be trusted for it.
+    // Font capability is irrelevant when the geometry is the thing that cannot be read.
+    if gates.rotated {
+        return Admissibility::refused(Gate::RotatedText);
+    }
     if !is_simple_font(&gates.font) {
         return Admissibility::refused(Gate::SimpleFont);
     }
@@ -1870,6 +1890,7 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     if !verdict.editable {
         return Err(refuse(match verdict.gate.as_deref() {
             Some("encoding-round-trip") => Gate::EncodingRoundTrip,
+            Some("rotated-text") => Gate::RotatedText,
             _ => Gate::SimpleFont,
         }));
     }
@@ -2185,6 +2206,7 @@ mod tests {
             // case is expressed by passing the same `font` twice (P2.6 T26).
             style_class: font.to_string(),
             marked_content: Vec::new(),
+            rotated: false,
         }
     }
 
@@ -2975,6 +2997,69 @@ mod tests {
 
         let error = edit(&mut document, &req).unwrap_err();
         assert_eq!(error.code(), "SUBSTITUTE_REFUSED");
+    }
+
+    /// P2.7 hotfix H0: a rotated run was previously **editable**, with `advance` measured
+    /// along the text axis and `fits-width` comparing it to a horizontal box. The write path
+    /// must now refuse it, naming the geometry rather than the font.
+    #[test]
+    fn refuses_a_rotated_run_with_gate_h() {
+        let mut document = testpdf::rotated_text();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(run.rotated, "fixture must be rotated for this test to mean anything");
+
+        let gates = resolve_gates(&document, 0, &run).unwrap();
+        let verdict = font_admissibility(&gates);
+        assert!(!verdict.editable);
+        assert_eq!(verdict.gate.as_deref(), Some("rotated-text"));
+
+        // The write path re-validates independently, so a caller that skipped the picker
+        // still refuses.
+        let measure = measure_fixed(10.0);
+        let error = edit(&mut document, &request(&run, "X", 100.0, &measure)).unwrap_err();
+        assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+        assert!(error.to_string().contains("rotated-text"), "{error}");
+    }
+
+    /// H0.2: the refusal must reach the *picker*, not only the write path. A rotated run with
+    /// no PDFium box would otherwise refuse `run-mismatch` — the wrong reason — because the
+    /// unpaired check overwrites the verdict. Geometry must win.
+    #[test]
+    fn a_rotated_run_refuses_as_rotated_not_as_unpaired() {
+        let document = testpdf::rotated_text();
+        // No PDFium runs are supplied, which is the shape that used to overwrite the verdict.
+        let described = describe_runs(
+            &document,
+            0,
+            &[],
+            &crate::editor::runmetrics::PdfiumCharGrid {
+                text: String::new(),
+                chars: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(described.len(), 1);
+        assert!(!described[0].admissibility.editable);
+        assert_eq!(
+            described[0].admissibility.gate.as_deref(),
+            Some("rotated-text"),
+            "a rotated run must refuse for its geometry, not for a missing box"
+        );
+    }
+
+    /// The control for the refusal above: the same text in an axis-aligned matrix stays
+    /// editable, so H0 did not make ordinary pages refuse.
+    #[test]
+    fn an_axis_aligned_run_stays_editable() {
+        let document = testpdf::unrotated_text();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(!run.rotated);
+
+        let gates = resolve_gates(&document, 0, &run).unwrap();
+        assert!(font_admissibility(&gates).editable);
     }
 
     #[test]

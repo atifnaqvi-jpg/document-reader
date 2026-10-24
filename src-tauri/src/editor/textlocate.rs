@@ -88,6 +88,12 @@ pub struct RawRun {
     /// The marked-content stack in force when this operand was shown, outermost first
     /// (P2.7.1). Empty on an untagged page — which is every predicate's behaviour in 0.4.5.
     pub marked_content: Vec<MarkedContent>,
+    /// True when the text matrix was not axis-aligned (P2.7 hotfix H0).
+    ///
+    /// [`Self::advance`] is measured along the text axis. For a rotated run that axis is not
+    /// horizontal, so the advance is not a width and the `fits-width` gate would compare it
+    /// against a horizontal box. Such runs refuse until P2.7.4 measures transforms.
+    pub rotated: bool,
 }
 
 impl RawRun {
@@ -530,6 +536,7 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                         .as_deref(),
                 ),
                 marked_content: marked_content.clone(),
+                rotated: walker.is_rotated(),
             });
         }
     }
@@ -791,6 +798,19 @@ impl TextMatrixWalk {
     /// The translation component of the current text matrix.
     fn origin(&self) -> (f32, f32) {
         (self.tm[4], self.tm[5])
+    }
+
+    /// True when the text matrix is not axis-aligned (P2.7 hotfix H0).
+    ///
+    /// The matrix maps text space to user space, so its first column `(a, b)` is where one
+    /// unit of text advance points. An unrotated, unskewed run has `b == 0` (and `c == 0`);
+    /// a run rotated by 90° has `(0, 1)`. `advance` is measured along the *text* axis, so for
+    /// a rotated run it is not a horizontal width, and `fits-width` would compare it against
+    /// a horizontal box. Until transforms are measured properly (P2.7.4) such runs must
+    /// refuse rather than be measured on the wrong axis.
+    fn is_rotated(&self) -> bool {
+        const EPSILON: f32 = 1e-4;
+        self.tm[1].abs() > EPSILON || self.tm[2].abs() > EPSILON
     }
 }
 
@@ -1639,6 +1659,63 @@ mod tests {
         assert_eq!(runs[0].id.operand_path, vec![0]);
         assert_eq!(runs[0].font_key, b"F1");
         assert_eq!(runs[0].operator, "Tj");
+    }
+
+    /// P2.7 hotfix H0: a rotated text matrix must be *known*, not silently measured as if it
+    /// were horizontal. `advance` is measured along the text axis, so for `Tm [0 1 -1 0 …]`
+    /// it is a vertical extent — comparing it to a horizontal box is the wrong axis.
+    #[test]
+    fn a_rotated_text_matrix_is_flagged_on_the_run() {
+        let document = testpdf::rotated_text();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "ROTATED");
+        assert!(runs[0].rotated, "a 90 degree matrix must be flagged rotated");
+        // The origin still reads correctly: the first column of the matrix is the advance
+        // direction, but `e`/`f` are still the pen position.
+        assert_eq!(runs[0].origin, (300.0, 100.0));
+    }
+
+    /// The control: the same text and matrix shape without rotation must **not** be flagged,
+    /// so the refusal cannot be blamed on the fixture rather than the transform.
+    #[test]
+    fn an_axis_aligned_matrix_is_not_flagged_as_rotated() {
+        let document = testpdf::unrotated_text();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "ROTATED");
+        assert!(!runs[0].rotated);
+    }
+
+    /// A matrix that scales but does not rotate is also not rotated: `Tz`-style horizontal
+    /// scaling and `Tm` with `a = 2, b = 0` still advance along the x-axis.
+    #[test]
+    fn a_scaled_axis_aligned_matrix_is_not_flagged_as_rotated() {
+        let mut document = testpdf::blank_page();
+        let page = page_id(&document, 0).unwrap();
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new(
+                    "Tm",
+                    vec![2.into(), 0.into(), 0.into(), 2.into(), 72.into(), 700.into()],
+                ),
+                Operation::new("Tj", vec![Object::string_literal("Scaled")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        document
+            .change_page_content(page, content.encode().unwrap())
+            .unwrap();
+
+        let runs = locate_runs(&document, page).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].rotated);
     }
 
     #[test]

@@ -30,6 +30,11 @@ npx vitest run
 `clippy` must add no new warning. `cargo test` runs **without** `--features testfixtures`,
 because that is the release command (P2.7.1 §11).
 
+`cargo fmt --check` is **not** in the gate: it already fails at `2cb2f2f` across files the
+programme never touches (`protect.rs`, `session.rs`, `substitute.rs`), so the repo is not
+rustfmt-clean. Reformatting the tree inside a task would bury the change in unrelated diff.
+If the project wants fmt enforced, that is its own commit.
+
 ## Rules the loop must not break
 
 1. **One task per iteration.** One task, one commit.
