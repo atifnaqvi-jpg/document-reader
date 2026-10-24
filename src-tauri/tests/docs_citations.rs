@@ -313,38 +313,54 @@ fn a_struck_citation_is_retracted_but_an_unstruck_one_is_live() {
 
 /// §8 of the design doc is the phase's acceptance table. Every test it names has to be a test
 /// that runs, otherwise the phase can "pass" a table nobody executes.
+///
+/// Each phase doc has its own acceptance table, and both tables are the contract for their
+/// phase, so both are checked.
 #[test]
 fn the_design_doc_acceptance_table_names_tests_that_exist() {
-    let text = read(&repo_root().join("docs/P2.7.1-mcid-DESIGN.md"));
-    let section = text
-        .split("## 8. Acceptance tests")
-        .nth(1)
-        .and_then(|rest| rest.split("## 9.").next())
-        .expect("the design doc must still have an §8 acceptance table");
-
+    let root = repo_root();
     let sources = rust_sources();
-    let mut named = Vec::new();
-    let mut missing = Vec::new();
-    for line in section.lines() {
-        let Some(first_cell) = line.strip_prefix('|') else {
-            continue;
-        };
-        let first_cell = first_cell.split('|').next().unwrap_or("");
-        for token in cited_identifiers(first_cell, 3).live {
-            let is_test = sources
-                .iter()
-                .any(|(_, source)| source.contains(&format!("fn {token}")));
-            if !is_test {
-                missing.push(token.clone());
+    let mut named: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    for (doc, section_head, section_end) in [
+        (
+            "docs/P2.7.1-mcid-DESIGN.md",
+            "## 8. Acceptance tests",
+            "## 9.",
+        ),
+        ("docs/P2.7.3-xobject-DESIGN.md", "## 8. Tests", "\n## "),
+    ] {
+        let text = read(&root.join(doc));
+        let section = text
+            .split(section_head)
+            .nth(1)
+            .and_then(|rest| rest.split(section_end).next())
+            .unwrap_or_else(|| panic!("{doc} must still have an §8 acceptance table"));
+
+        let mut found_here = 0;
+        for line in section.lines() {
+            let Some(first_cell) = line.strip_prefix('|') else {
+                continue;
+            };
+            let first_cell = first_cell.split('|').next().unwrap_or("");
+            for token in cited_identifiers(first_cell, 3).live {
+                let is_test = sources
+                    .iter()
+                    .any(|(_, source)| source.contains(&format!("fn {token}")));
+                if !is_test {
+                    missing.push(format!("{doc}: `{token}`"));
+                }
+                named.push(token);
+                found_here += 1;
             }
-            named.push(token);
         }
+        assert!(
+            found_here > 0,
+            "{doc} §8 parsing found no test names; the table's shape changed and the guard is blind"
+        );
     }
 
-    assert!(
-        !named.is_empty(),
-        "§8 parsing found no test names; the table's shape changed and this guard is now blind"
-    );
     assert!(
         missing.is_empty(),
         "§8 names tests that do not exist: {missing:?} (it names {named:?})"

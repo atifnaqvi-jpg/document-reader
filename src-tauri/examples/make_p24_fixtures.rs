@@ -176,6 +176,36 @@ fn main() {
             "indirect-resources-inherited.pdf",
             testpdf::bytes(&testpdf::indirect_resources_inherited()),
         ),
+        // P2.7.3 §8: the Form XObject shapes. Committed so the phase's fixture matrix is
+        // reviewable and `tests/xobject_fixtures.rs` can read the artefacts a reviewer opens.
+        (
+            "xobject-single.pdf",
+            testpdf::bytes(&testpdf::xobject_single()),
+        ),
+        (
+            "xobject-two-draws.pdf",
+            testpdf::bytes(&testpdf::xobject_two_draws()),
+        ),
+        (
+            "xobject-two-pages.pdf",
+            testpdf::bytes(&testpdf::xobject_two_pages()),
+        ),
+        (
+            "xobject-nested.pdf",
+            testpdf::bytes(&testpdf::xobject_nested()),
+        ),
+        (
+            "xobject-cycle.pdf",
+            testpdf::bytes(&testpdf::xobject_cycle()),
+        ),
+        (
+            "xobject-depth-9.pdf",
+            testpdf::bytes(&testpdf::xobject_depth_nine()),
+        ),
+        (
+            "xobject-shared-resources.pdf",
+            testpdf::bytes(&testpdf::xobject_shared_resources()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

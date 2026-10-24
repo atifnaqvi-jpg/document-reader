@@ -180,3 +180,23 @@ fn the_0_5_0_release_notes_cover_every_change_the_plan_claims() {
         );
     }
 }
+
+/// X4's acceptance: 0.6.0 ships P2.7.3, so the notes must say what a user gets and what is
+/// still refused. Same point-in-time rule as the 0.5.0 test above.
+#[test]
+fn the_0_6_0_release_notes_cover_every_change_the_plan_claims() {
+    let section = release_section("0.6.0").expect("docs/RELEASE-NOTES.md has no 0.6.0 section");
+    let lower = section.to_lowercase();
+
+    for (topic, needle) in [
+        ("Form XObject text editing", "form xobject"),
+        ("the per-draw edit unit (Q2)", "per draw"),
+        ("the private /Resources copy (Q3)", "private"),
+        ("the nesting cap and its refusal (Q1)", "nested-xobject"),
+    ] {
+        assert!(
+            lower.contains(needle),
+            "the 0.6.0 notes never mention {topic} (looked for {needle:?})"
+        );
+    }
+}

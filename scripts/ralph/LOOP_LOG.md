@@ -495,7 +495,7 @@ when `ink_y` is reverted to `run.origin.1`.
   `nested-xobject` refusal, then on the missing level plumbing).
 - Files: `src-tauri/src/editor/{textlocate,textedit,testpdf,substitute}.rs`, `src/api/types.ts`.
 - Gate: cargo test 358 lib + 101 integration/other passed, clippy clean, tsc clean, vitest 63.
-- Commit: see below.
+- Commit: `9320e86`.
 - Learned:
   - **A Form XObject is a `Stream`, not a `Dictionary`.** `document.get_dictionary(form_id)`
     fails with `expected type Dictionary but found type Stream` even though the object *has*
@@ -529,3 +529,50 @@ when `ink_y` is reverted to `run.origin.1`.
   - Next: X4 — commit the `.pdf` fixtures through `make_p24_fixtures.rs`, bump to 0.6.0 (three
     version strings + `RELEASE-NOTES.md`), and leave parity row A6 at `Missing` until the
     installer is confirmed (Q9); the phase closes as `[~]`, never `[x]`.
+
+## Iteration 13 — 2026-10-24 — P2.7.3 X4 (committed fixtures + 0.6.0) — green
+
+- Task: commit the seven P2.7.3 §8 Form XObject fixtures, prove them from disk, bump six
+  version carriers to 0.6.0, write the 0.6.0 release notes.
+- Test: `every_fixture_the_design_doc_names_is_committed`,
+  `the_single_and_nested_fixtures_locate_their_text_at_the_documented_depth`,
+  `the_two_draw_and_two_page_fixtures_repeat_the_same_form`,
+  `the_cycle_and_depth_fixtures_refuse_visibly_at_the_documented_boundary`,
+  `the_shared_resources_fixture_gives_both_forms_one_indirect_dictionary`,
+  `editing_the_committed_two_draw_fixture_saves_a_reloadable_clone`,
+  `the_0_6_0_release_notes_cover_every_change_the_plan_claims` (red before: **yes** — all six
+  fixture tests panicked with `IO error` because no `.pdf` existed; the release-notes test
+  failed with "has no 0.6.0 section").
+- Files: `src-tauri/tests/xobject_fixtures.rs` (new), `src-tauri/examples/make_p24_fixtures.rs`,
+  `src-tauri/tests/fixtures/xobject-{single,two-draws,two-pages,nested,cycle,depth-9,shared-resources}.pdf`
+  (new), `src-tauri/tests/{release_version,docs_citations}.rs`, the six version carriers,
+  `docs/RELEASE-NOTES.md`, `docs/P2.7-STOCK-TAKE.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`.
+- Gate: cargo test 461 passed, clippy clean (0 warnings), tsc clean, vitest 63 passed.
+- Commit: `feat(p2.7.3): commit the xobject fixtures and release 0.6.0` — one commit; its sha is
+  not recorded here because writing it into the log amends the commit that contains the log
+  (each amend re-hashes). Earlier iterations' shas in this file are pre-amend and may dangle.
+- Learned:
+  - **Fixtures are per-phase artefacts, and a test that builds the shape in memory does not
+    commit the shape.** X1–X3 covered every mechanism with in-memory builders and left the
+    `.pdf` files ungenerated, so §8's fixture table described files that did not exist. Fixed
+    by generating them and by asserting them **from disk** in a new integration test; the
+    guard compares the §8 table against the fixture directory, so it fails if either drifts.
+  - **`scripts/make-p24-fixtures.sh` rewrites `encrypted-aes.pdf` non-deterministically** (AES
+    IV/key). Running it always dirties that one file; `git checkout --` it before committing.
+    The seven new fixtures *are* deterministic — verified by regenerating and `md5sum -c`.
+  - **The §8 test-name guard only read the P2.7.1 doc.** The P2.7.3 doc names ten tests and
+    nothing checked them; the guard now takes a (doc, §8 heading, section terminator) triple.
+    Both docs use a different §8 heading (`## 8. Acceptance tests` vs `## 8. Tests`), so the
+    heading is data, not a constant.
+  - Do **not** add all four/five docs to `GOVERNED_DOCS` casually: adding
+    `P2.7.3-xobject-DESIGN.md` fails `governed_docs_cite_only_paths_that_exist` on its bare
+    `make_p24_fixtures.rs` citation (an `examples/` file, not a stem the source scan sees).
+    That is a real doc fix, but it is a separate task — reverted here rather than smuggled in.
+  - Row **A6 stays `Missing`**: Q9 makes a phase `[x]` only when the installer is confirmed.
+    Phase H2 is `[~]`, and the stock take now says *why* row A6 is still Missing instead of
+    leaving a stale "Tf in a nested Do is out of scope" (which shipped in X1).
+  - **Next is `D-1`**, which this iteration added: govern `P2.7.3-xobject-DESIGN.md` with the
+    citation guard. It is doc-and-guard only, so Q9 (do not build on an unconfirmed phase)
+    does not apply to it. Everything else is blocked: P2.7.4/P2.7.5/P2.7.6 are `[!]` on a
+    design doc and P2.8 is `[!]` on both a design doc and U-1, and **U-1 itself must wait** —
+    H2 is `[~]` until the 0.6.0 installer is confirmed, and Q9 forbids building on it.

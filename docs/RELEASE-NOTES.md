@@ -7,6 +7,70 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 0.6.0
+
+Closing **P2.7.3** — text inside Form XObjects becomes editable. The theme is still silent
+wrongness: the whole phase is shaped so that editing one instance of a shared form cannot change
+another, and so that text the walker cannot reach is *shown* as refused rather than quietly
+missing from the picker.
+
+### Text drawn by a Form XObject is reachable
+
+A form is a content stream a page draws with `Do`, and plenty of real producers put running
+headers, sidebars and cover art in one. Every run inside such a form was absent from the picker
+before this release, so a large class of documents was partly untouchable with no visible reason.
+The locator now descends `Do` → `/Subtype /Form` and addresses runs inside with the resource
+**names** that reach them, which survive `renumber_objects` on save where an object id would not.
+
+Nested forms are walked level by level (a form may draw another), up to a depth of 8 with a
+visited-set for cycles — a form that draws itself is legal to write and hangs a naive walker. Past
+either limit the `Do` reports itself as a **placeholder run** carrying the new `nested-xobject`
+gate, naming the depth or the cycle and pointing at text annotations as the way out. A refusal
+you can see is the point: text silently dropped from the picker reads as "there is no text here".
+
+### The edit unit is the **draw**, not the page (Q2)
+
+When the same form is drawn twice on a page, or on two pages, editing the instance you clicked
+changes that instance and nothing else. The copy is per draw — not per page, and not per form:
+the write path clones the form along the whole path (outermost first, fresh names `X1_edit1`, …),
+repoints only the clicked `Do` at the clone, and writes the clone's own stream. The other draw
+keeps its stream byte for byte. Duplicating a small stream is harmless; an unintended visible
+change on a page you did not edit is not.
+
+### A private `/Resources` only when the edit touches it (Q3)
+
+The stream is always copied; a form's `/Resources` is copied only when the edit needs to change
+it — a font substitution, or a named `/Properties` rewrite. Then the clone gets its own dictionary
+and the original stays readable by every other form. Sharing it would recreate the named
+`/Properties` problem one level down. A form that declares no `/Resources` still resolves names
+through the page, exactly as ISO 32000-1 §8.10 says, so inherited fonts and child forms keep
+working.
+
+### One undo per edit
+
+The clone chain rides the existing grouped inverse, so a single undo repoints each `Do` back to
+the original name, restores the bytes, font and `ActualText`, and drops the clone objects and any
+private resources dictionary. Edit-then-undo leaves no orphan in the file, and it does not touch
+the draw you never edited.
+
+### Known gaps
+
+- Rotated and skewed text is refused, not editable (P2.7.4).
+- Forms nested more than 8 deep, and forms that draw themselves, are refused with
+  `nested-xobject` (P2.7.3 Q1). A text annotation is the way out.
+- CID / Identity-H fonts are refused (P2.7.5).
+- Non-WinAnsi text that needs an embedded font is refused with `GLYPHS_NOT_COVERABLE` (P2.7.6).
+- Line-level reflow does not exist: a replacement wider than the run is refused, quoting both
+  measured widths (P2.8).
+
+### Upgrading
+
+No data migration. Run addresses gained an optional XObject path that is omitted when empty, so
+every 0.5.0 payload and every un-migrated undo record keeps its exact meaning. Files gain content
+only where a form was edited, and only as the added clones described above.
+
+---
+
 ## 0.5.0
 
 Closing P2.7.1 — tagged-structure awareness for text editing. The theme is **silent

@@ -172,7 +172,7 @@ under P2.7.4.
       `refuses_a_run_rotated_by_the_graphics_matrix`; dropping the `Q` restore fails
       `a_rotation_restored_by_q_does_not_flag_the_run`.
 
-## H2. Next phase — P2.7.3 XObjects → 0.6.0
+## H2. P2.7.3 XObjects → 0.6.0 — `[~]` gate green, awaiting installer (Q9)
 
 Design: `docs/P2.7.3-xobject-DESIGN.md` (frozen v1.0). Rulings: Q1 nesting/cycles, Q2 **per
 draw**, Q3 private `/Resources` only when touched, Q6 grouped inverse from the start, B-7.
@@ -219,19 +219,46 @@ Do the tasks in order; each is one iteration and one commit.
       recording a copy that never happened would delete a dictionary still in use).
       **Confirmed:** deleting the `Do` restore fails both `undo_restores_the_do_and_drops_the_clone`
       and `undo_leaves_the_other_draw_untouched`.
-- [ ] **X4 Fixtures + version 0.6.0.** (in-memory fixtures exist; the committed `.pdf` files,
-      version bump and release notes remain) Commit `xobject-single`, `xobject-two-draws`,
+- [x] **X4 Fixtures + version 0.6.0.** Commit `xobject-single`, `xobject-two-draws`,
       `xobject-two-pages`, `xobject-nested`, `xobject-cycle`, `xobject-depth-9`,
       `xobject-shared-resources` through `testpdf.rs` + `make_p24_fixtures.rs`. Bump the three
       version strings and `docs/RELEASE-NOTES.md` to 0.6.0. Update the parity matrix row A6
       `Missing → Have` **only after** the installer is confirmed (Q9); until then row A6 stays
       `Missing` and the task closes on a green gate, with the phase marked `[~]`.
+      **Done.** All seven fixtures are committed (751–2135 bytes, regenerated deterministically
+      from the existing builders). Six carriers agree at 0.6.0 — `Cargo.toml`, `Cargo.lock`,
+      `package.json`, both `package-lock.json` entries, `tauri.conf.json` — and
+      `docs/RELEASE-NOTES.md` carries the 0.6.0 section.
+      **The gap X1–X3 left was that no test ever read the committed artefacts.** Every
+      XObject test built its document in memory, so a fixture the design doc promises but
+      nobody generated would have gone unnoticed — the same defect class as a §8 table naming
+      a test that does not run. `src-tauri/tests/xobject_fixtures.rs` closes it: five tests
+      assert the §8 shape from disk (reachability at depth 1 and 2, the two draws and two
+      pages, the cycle and depth-9 refusals reaching the picker as `nested-xobject`, and the
+      shared indirect `/Resources` object), plus one that edits and **saves** a committed
+      fixture and re-reads the clone — the only form edit in the suite that goes through
+      `Document::save`, which is where a resource name `renumber_objects` invalidated would
+      show. Mutating either the tree or the doc fails it: removing `xobject-cycle.pdf` fails
+      `every_fixture_the_design_doc_names_is_committed`.
+      The doc guard now covers the P2.7.3 §8 table too — it named ten tests and checked none;
+      substituting a bogus name fails `the_design_doc_acceptance_table_names_tests_that_exist`.
+      Row A6 stays `Missing` with the reason recorded (Q9), and `P2.7-STOCK-TAKE.md` is
+      re-verified at 0.6.0 rather than still dated to 0.5.0.
+      **Phase status: `[~]`** — gate green, installer not yet confirmed.
 
 ## H3. Remaining phases
 
 Version targets are ruled (Q7): one minor bump per phase. **1.0.0 is reserved for P2.8** — the
 point at which text editing is declared complete. Never reach it by accident.
 
+- [ ] **D-1 Govern the P2.7.3 design doc with the citation guard.** `GOVERNED_DOCS` still lists
+      only the four P2.7.1-era documents, so `P2.7.3-xobject-DESIGN.md`'s live claims are
+      unchecked except for its §8 table (X4 added that). Adding it today fails
+      `governed_docs_cite_only_paths_that_exist` on its bare `make_p24_fixtures.rs` citation:
+      `cited_paths` only accepts a bare `x.rs` when it names a file stem under `src/` or
+      `tests/`, and the generator lives in `examples/`. Fix the citation (write
+      `examples/make_p24_fixtures.rs`) and widen the stem set to `examples/` in the same task,
+      then add the doc. Blocked on nothing: it is a doc-and-guard task, not a phase build.
 - [!] **P2.7.4 Transforms → 0.7.0** — **Blocked on:** design doc. H0/T-7 ship the refusal;
       this phase replaces the refusal with correct measurement. Includes the rotation hotfix
       lineage (H0, T-7).
