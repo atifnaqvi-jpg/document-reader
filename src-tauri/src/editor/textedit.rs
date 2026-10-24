@@ -518,6 +518,9 @@ fn pair_run(
     grid: &PdfiumCharGrid,
 ) -> Option<Pair> {
     let tol = origin_tolerance(run.font_size);
+    // Every vertical comparison uses the **ink** baseline, not the pen: `Ts` moves the drawn
+    // glyphs without moving the pen, so a superscript's pen sits below its own box (B-5).
+    let ink_y = run.baseline();
 
     let mut best: Option<Pair> = None;
     let mut best_key: Option<(bool, f32, f32, f32, bool)> = None;
@@ -526,13 +529,15 @@ fn pair_run(
         // small metric disagreement without reaching a neighbouring line.
         let contains = run.origin.0 >= rect.x0 - tol
             && run.origin.0 <= rect.x1 + tol
-            && run.origin.1 >= rect.y0 - tol
-            && run.origin.1 <= rect.y1 + tol;
+            && ink_y >= rect.y0 - tol
+            && ink_y <= rect.y1 + tol;
         if !contains {
             continue;
         }
         let baseline = baselines.get(index).copied().unwrap_or(rect.y0);
-        let baseline_delta = (run.origin.1 - baseline).abs();
+        // `baselines` is the *rendered* baseline from the grid, so it already includes `Ts`.
+        // Comparing the pen position instead would make every raised run a weak pair (B-5).
+        let baseline_delta = (ink_y - baseline).abs();
         let strong = baseline_delta <= BASELINE_TOLERANCE;
         // Prefer strong over weak, then the smallest baseline delta, then the box the origin
         // sits deepest inside — and, per §3 step 2, exact text equality as the *final*
@@ -548,8 +553,8 @@ fn pair_run(
         // (a word box inside a line box) does the leftmost edge still decide, as before.
         let overshoot = (rect.x0 - run.origin.0)
             .max(run.origin.0 - rect.x1)
-            .max(rect.y0 - run.origin.1)
-            .max(run.origin.1 - rect.y1)
+            .max(rect.y0 - ink_y)
+            .max(ink_y - rect.y1)
             .max(0.0);
         let key = (
             !strong,
@@ -584,9 +589,7 @@ fn pair_run(
         let dx = (rect.x0 - run.origin.0)
             .max(run.origin.0 - rect.x1)
             .max(0.0);
-        let dy = (rect.y0 - run.origin.1)
-            .max(run.origin.1 - rect.y1)
-            .max(0.0);
+        let dy = (rect.y0 - ink_y).max(ink_y - rect.y1).max(0.0);
         let distance = dx + dy;
         if nearest.map_or(true, |(best, _, _)| distance < best) {
             nearest = Some((distance, index, rect.x0));
@@ -967,8 +970,8 @@ fn smallest_containing(
         other_index != index
             && run.origin.0 >= other.x0 - tol
             && run.origin.0 <= other.x1 + tol
-            && run.origin.1 >= other.y0 - tol
-            && run.origin.1 <= other.y1 + tol
+            && run.baseline() >= other.y0 - tol
+            && run.baseline() <= other.y1 + tol
             && (other.x1 - other.x0) < width
     })
 }
@@ -1111,7 +1114,10 @@ fn mergeable(
         // pages compare `None == None` and are unchanged.
         && head.merge_scope() == next.merge_scope()
         && sizes_match(head.font_size, next.font_size)
-        && (head.origin.1 - next.origin.1).abs() <= BASELINE_TOLERANCE
+        // P2.7.1 B-5: `Ts` moves the ink without moving the pen, so the baseline a merge
+        // compares is `origin.1 + rise`. Two runs with different rises are on different lines
+        // even when their pens agree.
+        && (head.baseline() - next.baseline()).abs() <= BASELINE_TOLERANCE
         && {
             let gap = measured_gap(head, next, head_span, next_span);
             gap <= gap_tolerance(head.font_size, space) && gap >= -MERGE_OVERLAP_EM * head.font_size
@@ -2033,7 +2039,7 @@ fn validate_run_range(
         };
         let same_style = next.style_class == previous.style_class
             && sizes_match(next.font_size, previous.font_size);
-        let same_baseline = (next.origin.1 - previous.origin.1).abs() <= BASELINE_TOLERANCE;
+        let same_baseline = (next.baseline() - previous.baseline()).abs() <= BASELINE_TOLERANCE;
         let rightward = next.origin.0 >= previous.origin.0;
         if !(consecutive && same_style && same_baseline && rightward) {
             return Err(refuse(Gate::SelectionRange));
@@ -2206,6 +2212,7 @@ mod tests {
             // case is expressed by passing the same `font` twice (P2.6 T26).
             style_class: font.to_string(),
             marked_content: Vec::new(),
+            rise: 0.0,
             rotated: false,
         }
     }
@@ -2215,6 +2222,29 @@ mod tests {
         // "He" then "llo", the second starting exactly where the first ends.
         let head = test_run("He", 72.0, 12.0, "F1");
         let next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        assert!(mergeable(&head, &next, false, None, None));
+    }
+
+    /// P2.7.1 B-5: `Ts` is a merge boundary. A raised operand sits on a different ink baseline
+    /// than the text it follows, so merging them would write the superscript into the body run.
+    #[test]
+    fn does_not_merge_across_a_rise_change() {
+        let head = test_run("E", 72.0, 12.0, "F1");
+        let mut next = test_run("2", 72.0 + head.advance, 12.0, "F1");
+        // Same pen baseline, different ink: exactly what `Ts 5` produces.
+        next.rise = 5.0;
+        assert_eq!(next.origin.1, head.origin.1, "the fixture must share a pen baseline");
+        assert!(!mergeable(&head, &next, false, None, None));
+    }
+
+    /// The control: adding the same rise to *both* operands keeps them on one baseline, so the
+    /// gate above cannot be passing merely because `rise` is non-zero.
+    #[test]
+    fn merges_two_runs_raised_by_the_same_ts() {
+        let mut head = test_run("He", 72.0, 12.0, "F1");
+        head.rise = 5.0;
+        let mut next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        next.rise = 5.0;
         assert!(mergeable(&head, &next, false, None, None));
     }
 

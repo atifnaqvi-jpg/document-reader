@@ -45,3 +45,23 @@ most recent iteration last.
     Test `a_rotated_run_refuses_as_rotated_not_as_unpaired` pins that ordering.
   - The rotated-text probe from the stock take is now a committed fixture pair
     (`rotated_text` / `unrotated_text`) rather than an example binary — the 0.4.4 lesson.
+
+## Iteration 2 — T-1 (`Ts`) — green
+
+- Task: track text rise and treat it as an ink-baseline offset, never a pen move
+- Test: `does_not_merge_across_a_rise_change` (red before: **yes** — reverting `mergeable` to
+  compare `origin.1` makes it fail), `text_rise_is_recorded_without_moving_the_pen`,
+  `text_rise_is_reset_by_bt`, `merges_two_runs_raised_by_the_same_ts`
+- Files: `src/editor/textlocate.rs`, `src/editor/textedit.rs`, `src/editor/testpdf.rs`
+- Gate: cargo test 331 + 72 integration passed, clippy 0 warnings
+- Learned:
+  - `Ts` belongs in the walker's text state and is reset by `BT` like `Tc`/`Tw`/`Tz`.
+    It must **not** enter `origin()`: the pen does not move, only the ink does.
+  - Three baseline comparisons existed (`pair_run` containment + delta + overshoot,
+    `mergeable`, `validate_run_range`, `smallest_containing`); all now use
+    `RawRun::baseline() = origin.1 + rise`. Missing any one of them re-introduces the bug
+    for a different code path, which is why each is covered.
+  - **New finding, not fixed here:** `TextMatrixWalk` does not advance the pen after a plain
+    `Tj`/`'`/`"` — only `TJ` advances internally. Consecutive `Tj` operands therefore report
+    the same origin x. Pre-existing, independent of `Ts`. Needs its own task; recorded in
+    `PENDING` below rather than silently fixed inside this one.

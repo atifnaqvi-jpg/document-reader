@@ -88,6 +88,12 @@ pub struct RawRun {
     /// The marked-content stack in force when this operand was shown, outermost first
     /// (P2.7.1). Empty on an untagged page — which is every predicate's behaviour in 0.4.5.
     pub marked_content: Vec<MarkedContent>,
+    /// The text rise (`Ts`) in force, in points (P2.7.1 ruling B-5).
+    ///
+    /// [`Self::origin`] is the pen position; the ink sits `rise` points above it. Pairing and
+    /// merging must compare the **ink** baseline, which is `origin.1 + rise`, or a superscript
+    /// pairs to the box below the one it is drawn in.
+    pub rise: f32,
     /// True when the text matrix was not axis-aligned (P2.7 hotfix H0).
     ///
     /// [`Self::advance`] is measured along the text axis. For a rotated run that axis is not
@@ -97,6 +103,14 @@ pub struct RawRun {
 }
 
 impl RawRun {
+    /// The baseline the run's **ink** sits on: the pen position plus `Ts` (P2.7.1 B-5).
+    ///
+    /// Every baseline comparison must use this rather than `origin.1`. A run with `Ts 5`
+    /// draws 5pt above its pen, so comparing pen positions would place it on the wrong line.
+    pub fn baseline(&self) -> f32 {
+        self.origin.1 + self.rise
+    }
+
     /// The innermost `MCID` this run sits in, if any.
     ///
     /// The *innermost* one is the boundary that matters: a paragraph (`MCID 5`) containing a
@@ -536,6 +550,7 @@ pub fn locate_runs(document: &Document, page_id: ObjectId) -> Result<Vec<RawRun>
                         .as_deref(),
                 ),
                 marked_content: marked_content.clone(),
+                rise: walker.rise(),
                 rotated: walker.is_rotated(),
             });
         }
@@ -702,6 +717,8 @@ struct TextMatrixWalk {
     word_spacing: f32,
     /// `Tz`: horizontal scaling as a percentage, 100 = unscaled (P2.7.1).
     horizontal_scale: f32,
+    /// `Ts`: baseline rise in points. Moves the ink, never the pen (P2.7.1 B-5).
+    rise: f32,
 }
 
 impl TextMatrixWalk {
@@ -714,6 +731,7 @@ impl TextMatrixWalk {
             char_spacing: 0.0,
             word_spacing: 0.0,
             horizontal_scale: 100.0,
+            rise: 0.0,
         }
     }
 
@@ -732,6 +750,7 @@ impl TextMatrixWalk {
                 self.char_spacing = 0.0;
                 self.word_spacing = 0.0;
                 self.horizontal_scale = 100.0;
+                self.rise = 0.0;
             }
             "Tm" => {
                 if let Some(matrix) = matrix_operands(&operation.operands) {
@@ -786,6 +805,11 @@ impl TextMatrixWalk {
                     self.horizontal_scale = value;
                 }
             }
+            "Ts" => {
+                if let Some(value) = operation.operands.first().and_then(|o| o.as_float().ok()) {
+                    self.rise = value;
+                }
+            }
             // `'` and `"` both perform a `T*` (move to the next line) before showing.
             "'" | "\"" => {
                 self.tlm = matrix_mul(translation(0.0, -self.leading), self.tlm);
@@ -798,6 +822,15 @@ impl TextMatrixWalk {
     /// The translation component of the current text matrix.
     fn origin(&self) -> (f32, f32) {
         (self.tm[4], self.tm[5])
+    }
+
+    /// The text rise (`Ts`) in force, in points.
+    ///
+    /// `Ts` moves the *baseline* of the drawn glyphs without moving the pen, so it must never
+    /// enter [`Self::origin`] or any advance computation. It is recorded separately and added
+    /// by the run so pairing can compare the line the ink actually sits on (P2.7.1 ruling B-5).
+    fn rise(&self) -> f32 {
+        self.rise
     }
 
     /// True when the text matrix is not axis-aligned (P2.7 hotfix H0).
@@ -1716,6 +1749,59 @@ mod tests {
         let runs = locate_runs(&document, page).unwrap();
         assert_eq!(runs.len(), 1);
         assert!(!runs[0].rotated);
+    }
+
+    /// P2.7.1 B-5: `Ts` is recorded on each run, and it does **not** move the pen. The two
+    /// operands of `text_rise` share an origin y but differ in ink baseline by the rise.
+    #[test]
+    fn text_rise_is_recorded_without_moving_the_pen() {
+        let document = testpdf::text_rise();
+        let page = page_id(&document, 0).unwrap();
+        let runs = locate_runs(&document, page).unwrap();
+
+        let base = runs.iter().find(|run| run.text == "BASE ").expect("BASE");
+        let high = runs.iter().find(|run| run.text == "HIGH").expect("HIGH");
+
+        assert_eq!(base.rise, 0.0);
+        assert_eq!(high.rise, 5.0);
+        // `Ts` must not shift the pen vertically. (The pen's *horizontal* advance after a
+        // plain `Tj` is not modelled at all -- `TextMatrixWalk` only advances inside `TJ` --
+        // so this fixture deliberately says nothing about x. Tracked separately.)
+        assert_eq!(high.origin.1, base.origin.1);
+        // The ink is what the rest of the programme compares.
+        assert!((high.baseline() - (base.baseline() + 5.0)).abs() < 0.001);
+    }
+
+    /// `Ts` is reset by `BT`, like every other text-state parameter. A rise that leaked past
+    /// `BT` would silently displace the next block's ink.
+    #[test]
+    fn text_rise_is_reset_by_bt() {
+        let mut document = testpdf::blank_page();
+        let page = page_id(&document, 0).unwrap();
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Ts", vec![8.into()]),
+                Operation::new("Td", vec![72.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal("Raised")]),
+                Operation::new("ET", vec![]),
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), 600.into()]),
+                Operation::new("Tj", vec![Object::string_literal("Flat")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        document
+            .change_page_content(page, content.encode().unwrap())
+            .unwrap();
+
+        let runs = locate_runs(&document, page).unwrap();
+        let raised = runs.iter().find(|run| run.text == "Raised").expect("Raised");
+        let flat = runs.iter().find(|run| run.text == "Flat").expect("Flat");
+        assert_eq!(raised.rise, 8.0);
+        assert_eq!(flat.rise, 0.0, "BT must reset Ts");
     }
 
     #[test]

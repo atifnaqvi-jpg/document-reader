@@ -1373,6 +1373,41 @@ pub fn unrotated_text() -> Document {
     )
 }
 
+/// `Ts` between two showings (P2.7.1 B-5): the first operand sits on the pen baseline, the
+/// second is raised 5pt without the pen moving.
+///
+/// The rise must be recorded on the run and must **not** be folded into the pen, so the two
+/// runs share an origin y but not an ink baseline.
+pub fn text_rise() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new("Tj", vec![Object::string_literal("BASE ")]),
+            Operation::new("Ts", vec![5.into()]),
+            Operation::new("Tj", vec![Object::string_literal("HIGH")]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
+/// The same text, same placement, for the control case where both operands are unraised.
+pub fn text_without_rise() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new("Tj", vec![Object::string_literal("BASE ")]),
+            Operation::new("Tj", vec![Object::string_literal("HIGH")]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
 /// One operand wrapped in `/Span <</ActualText …>>` (P2.7.1 T30), UTF-16BE with its BOM.
 pub fn actualtext_span() -> Document {
     let actual: Vec<u8> = vec![0xFE, 0xFF]
