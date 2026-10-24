@@ -13,14 +13,14 @@
 #   RALPH_SERVER          agent server base URL (default http://localhost:18000)
 #   RALPH_API_KEY_FILE    file holding the session key (default ~/.agent-canvas/session-key)
 #   RALPH_MAX_ITERATIONS  max agent iterations for the conversation (default 400)
-#   RALPH_TIMEOUT         seconds to wait for the conversation to finish (default 3600)
+#   RALPH_TIMEOUT         seconds to wait for the conversation to finish (default 7200)
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVER="${RALPH_SERVER:-http://localhost:18000}"
 MAX_ITER="${RALPH_MAX_ITERATIONS:-400}"
-TIMEOUT="${RALPH_TIMEOUT:-3600}"
+TIMEOUT="${RALPH_TIMEOUT:-7200}"
 
 fail() { printf '[ralph] %s\n' "$*" >&2; exit 1; }
 
