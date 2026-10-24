@@ -189,7 +189,7 @@ Do the tasks in order; each is one iteration and one commit.
       `editing_a_placeholder_is_refused_with_nested_xobject`,
       `the_nested_xobject_gate_outranks_run_mismatch`. Mutation of `MAX_XOBJECT_DEPTH` to 1
       fails the depth-2 and depth-9 tests.
-- [ ] **X2 Copy-on-write per draw.** Clone each level along the path, outermost first; install
+- [x] **X2 Copy-on-write per draw.** Clone each level along the path, outermost first; install
       each clone under a fresh name (`X1_edit1`, mirroring `fresh_property_name`) and repoint
       the enclosing `Do` at the clone. Copy `/Resources` **only** when the edit will touch it
       (font substitution or named-`/Properties`), and copy the enclosing resources before
@@ -202,16 +202,25 @@ Do the tasks in order; each is one iteration and one commit.
       `a_nested_run_is_editable_and_only_its_draw_changes`;
       `a_substituted_font_gets_a_private_resources_dict`.
       Non-vacuity: replacing the clone with an in-place edit must fail the two "leaves
-      untouched" tests.
-- [ ] **X3 Grouped inverse and undo.** Add `XObjectClone` and
+      untouched" tests. **Confirmed:** `clone_draw` returning no clones fails all three
+      "leaves untouched" tests, `a_nested_run_is_editable_and_only_its_draw_changes`, and all
+      three undo tests. Also green: `editing_a_form_run_writes_the_form_and_not_the_page_stream`
+      (the page's text operands stay empty; only the `Do` changes).
+- [x] **X3 Grouped inverse and undo.** Add `XObjectClone` and
       `ContentOperation.xobject_clones` + `xobject_path`, riding the existing `also` /
       `font_swap.also` / `property_clone` group rather than a new mechanism. Undo re-validates
       each `Do` (operator, operand is the `new_name` this edit wrote) before repointing, then
       restores bytes/font/`ActualText`/`BDC`, repoints `Do` to `old_name`, and removes the
       clone's name and object so edit-then-undo leaves no orphan.
       Acceptance: `undo_restores_the_do_and_drops_the_clone`;
-      `undo_leaves_the_other_draw_untouched`. Deleting the `Do` restore must fail both.
-- [ ] **X4 Fixtures + version 0.6.0.** Commit `xobject-single`, `xobject-two-draws`,
+      `undo_leaves_the_other_draw_untouched`; plus
+      `undo_after_a_substitution_leaves_no_orphan` (`cloned_resources` is *observed* after the
+      write, not predicted: the private dictionary is created lazily by the write path, and
+      recording a copy that never happened would delete a dictionary still in use).
+      **Confirmed:** deleting the `Do` restore fails both `undo_restores_the_do_and_drops_the_clone`
+      and `undo_leaves_the_other_draw_untouched`.
+- [ ] **X4 Fixtures + version 0.6.0.** (in-memory fixtures exist; the committed `.pdf` files,
+      version bump and release notes remain) Commit `xobject-single`, `xobject-two-draws`,
       `xobject-two-pages`, `xobject-nested`, `xobject-cycle`, `xobject-depth-9`,
       `xobject-shared-resources` through `testpdf.rs` + `make_p24_fixtures.rs`. Bump the three
       version strings and `docs/RELEASE-NOTES.md` to 0.6.0. Update the parity matrix row A6

@@ -188,15 +188,7 @@ pub fn page_with_run(text: &str, font: Dictionary) -> Document {
 
 /// Gate (c): a subset-flagged TrueType font (`ABCDEF+...`).
 pub fn subset_font_page() -> Document {
-    page_with_run(
-        "SUBSET",
-        dictionary! {
-            "Type" => "Font",
-            "Subtype" => "TrueType",
-            "BaseFont" => "ABCDEF+SomeFont",
-            "Encoding" => "WinAnsiEncoding",
-        },
-    )
+    page_with_run("SUBSET", subset_font())
 }
 
 /// Gate (a): a CID-keyed Type0 font with an Identity-H encoding.
@@ -401,6 +393,9 @@ enum FormResources {
     /// A private dictionary naming `/F1` plus the child XObjects listed (a nested form, a
     /// cycle, or no children at all).
     Own(Vec<String>),
+    /// One **indirect** `/Resources` object shared by every `Shared` form, naming `/F1` plus
+    /// the children they list. The shape Q3's private-copy rule exists for.
+    Shared(Vec<String>),
 }
 
 /// The operations that draw one run through the resource name `F1`.
@@ -430,9 +425,19 @@ fn xobject_document(
     forms: Vec<(String, Vec<Operation>, FormResources)>,
     pages: Vec<Vec<Operation>>,
 ) -> Document {
+    xobject_document_with_font(forms, pages, winansi_helvetica())
+}
+
+/// The same builder with a caller-chosen `/F1` font, for the shapes where the *font* is what
+/// the test is about (a subset that forces MECH-A substitution inside a form).
+fn xobject_document_with_font(
+    forms: Vec<(String, Vec<Operation>, FormResources)>,
+    pages: Vec<Vec<Operation>>,
+    font: Dictionary,
+) -> Document {
     let mut document = Document::with_version("1.4");
     let pages_id = document.new_object_id();
-    let font_id = document.add_object(winansi_helvetica());
+    let font_id = document.add_object(font);
 
     let ids: Vec<lopdf::ObjectId> = forms.iter().map(|_| document.new_object_id()).collect();
     let names: Vec<String> = forms.iter().map(|(name, _, _)| name.clone()).collect();
@@ -445,15 +450,16 @@ fn xobject_document(
     };
 
     let mut page_xobjects = Dictionary::new();
+    let mut shared_resources: Option<lopdf::ObjectId> = None;
     for (index, (name, operations, resources)) in forms.into_iter().enumerate() {
         let mut form = dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
             "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
         };
-        if let FormResources::Own(children) = resources {
+        if let FormResources::Own(children) = &resources {
             let mut xobjects = Dictionary::new();
-            for child in &children {
+            for child in children {
                 xobjects.set(child.as_str(), Object::Reference(id_of(child)));
             }
             form.set(
@@ -463,6 +469,19 @@ fn xobject_document(
                     "XObject" => xobjects,
                 }),
             );
+        }
+        if let FormResources::Shared(children) = &resources {
+            let resources_id = *shared_resources.get_or_insert_with(|| {
+                let mut xobjects = Dictionary::new();
+                for child in children {
+                    xobjects.set(child.as_str(), Object::Reference(id_of(child)));
+                }
+                document.add_object(dictionary! {
+                    "Font" => dictionary! { "F1" => font_id },
+                    "XObject" => xobjects,
+                })
+            });
+            form.set("Resources", Object::Reference(resources_id));
         }
         document.set_object(
             ids[index],
@@ -585,6 +604,194 @@ pub fn xobject_depth_nine() -> Document {
         })
         .collect();
     xobject_document(forms, vec![draw_form("X1")])
+}
+
+/// `xobject-two-draws.pdf`: the same `/X1` drawn twice on one page, the second after a `cm`
+/// translation, so the two draws have different `Do` indices and different places on the page.
+///
+/// This is the fixture Q2 is about: editing the draw the user clicked must not change the
+/// other one.
+pub fn xobject_two_draws() -> Document {
+    xobject_document(
+        vec![(
+            "X1".into(),
+            form_run("ALPHA"),
+            FormResources::Own(Vec::new()),
+        )],
+        vec![{
+            let mut operations = draw_form("X1");
+            operations.push(Operation::new(
+                "cm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    0.into(),
+                    (-100).into(),
+                ],
+            ));
+            operations.extend(draw_form("X1"));
+            operations
+        }],
+    )
+}
+
+/// `xobject-two-pages.pdf`: `/X1` drawn on page 1 and page 2, with both pages sharing one
+/// indirect `/Resources` object.
+///
+/// Two things are at stake: the edit must be page-private (Q2), and adding the clone's name to
+/// a `/Resources` object two pages read must not mutate it for the other page (§5.1).
+pub fn xobject_two_pages() -> Document {
+    xobject_document(
+        vec![(
+            "X1".into(),
+            form_run("ALPHA"),
+            FormResources::Own(Vec::new()),
+        )],
+        vec![draw_form("X1"), draw_form("X1")],
+    )
+}
+
+/// `xobject-shared-resources.pdf`: `X1` and `X2` share one **indirect** `/Resources` object.
+///
+/// A substitute font installed into that object would be visible to both forms — B-7 one level
+/// down, which Q3's private copy exists to prevent.
+pub fn xobject_shared_resources() -> Document {
+    // The subset font is what makes the edit need the resources dictionary: keeping the
+    // original is impossible, so a substitute has to be installed somewhere (Q3).
+    xobject_document_with_font(
+        vec![
+            (
+                "X1".into(),
+                form_run("ALPHA"),
+                FormResources::Shared(Vec::new()),
+            ),
+            (
+                "X2".into(),
+                form_run("BRAVO"),
+                FormResources::Shared(Vec::new()),
+            ),
+        ],
+        vec![{
+            let mut operations = draw_form("X1");
+            operations.push(Operation::new(
+                "cm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    0.into(),
+                    (-100).into(),
+                ],
+            ));
+            operations.extend(draw_form("X2"));
+            operations
+        }],
+        subset_font(),
+    )
+}
+
+/// `xobject-subset-font.pdf`: `X1`'s own `/Resources` names a subset-flagged font, so the edit
+/// must substitute a standard-14 face (MECH-A) — the case that has to give the clone a
+/// **private** `/Resources` rather than write `FS1` into the page's or the form's dictionary.
+pub fn xobject_subset_font() -> Document {
+    xobject_document_with_font(
+        vec![(
+            "X1".into(),
+            form_run("ALPHA"),
+            FormResources::Own(Vec::new()),
+        )],
+        vec![draw_form("X1")],
+        subset_font(),
+    )
+}
+
+/// A subset-flagged simple font: no standard-14 name, no embedded program, so an edit has to
+/// substitute (MECH-A) rather than keep it.
+fn subset_font() -> Dictionary {
+    dictionary! {
+        "Type" => "Font",
+        "Subtype" => "TrueType",
+        "BaseFont" => "ABCDEF+SomeFont",
+        "Encoding" => "WinAnsiEncoding",
+    }
+}
+
+/// A form's stream, addressed by the resource names that reach it from a page.
+///
+/// Tests read the written document through this instead of through the picker: a name inside a
+/// clone's resources is only reachable by descending, which is the same walk the writer does.
+pub fn form_stream<'a>(
+    document: &'a Document,
+    page_id: lopdf::ObjectId,
+    path: &[&str],
+) -> Option<&'a lopdf::Stream> {
+    let mut current: Option<&lopdf::Stream> = None;
+    let mut resources = page_resources(document, page_id);
+    for name in path {
+        let dictionaries = resources.take()?;
+        let stream = find_form(document, &dictionaries, name)?;
+        resources = Some(form_resources(document, stream));
+        current = Some(stream);
+    }
+    current
+}
+
+/// The resource dictionaries a page resolves, inline first, then the referenced ones.
+fn page_resources(document: &Document, page_id: lopdf::ObjectId) -> Option<Vec<&Dictionary>> {
+    let (inline, referenced) = document.get_page_resources(page_id).ok()?;
+    let mut dictionaries: Vec<&Dictionary> = inline.into_iter().collect();
+    dictionaries.extend(
+        referenced
+            .iter()
+            .filter_map(|id| document.get_dictionary(*id).ok()),
+    );
+    Some(dictionaries)
+}
+
+/// A form's own `/Resources`, if it declares any.
+fn form_resources<'a>(document: &'a Document, form: &'a lopdf::Stream) -> Vec<&'a Dictionary> {
+    form.dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|entry| document.dereference(entry).ok())
+        .and_then(|(_, object)| object.as_dict().ok())
+        .into_iter()
+        .collect()
+}
+
+fn find_form<'a>(
+    document: &'a Document,
+    dictionaries: &[&'a Dictionary],
+    name: &str,
+) -> Option<&'a lopdf::Stream> {
+    dictionaries.iter().rev().find_map(|resources| {
+        let xobjects = resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|entry| document.dereference(entry).ok())
+            .and_then(|(_, object)| object.as_dict().ok())?;
+        xobjects
+            .get(name.as_bytes())
+            .ok()
+            .and_then(|object| document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_stream().ok())
+    })
+}
+
+/// The decoded operations of a form's stream, reached by resource names from the page.
+pub fn form_operations(
+    document: &Document,
+    page_id: lopdf::ObjectId,
+    path: &[&str],
+) -> Option<Vec<lopdf::content::Operation>> {
+    let stream = form_stream(document, page_id, path)?;
+    let bytes = stream.decompressed_content().ok()?;
+    lopdf::content::Content::decode(&bytes)
+        .ok()
+        .map(|content| content.operations)
 }
 
 /// Serialises a document to bytes.

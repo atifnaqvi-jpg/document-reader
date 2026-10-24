@@ -480,3 +480,52 @@ when `ink_y` is reverted to `run.origin.1`.
   - Next: X2 (copy-on-write per draw). The design's warning stands — `change_content_stream`,
     never `change_page_content`; address by resource name, because `renumber_objects`
     invalidates ids on save.
+
+## Iteration 12 — 2026-10-24 — P2.7.3 X2 + X3 (copy-on-write per draw, grouped inverse)
+
+- Task: X2 and X3 of P2.7.3. The write path copies the **draw** the user clicked, writes the
+  clone's own stream, and records a grouped inverse that repoints the `Do` and drops the clone.
+- Test: `editing_one_draw_leaves_the_other_draw_byte_identical`,
+  `editing_a_shared_form_on_one_page_leaves_the_other_page_untouched`,
+  `a_nested_run_is_editable_and_only_its_draw_changes`,
+  `a_substituted_font_gets_a_private_resources_dict`,
+  `editing_a_form_run_writes_the_form_and_not_the_page_stream`,
+  `undo_restores_the_do_and_drops_the_clone`, `undo_leaves_the_other_draw_untouched`,
+  `undo_after_a_substitution_leaves_no_orphan` (red before: yes — all eight panicked on X1's
+  `nested-xobject` refusal, then on the missing level plumbing).
+- Files: `src-tauri/src/editor/{textlocate,textedit,testpdf,substitute}.rs`, `src/api/types.ts`.
+- Gate: cargo test 358 lib + 101 integration/other passed, clippy clean, tsc clean, vitest 63.
+- Commit: see below.
+- Learned:
+  - **A Form XObject is a `Stream`, not a `Dictionary`.** `document.get_dictionary(form_id)`
+    fails with `expected type Dictionary but found type Stream` even though the object *has*
+    a dictionary. Every form-key read/write goes through `form_dictionary` /
+    `form_dictionary_mut`, which unwrap `stream.dict`. This is the same class as the
+    `change_page_content` trap: the API is shaped for page objects.
+  - **`ResourceStack` has to be read *before* the write, not after.** `install_xobject_name`
+    reads the enclosing `/XObject` map through `enclosing_resources`, then writes the modified
+    map through `writable_resources_at`. Doing it in one borrow also silently re-copied the
+    resources dictionary twice, leaving one orphan per clone.
+  - **`cloned_resources` must be observed, not predicted.** Q3 says the private `/Resources` is
+    created *only when the edit touches it* — and the decision is made inside
+    `properties_mut_for_level` / `ensure_substitute_resource`, after the clone exists. Predicting
+    it in `clone_draw` records either a copy that never happened (undo then deletes a
+    dictionary still in use) or nothing at all (undo leaks one object per cycle). The inverse
+    now compares the clone's `/Resources` id against the original's after `apply_merged`.
+  - **Delete the clone before its resources.** `object_is_referenced` is a real reference scan;
+    while the clone object exists it still points at the private dictionary, so removing the
+    dictionary first looks like deleting an in-use object and leaves both behind.
+  - **`revert` was page-bound in three places**, not one: the stream it decoded, the stream it
+    wrote (both became `read_level`/`write_level`), and the `/Properties` cleanup (needs
+    `properties_mut`, which is a page-only path by design — a form-level clone is dropped with
+    the clone instead). The old `change_page_content` call had to go: it targets a page
+    dictionary, so an undo of a form edit would have silently done nothing.
+  - **A test that asserts "the page stream is untouched" is wrong for this feature.** Repointing
+    the `Do` *is* a page-stream write; the invariant is "no page **text operand** changed".
+  - Non-vacuity, both directions: `clone_draw` returning `Ok(Vec::new())` fails all three
+    "leaves untouched" tests, the nested test, and all three undo tests; deleting the `Do`
+    restore fails both `undo_restores_the_do_and_drops_the_clone` and
+    `undo_leaves_the_other_draw_untouched`.
+  - Next: X4 — commit the `.pdf` fixtures through `make_p24_fixtures.rs`, bump to 0.6.0 (three
+    version strings + `RELEASE-NOTES.md`), and leave parity row A6 at `Missing` until the
+    installer is confirmed (Q9); the phase closes as `[~]`, never `[x]`.

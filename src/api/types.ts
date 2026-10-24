@@ -304,6 +304,30 @@ export interface ContentOperation {
     newName: number[];
     cloneObject: [number, number];
   } | null;
+  /**
+   * The content stream this edit wrote (P2.7.3 Q2). Empty/absent is the page's own stream, so
+   * every 0.5.0 inverse keeps its meaning; a non-empty path names the Form XObject clone.
+   */
+  xobjectPath?: XObjectStep[];
+  /**
+   * The draws this edit copied, outermost first (P2.7.3 Q6). Undo restores each `Do` and drops
+   * the clone, so one edit remains one undo entry.
+   */
+  xobjectClones?: XObjectClone[];
+}
+
+/** One Form XObject copy an edit made (P2.7.3 §7). */
+export interface XObjectClone {
+  /** The enclosing level: empty/absent for the page, else the path to the container. */
+  parentPath?: XObjectStep[];
+  /** The `Do` the edit repointed, and the names before and after. */
+  doIndex: number;
+  oldName: number[];
+  newName: number[];
+  /** The clone object, removed on undo so no orphan accumulates. */
+  cloneObject: [number, number];
+  /** The private `/Resources` installed on the clone, if the edit made one. */
+  clonedResources?: [number, number] | null;
 }
 
 export interface TextEditResult {

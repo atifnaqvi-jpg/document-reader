@@ -55,9 +55,35 @@ pub fn plan(
     replacement: &str,
     allow_substitution: bool,
 ) -> Result<Plan, crate::model::AppError> {
+    let font = document
+        .get_page_fonts(page_id)
+        .ok()
+        .and_then(|fonts| fonts.get(font_key).copied().cloned());
+    plan_with_font(
+        document,
+        font.as_ref(),
+        info,
+        replacement,
+        allow_substitution,
+    )
+}
+
+/// The same decision, from a font dictionary resolved at the level the run is addressed in
+/// (P2.7.3 X2).
+///
+/// A run inside a form usually names a font the **page** does not: [`plan`] would resolve no
+/// program and substitute a standard-14 face for text the original sets perfectly. The caller
+/// has the dictionary already — it read it to decode the bytes — so it passes it here.
+pub fn plan_with_font(
+    document: &Document,
+    font: Option<&lopdf::Dictionary>,
+    info: &FontInfo,
+    replacement: &str,
+    allow_substitution: bool,
+) -> Result<Plan, crate::model::AppError> {
     // T11: the original font wins if it can set the text. This is checked even when
     // substitution is allowed, and it is the *first* thing checked.
-    if original_covers(document, page_id, font_key, info, replacement) {
+    if original_covers(document, font, info, replacement) {
         return Ok(Plan::KeepOriginal);
     }
 
@@ -93,8 +119,7 @@ pub fn plan(
 ///   is *not* trusted (a non-embedded subset), so the standard-14 substitute answers it.
 fn original_covers(
     document: &Document,
-    page_id: ObjectId,
-    font_key: &[u8],
+    font: Option<&lopdf::Dictionary>,
     info: &FontInfo,
     text: &str,
 ) -> bool {
@@ -105,7 +130,7 @@ fn original_covers(
         }
     }
 
-    let Some(program) = embedded_font_program(document, page_id, font_key) else {
+    let Some(program) = font.and_then(|font| program_of(document, font)) else {
         return false;
     };
     let Ok(face) = ttf_parser::Face::parse(&program, 0) else {
@@ -119,16 +144,6 @@ fn original_covers(
 /// A `/FontDescriptor /FontFile2` (TrueType) or `/FontFile3` (OpenType) stream is the only
 /// place an embedded simple font keeps its glyphs. `/FontFile` (Type 1) is not a TrueType
 /// program and `ttf-parser` cannot read it, so it is deliberately not returned.
-pub(crate) fn embedded_font_program(
-    document: &Document,
-    page_id: ObjectId,
-    font_key: &[u8],
-) -> Option<Vec<u8>> {
-    let fonts = document.get_page_fonts(page_id).ok()?;
-    program_of(document, fonts.get(font_key).copied()?)
-}
-
-/// The embedded program of an already-resolved font dictionary.
 fn program_of(document: &Document, font: &lopdf::Dictionary) -> Option<Vec<u8>> {
     let descriptor = font
         .get(b"FontDescriptor")

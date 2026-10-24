@@ -1326,9 +1326,110 @@ pub struct FontInfo {
     pub subtype: Option<String>,
 }
 
-/// The font dictionary the page resolves for `font_key`, for measurement (P2.7.3 X1).
-pub fn font_dict<'a>(document: &'a Document, page_id: ObjectId, font_key: &[u8]) -> Option<&'a Dictionary> {
-    document.get_page_fonts(page_id).ok()?.get(font_key).copied()
+/// The font the page resolves for `font_key`, for measurement (P2.7.3 X1).
+pub fn font_dict<'a>(
+    document: &'a Document,
+    page_id: ObjectId,
+    font_key: &[u8],
+) -> Option<&'a Dictionary> {
+    document
+        .get_page_fonts(page_id)
+        .ok()?
+        .get(font_key)
+        .copied()
+}
+
+/// The resource dictionaries in force along a run's `xobject_path`, outermost first.
+///
+/// A level contributes its **own** `/Resources` only when it declares one; a level that
+/// declares none contributes nothing, so the names it writes resolve through the levels above
+/// it (ISO 32000-1 §8.10). This is the reading [`ResourceLevel`] walks for discovery, without
+/// borrowing the document, so the write path can hold the same view while it mutates.
+pub(crate) fn resource_stack(
+    document: &Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+) -> Vec<Dictionary> {
+    let mut stack = Vec::new();
+    if let Some(resources) = effective_resources(document, page_id) {
+        stack.push(resources);
+    }
+    for step in path {
+        let Some(form) = form_by_name(document, &stack, &step.name) else {
+            break;
+        };
+        let own = form
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|object| document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_dict().ok())
+            .cloned();
+        if let Some(own) = own {
+            stack.push(own);
+        }
+    }
+    stack
+}
+
+/// The form a resource name resolves to, through the resource dictionaries in force.
+fn form_by_name<'a>(
+    document: &'a Document,
+    stack: &'a [Dictionary],
+    name: &[u8],
+) -> Option<&'a lopdf::Stream> {
+    stack.iter().rev().find_map(|level| {
+        let xobjects = level.get(b"XObject").ok()?;
+        let xobjects = document.dereference(xobjects).ok()?.1.as_dict().ok()?;
+        let object = xobjects.get(name).ok()?;
+        document.dereference(object).ok()?.1.as_stream().ok()
+    })
+}
+
+/// The font a resource name resolves to **at a run's addressing level** (P2.7.3 §6).
+///
+/// A form routinely declares its own `/Font` and the page does not; resolving through the page
+/// would refuse text whose face is perfectly readable, and would decode it through an
+/// unrelated face when the page happens to reuse the same name.
+pub(crate) fn font_dictionary_at(
+    document: &Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+    key: &[u8],
+) -> Option<Dictionary> {
+    let stack = resource_stack(document, page_id, path);
+    stack.iter().rev().find_map(|level| {
+        let fonts = level.get(b"Font").ok()?;
+        let fonts = document.dereference(fonts).ok()?.1.as_dict().ok()?;
+        document
+            .dereference(fonts.get(key).ok()?)
+            .ok()?
+            .1
+            .as_dict()
+            .ok()
+            .cloned()
+    })
+}
+
+/// The same resolution, reduced to the fields the gates read.
+pub fn font_info_at(
+    document: &Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+    key: &[u8],
+) -> Option<FontInfo> {
+    let font = font_dictionary_at(document, page_id, path, key)?;
+    let read = |key: &[u8]| {
+        font.get(key)
+            .ok()
+            .and_then(|object| object.as_name().ok())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+    };
+    Some(FontInfo {
+        key: key.to_vec(),
+        base_font: read(b"BaseFont"),
+        subtype: read(b"Subtype"),
+    })
 }
 
 /// Reads the font dictionary's `/Subtype` and `/BaseFont`.
@@ -1463,6 +1564,8 @@ pub fn apply_text(
         font_swap: None,
         also: Vec::new(),
         property_clone: None,
+        xobject_path: Vec::new(),
+        xobject_clones: Vec::new(),
     })
 }
 
@@ -1487,6 +1590,9 @@ pub struct MergedWrite<'a> {
     /// The text the user asked for, when there is one. Only `/ActualText` consumes it (P2.7.1):
     /// the property must state the *semantic* text, which the operand bytes are not.
     pub replacement: Option<&'a str>,
+    /// The content stream being written. Empty is the page; a non-empty path is the Form
+    /// XObject clone the edit was copied into (P2.7.3 X2).
+    pub level: Vec<XObjectStep>,
 }
 
 /// Applies a merged run's edit in **one** decode -> mutate -> encode -> replace pass
@@ -1509,43 +1615,46 @@ pub fn apply_merged(
     write: &MergedWrite<'_>,
 ) -> Result<(ContentOperation, bool), AppError> {
     let head = write.fragments.first().ok_or(AppError::TextRunMismatch)?;
-    let mut content = decoded_content(document, page_id)?;
+    let level = &write.level;
+    let mut content = read_level(document, page_id, level)?;
 
-    // Validate and collect every original string before mutating anything, so a mismatch on
-    // the last fragment leaves the page untouched rather than half rewritten.
-    let mut originals = Vec::with_capacity(write.fragments.len());
-    {
-        let fonts = document
-            .get_page_fonts(page_id)
-            .map_err(|error| AppError::Other(format!("could not read page fonts: {error}")))?;
-        for fragment in &write.fragments {
-            let operation = content
-                .operations
-                .get(fragment.id.op_index)
-                .ok_or(AppError::TextRunMismatch)?;
-            let old = string_at(operation, &fragment.id.operand_path)
-                .ok_or(AppError::TextRunMismatch)?
-                .to_vec();
-            // T4, per fragment: the bytes at this address must still read as what the user was
-            // shown. A merged run is re-validated fragment by fragment, so a document that
-            // changed under the picker refuses instead of writing the wrong operand.
+    // Every name a fragment reads resolves through the resources **in force at this level**
+    // (P2.7.3 §6). The page's table may not name the resource at all, and where it does reuse
+    // the name it is a different face — decoding through it would corrupt the comparison.
+    let fonts: Vec<Dictionary> = write
+        .fragments
+        .iter()
+        .map(|fragment| {
             let font_key = font_in_force(&content.operations, fragment.id.op_index)
                 .ok_or(AppError::TextRunMismatch)?;
-            let font = fonts
-                .get(&font_key)
-                .copied()
-                .ok_or(AppError::TextRunMismatch)?;
-            let encoding = font
-                .get_font_encoding(document)
-                .map_err(|_| AppError::TextRunMismatch)?;
-            let current = encoding
-                .bytes_to_string(&old)
-                .map_err(|_| AppError::TextRunMismatch)?;
-            if current != fragment.expected {
-                return Err(AppError::TextRunMismatch);
-            }
-            originals.push(old);
+            font_dictionary_at(document, page_id, level, &font_key).ok_or(AppError::TextRunMismatch)
+        })
+        .collect::<Result<_, _>>()?;
+
+    // Validate and collect every original string before mutating anything, so a mismatch on
+    // the last fragment leaves the stream untouched rather than half rewritten.
+    let mut originals = Vec::with_capacity(write.fragments.len());
+    for (fragment, font) in write.fragments.iter().zip(fonts.iter()) {
+        let operation = content
+            .operations
+            .get(fragment.id.op_index)
+            .ok_or(AppError::TextRunMismatch)?;
+        let old = string_at(operation, &fragment.id.operand_path)
+            .ok_or(AppError::TextRunMismatch)?
+            .to_vec();
+        // T4, per fragment: the bytes at this address must still read as what the user was
+        // shown. A merged run is re-validated fragment by fragment, so a document that
+        // changed under the picker refuses instead of writing the wrong operand.
+        let encoding = font
+            .get_font_encoding(document)
+            .map_err(|_| AppError::TextRunMismatch)?;
+        let current = encoding
+            .bytes_to_string(&old)
+            .map_err(|_| AppError::TextRunMismatch)?;
+        if current != fragment.expected {
+            return Err(AppError::TextRunMismatch);
         }
+        originals.push(old);
     }
 
     for fragment in &write.fragments {
@@ -1563,7 +1672,7 @@ pub fn apply_merged(
     // so undo restores the original name exactly where it was read.
     let mut swaps: Vec<FontSwap> = Vec::new();
     if let Some(base_font) = write.substitute {
-        ensure_substitute_resource(document, page_id, base_font)?;
+        ensure_substitute_resource(document, page_id, level, base_font)?;
         let mut seen: Vec<usize> = Vec::new();
         for fragment in &write.fragments {
             let (tf_index, old_name) =
@@ -1596,24 +1705,21 @@ pub fn apply_merged(
     // left reading the old string. The rewrite rides in this same pass, so one undo restores
     // both the operand and the property. `false` means the span is shared or the properties
     // are a shared resource: the edit lands, but the caller must tell the user.
-    let named = page_properties(document, page_id);
+    //
+    // P2.7.3 Q3: a clone owns its `/Resources`, so its `/Properties` — inline or referenced —
+    // is this edit's to write. On the page path the inherited/shared resolution still applies.
+    let named = level_properties(document, page_id, level);
     let (actual_text_preserved, property_clone) = rewrite_actual_text(
         document,
         page_id,
+        level,
         &mut content.operations,
         head.id.op_index,
         write.replacement,
         &named,
     )?;
 
-    let encoded = content
-        .encode()
-        .map_err(|error| AppError::Other(format!("could not re-encode page content: {error}")))?;
-
-    // F2: the whole page becomes one stream (D2 keeps the original file's layout).
-    document
-        .change_page_content(page_id, encoded)
-        .map_err(|error| AppError::Other(format!("could not replace page content: {error}")))?;
+    write_level(document, page_id, level, &content)?;
 
     let also: Vec<ContentOperation> = write
         .fragments
@@ -1629,6 +1735,8 @@ pub fn apply_merged(
             font_swap: None,
             also: Vec::new(),
             property_clone: None,
+            xobject_path: level.clone(),
+            xobject_clones: Vec::new(),
         })
         .collect();
 
@@ -1659,9 +1767,74 @@ pub fn apply_merged(
             font_swap,
             also,
             property_clone,
+            xobject_path: level.clone(),
+            xobject_clones: Vec::new(),
         },
         actual_text_preserved,
     ))
+}
+
+/// The `/Properties` entries in force at one content level.
+///
+/// A form's own `/Resources` supplies the keys it defines and the enclosing level supplies the
+/// rest (ISO 32000-1 §8.10), so the walk goes outermost-in and lets an inner level win.
+fn level_properties(
+    document: &Document,
+    page_id: ObjectId,
+    level: &[XObjectStep],
+) -> HashMap<Vec<u8>, Dictionary> {
+    if level.is_empty() {
+        return page_properties(document, page_id);
+    }
+    let mut merged = HashMap::new();
+    for resources in resource_stack(document, page_id, level) {
+        let Some(properties) = resources
+            .get(b"Properties")
+            .ok()
+            .and_then(|entry| document.dereference(entry).ok())
+            .and_then(|(_, object)| object.as_dict().ok())
+        else {
+            continue;
+        };
+        for (name, value) in properties.iter() {
+            let Some(entry) = document
+                .dereference(value)
+                .ok()
+                .and_then(|(_, object)| object.as_dict().ok())
+            else {
+                continue;
+            };
+            merged.insert(name.clone(), entry.clone());
+        }
+    }
+    merged
+}
+
+/// Mutable access to the `/Properties` dictionary a write at one level may modify.
+///
+/// A clone is given its private resources at exactly this point (design §5 step 2, Q3): writing
+/// into a resources dictionary the original form still shares would recreate B-7 one level down,
+/// and creating the copy any earlier would leave an unused object behind on an edit that never
+/// touched the resources.
+fn properties_mut_for_level<'a>(
+    document: &'a mut Document,
+    page_id: ObjectId,
+    level: &[XObjectStep],
+) -> Result<&'a mut Dictionary, AppError> {
+    if level.is_empty() {
+        return properties_mut(document, page_id)
+            .ok_or_else(|| AppError::Other("the page has no /Properties to write".to_string()));
+    }
+    let form_id = form_id_at(document, page_id, level)?;
+    let resources = private_form_resources(document, form_id)?;
+    if !resources.has(b"Properties") {
+        resources.set(b"Properties", Object::Dictionary(Dictionary::new()));
+    }
+    resources
+        .get_mut(b"Properties")
+        .ok()
+        .and_then(|entry| entry.as_dict_mut().ok())
+        .ok_or_else(|| AppError::Other("the clone has no /Properties to write".to_string()))
 }
 
 /// Rewrites the `/ActualText` of the innermost `BDC` governing one showing operation
@@ -1687,6 +1860,7 @@ pub fn apply_merged(
 fn rewrite_actual_text(
     document: &mut Document,
     page_id: ObjectId,
+    level: &[XObjectStep],
     operations: &mut [Operation],
     op_index: usize,
     replacement: Option<&str>,
@@ -1757,6 +1931,7 @@ fn rewrite_actual_text(
     let Some(clone) = clone_named_property(
         document,
         page_id,
+        level,
         bdc_index,
         &original_name,
         &source,
@@ -1796,6 +1971,7 @@ pub struct PropertyClone {
 fn clone_named_property(
     document: &mut Document,
     page_id: ObjectId,
+    level: &[XObjectStep],
     bdc_index: usize,
     original_name: &[u8],
     source: &Dictionary,
@@ -1807,11 +1983,13 @@ fn clone_named_property(
         Object::String(actual_text, lopdf::StringFormat::Literal),
     );
     let new_name = {
-        let properties = properties_mut(document, page_id)?;
+        let properties = properties_mut_for_level(document, page_id, level).ok()?;
         fresh_property_name(properties, original_name)?
     };
     let clone_object = document.add_object(clone);
-    properties_mut(document, page_id)?.set(new_name.clone(), Object::Reference(clone_object));
+    properties_mut_for_level(document, page_id, level)
+        .ok()?
+        .set(new_name.clone(), Object::Reference(clone_object));
     Some(PropertyClone {
         op_index: bdc_index,
         old_name: original_name.to_vec(),
@@ -1830,7 +2008,7 @@ fn fresh_property_name(properties: &Dictionary, base: &[u8]) -> Option<Vec<u8>> 
     })
 }
 
-/// Where a page's `/Properties` dictionary actually lives.
+/// Where the page's `/Properties` dictionary actually lives.
 ///
 /// `/Properties` can hang off an inline `/Resources` dict, off an indirect `/Resources` object
 /// (what real producers write), or be an indirect object itself; `/Resources` may also be
@@ -1940,6 +2118,475 @@ pub(crate) fn properties_mut(
     }
 }
 
+/// One level's copy of a Form XObject, recorded so undo can take it back out (P2.7.3 §7).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XObjectClone {
+    /// Enclosing level: empty for the page, else the path to the container.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_path: Vec<XObjectStep>,
+    /// The `Do` the edit repointed, and the names before/after.
+    pub do_index: usize,
+    pub old_name: Vec<u8>,
+    pub new_name: Vec<u8>,
+    /// The clone object, removed on undo so no orphan accumulates.
+    pub clone_object: ObjectId,
+    /// The private `/Resources` installed on the clone, if the edit made one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloned_resources: Option<ObjectId>,
+}
+
+/// Clones every level of `path`, outermost first, and repoints each enclosing `Do` at its clone
+/// (P2.7.3 §5, ruling Q2).
+///
+/// The **draw** is the edit unit: cloning the outermost form makes the copy reachable only from
+/// the `Do` that was clicked, so every other draw of the same form — on this page or another —
+/// keeps the original bytes. Cloning an inner level alone would leave the outer form shared, and
+/// the edit would leak into the outer form's other draws.
+///
+/// Nothing is mutated until that step's form, name and `Do` all resolve, and a name is only ever
+/// added to a resources dictionary the clone owns (Q3/§5.1) — so a form or a page that shares one
+/// resources object is never written through.
+pub fn clone_draw(
+    document: &mut Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+) -> Result<Vec<XObjectClone>, AppError> {
+    let mut clones = Vec::with_capacity(path.len());
+    let mut parent_path: Vec<XObjectStep> = Vec::new();
+    for step in path {
+        let stream = {
+            let stack = resource_stack(document, page_id, &parent_path);
+            resolve_form(document, &stack, &step.name)
+                .ok_or(AppError::TextRunMismatch)?
+                .clone()
+        };
+        let fresh = {
+            let existing = enclosing_xobject_names(document, page_id, &parent_path)?;
+            fresh_xobject_name(&existing, &step.name)
+        };
+
+        let clone_object = document.add_object(Object::Stream(stream));
+        install_xobject_name(document, page_id, &parent_path, &fresh, clone_object)?;
+        repoint_do(
+            document,
+            page_id,
+            &parent_path,
+            step.op_index,
+            &step.name,
+            &fresh,
+        )?;
+
+        clones.push(XObjectClone {
+            parent_path: parent_path.clone(),
+            do_index: step.op_index,
+            old_name: step.name.clone(),
+            new_name: fresh.clone(),
+            clone_object,
+            cloned_resources: None,
+        });
+        parent_path.push(XObjectStep {
+            name: fresh,
+            op_index: step.op_index,
+        });
+    }
+    Ok(clones)
+}
+
+/// The form a `Do` operand names, through the resources in force at one level.
+fn resolve_form<'a>(
+    document: &'a Document,
+    stack: &'a [Dictionary],
+    name: &[u8],
+) -> Option<&'a lopdf::Stream> {
+    stack.iter().rev().find_map(|level| {
+        let entry = level.get(b"XObject").ok()?;
+        let xobjects = document.dereference(entry).ok()?.1.as_dict().ok()?;
+        let object = xobjects.get(name).ok()?;
+        let (_, resolved) = document.dereference(object).ok()?;
+        let stream = resolved.as_stream().ok()?;
+        let subtype = stream.dict.get(b"Subtype").ok()?.as_name().ok()?;
+        (subtype == b"Form").then_some(stream)
+    })
+}
+
+/// `<base>_edit<N>` for the smallest `N` the enclosing `/XObject` dictionary does not hold.
+///
+/// Mirrors [`fresh_property_name`]: the name is the address, so a fresh one must be derivable
+/// from the address alone, without trusting an object id (`renumber_objects` rewrites those).
+fn fresh_xobject_name(existing: &[Vec<u8>], base: &[u8]) -> Vec<u8> {
+    (1..=999)
+        .map(|suffix| {
+            let mut candidate = base.to_vec();
+            candidate.extend_from_slice(b"_edit");
+            candidate.extend_from_slice(suffix.to_string().as_bytes());
+            candidate
+        })
+        .find(|candidate| !existing.iter().any(|name| name == candidate))
+        .expect("999 fresh names is more than a draw needs")
+}
+
+/// The resource names the enclosing `/XObject` dictionary declares.
+fn enclosing_xobject_names(
+    document: &Document,
+    page_id: ObjectId,
+    parent_path: &[XObjectStep],
+) -> Result<Vec<Vec<u8>>, AppError> {
+    let Some(resources) = enclosing_resources(document, page_id, parent_path) else {
+        return Ok(Vec::new());
+    };
+    let Some(xobjects) = resources
+        .get(b"XObject")
+        .ok()
+        .and_then(|entry| document.dereference(entry).ok())
+        .and_then(|(_, object)| object.as_dict().ok())
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(xobjects.iter().map(|(name, _)| name.clone()).collect())
+}
+
+/// The resources dictionary in force at one level of the descent, if it declares one.
+fn enclosing_resources(
+    document: &Document,
+    page_id: ObjectId,
+    parent_path: &[XObjectStep],
+) -> Option<Dictionary> {
+    if parent_path.is_empty() {
+        return effective_resources(document, page_id);
+    }
+    let parent_path_len = parent_path.len();
+    let stack = resource_stack(document, page_id, &parent_path[..parent_path_len - 1]);
+    resolve_form(document, &stack, &parent_path[parent_path_len - 1].name)?
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(_, object)| object.as_dict().ok())
+        .cloned()
+}
+
+/// Installs a fresh `/XObject` name at one level, giving that level a private resources
+/// dictionary first (ruling B-7 / Q3).
+fn install_xobject_name(
+    document: &mut Document,
+    page_id: ObjectId,
+    parent_path: &[XObjectStep],
+    name: &[u8],
+    clone_object: ObjectId,
+) -> Result<(), AppError> {
+    // Read the current map from the enclosing level, then write it back through the level's
+    // writable resources. `/XObject` is routinely an indirect object, and writing the name
+    // through the reference would mutate a dictionary other readers may share.
+    let mut xobjects = enclosing_resources(document, page_id, parent_path)
+        .and_then(|resources| {
+            let entry = resources.get(b"XObject").ok()?;
+            document
+                .dereference(entry)
+                .ok()
+                .and_then(|(_, object)| object.as_dict().ok())
+                .cloned()
+        })
+        .unwrap_or_default();
+    xobjects.set(name, Object::Reference(clone_object));
+    writable_resources_at(document, page_id, parent_path)?
+        .set(b"XObject", Object::Dictionary(xobjects));
+    Ok(())
+}
+
+/// The resources dictionary a write at one level may mutate, private to that level.
+///
+/// The page's own dictionary is handled by [`writable_resources_mut`], which copies what the
+/// page inherits or shares. A form level has no such inheritance to resolve — the *level* is the
+/// form — so its clone is given a private copy of its `/Resources` (or a new dictionary) the
+/// first time an edit touches it (Q3).
+pub(crate) fn writable_resources_at<'a>(
+    document: &'a mut Document,
+    page_id: ObjectId,
+    parent_path: &[XObjectStep],
+) -> Result<&'a mut Dictionary, AppError> {
+    if parent_path.is_empty() {
+        return writable_resources_mut(document, page_id);
+    }
+    let form_id = form_id_at(document, page_id, parent_path)?;
+    private_form_resources(document, form_id)
+}
+
+/// The `/Resources` object a form in a path points at, if it points at an indirect one.
+///
+/// Used to tell "the clone's dictionary is now its own" from "the clone still shares the
+/// original's" after a write: the write path creates the private copy only when the edit
+/// actually needs it (Q3), so the record has to be observed, not predicted.
+pub(crate) fn form_resources_id(
+    document: &Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+) -> Option<ObjectId> {
+    let form_id = form_id_at(document, page_id, path).ok()?;
+    form_dictionary(document, form_id)?
+        .get(b"Resources")
+        .ok()?
+        .as_reference()
+        .ok()
+}
+
+/// The object id of the form a (clone) path names at its innermost level.
+pub(crate) fn form_id_at(
+    document: &Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+) -> Result<ObjectId, AppError> {
+    let (last, parent) = path.split_last().ok_or(AppError::TextRunMismatch)?;
+    let stack = resource_stack(document, page_id, parent);
+    let entry = stack
+        .iter()
+        .rev()
+        .find_map(|level| {
+            let xobjects = level.get(b"XObject").ok()?;
+            document
+                .dereference(xobjects)
+                .ok()?
+                .1
+                .as_dict()
+                .ok()?
+                .get(&last.name)
+                .ok()
+        })
+        .ok_or(AppError::TextRunMismatch)?;
+    entry.as_reference().map_err(|_| AppError::TextRunMismatch)
+}
+
+/// True when more than one dictionary in the document names `resources_id` as its
+/// `/Resources`, or when nothing does.
+///
+/// A clone starts out sharing its original's `/Resources` object, so "is it mine" has to be
+/// answered by who points at it, not by whether it is indirect — the same reasoning §5.1 uses
+/// for pages.
+fn resources_is_shared(document: &Document, resources_id: ObjectId) -> bool {
+    document
+        .objects
+        .values()
+        .filter_map(|object| object.as_dict().ok())
+        .filter(|dict| {
+            dict.get(b"Resources")
+                .ok()
+                .and_then(|resources| resources.as_reference().ok())
+                == Some(resources_id)
+        })
+        .count()
+        != 1
+}
+
+/// Gives a form a private `/Resources` object, returning it for writing.
+///
+/// Called only when an edit touches the form's resources — a font substitution or a named
+/// `/Properties` clone (Q3). The copy is unconditional at that point rather than share-counted
+/// on the *entry*: a resources dictionary is small, and failing to notice a second reader would
+/// recreate B-7 one level down. Idempotent, so two legs of one edit do not leave an orphan.
+pub(crate) fn private_form_resources(
+    document: &mut Document,
+    form_id: ObjectId,
+) -> Result<&mut Dictionary, AppError> {
+    let existing = form_dictionary(document, form_id)
+        .and_then(|form| form.get(b"Resources").ok())
+        .and_then(|object| object.as_reference().ok());
+    if let Some(resources_id) = existing {
+        if !resources_is_shared(document, resources_id) {
+            return document
+                .get_dictionary_mut(resources_id)
+                .map_err(|error| AppError::Other(format!("form resources unreadable: {error}")));
+        }
+    }
+    let copy = existing
+        .and_then(|resources_id| document.get_dictionary(resources_id).ok())
+        .cloned()
+        .unwrap_or_default();
+    let resources_id = document.add_object(copy);
+    form_dictionary_mut(document, form_id)
+        .ok_or_else(|| AppError::Other("form object unreadable".to_string()))?
+        .set(b"Resources", Object::Reference(resources_id));
+    document
+        .get_dictionary_mut(resources_id)
+        .map_err(|error| AppError::Other(format!("form resources unreadable: {error}")))
+}
+
+/// A form's dictionary — the `/Subtype /Form` object is a **stream**, so its keys live on
+/// `stream.dict`, not on the object itself.
+pub(crate) fn form_dictionary(document: &Document, form_id: ObjectId) -> Option<&Dictionary> {
+    document
+        .get_object(form_id)
+        .ok()
+        .and_then(|object| match object {
+            Object::Stream(stream) => Some(&stream.dict),
+            other => other.as_dict().ok(),
+        })
+}
+
+fn form_dictionary_mut(document: &mut Document, form_id: ObjectId) -> Option<&mut Dictionary> {
+    document
+        .get_object_mut(form_id)
+        .ok()
+        .and_then(|object| match object {
+            Object::Stream(stream) => Some(&mut stream.dict),
+            other => other.as_dict_mut().ok(),
+        })
+}
+
+/// Removes a `/XObject` name at one level, **without** copying the dictionary.
+///
+/// Undo removes a name the edit itself installed, so it must not re-run the private-copy rule:
+/// that would leave a fresh orphan on every undo. [`install_xobject_name`] writes the map inline
+/// in the level's own `/Resources`, so the entry is reachable by a plain lookup.
+pub(crate) fn remove_xobject_name(
+    document: &mut Document,
+    page_id: ObjectId,
+    parent_path: &[XObjectStep],
+    name: &[u8],
+    expected: ObjectId,
+) {
+    let Some(xobjects) = level_resources_mut(document, page_id, parent_path)
+        .and_then(|resources| resources.get_mut(b"XObject").ok())
+        .and_then(|entry| entry.as_dict_mut().ok())
+    else {
+        return;
+    };
+    if xobjects
+        .get(name)
+        .ok()
+        .and_then(|entry| entry.as_reference().ok())
+        == Some(expected)
+    {
+        xobjects.remove(name);
+    }
+}
+
+/// Mutable access to one level's own resources dictionary, inline or indirect, without copying.
+fn level_resources_mut<'a>(
+    document: &'a mut Document,
+    page_id: ObjectId,
+    parent_path: &[XObjectStep],
+) -> Option<&'a mut Dictionary> {
+    let holder = if parent_path.is_empty() {
+        page_id
+    } else {
+        form_id_at(document, page_id, parent_path).ok()?
+    };
+    let referenced = document
+        .get_dictionary(holder)
+        .ok()?
+        .get(b"Resources")
+        .ok()?
+        .as_reference()
+        .ok();
+    match referenced {
+        Some(resources_id) => document.get_dictionary_mut(resources_id).ok(),
+        None => document
+            .get_dictionary_mut(holder)
+            .ok()?
+            .get_mut(b"Resources")
+            .ok()?
+            .as_dict_mut()
+            .ok(),
+    }
+}
+
+/// True when any object in the document still references `id`.
+pub(crate) fn object_is_referenced(document: &Document, id: ObjectId) -> bool {
+    fn scan(object: &Object, id: ObjectId) -> bool {
+        match object {
+            Object::Reference(candidate) => *candidate == id,
+            Object::Array(items) => items.iter().any(|item| scan(item, id)),
+            Object::Dictionary(dict) => dict.iter().any(|(_, value)| scan(value, id)),
+            Object::Stream(stream) => stream.dict.iter().any(|(_, value)| scan(value, id)),
+            _ => false,
+        }
+    }
+    document
+        .objects
+        .iter()
+        .any(|(key, object)| *key != id && scan(object, id))
+        || document.trailer.iter().any(|(_, value)| scan(value, id))
+}
+
+/// Points one level's `Do` operand at the clone's name.
+fn repoint_do(
+    document: &mut Document,
+    page_id: ObjectId,
+    parent_path: &[XObjectStep],
+    do_index: usize,
+    old_name: &[u8],
+    new_name: &[u8],
+) -> Result<(), AppError> {
+    let mut content = read_level(document, page_id, parent_path)?;
+    let operation = content
+        .operations
+        .get_mut(do_index)
+        .ok_or(AppError::TextRunMismatch)?;
+    if operation.operator != "Do"
+        || operation.operands.first().and_then(|o| o.as_name().ok()) != Some(old_name)
+    {
+        return Err(AppError::TextRunMismatch);
+    }
+    *operation
+        .operands
+        .first_mut()
+        .ok_or(AppError::TextRunMismatch)? = Object::Name(new_name.to_vec());
+    write_level(document, page_id, parent_path, &content)
+}
+
+/// One level's decoded content: the page's own stream, or a form clone's.
+pub(crate) fn read_level(
+    document: &Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+) -> Result<lopdf::content::Content<Vec<Operation>>, AppError> {
+    if path.is_empty() {
+        return decoded_content(document, page_id);
+    }
+    let form_id = form_id_at(document, page_id, path)?;
+    let stream = document
+        .get_object(form_id)
+        .ok()
+        .and_then(|object| object.as_stream().ok())
+        .ok_or(AppError::TextRunMismatch)?;
+    decode_stream(stream)
+}
+
+/// Replaces one level's content.
+///
+/// A form clone addressed by its own object id is written with `change_content_stream`, never
+/// `change_page_content`: the latter addresses a *page* dictionary, so on a stream it returns
+/// `Err(ObjectType)` and on a dictionary whose `/Contents` is an unexpected type it returns
+/// `Ok(())` having written nothing (design §5.4).
+pub(crate) fn write_level(
+    document: &mut Document,
+    page_id: ObjectId,
+    path: &[XObjectStep],
+    content: &lopdf::content::Content<Vec<Operation>>,
+) -> Result<(), AppError> {
+    let encoded = content
+        .encode()
+        .map_err(|error| AppError::Other(format!("could not re-encode content: {error}")))?;
+    if path.is_empty() {
+        return document
+            .change_page_content(page_id, encoded)
+            .map_err(|error| AppError::Other(format!("could not replace page content: {error}")));
+    }
+    let form_id = form_id_at(document, page_id, path)?;
+    let is_stream = document
+        .get_object(form_id)
+        .ok()
+        .and_then(|object| object.as_stream().ok())
+        .is_some();
+    if !is_stream {
+        return Err(AppError::Other(format!(
+            "form {form_id:?} is not a stream, so its content cannot be written"
+        )));
+    }
+    document.change_content_stream(form_id, encoded);
+    Ok(())
+}
+
 /// The index of the `BDC` that opened the marked-content sequence containing `op_index`.
 fn enclosing_bdc(operations: &[Operation], op_index: usize) -> Option<usize> {
     let mut stack: Vec<usize> = Vec::new();
@@ -2004,7 +2651,7 @@ pub fn apply_font_swap(
     base_font: &str,
 ) -> Result<FontSwap, AppError> {
     let _ = (page_index, base_font);
-    ensure_substitute_resource(document, page_id, base_font)?;
+    ensure_substitute_resource(document, page_id, &id.xobject_path, base_font)?;
 
     let mut content = decoded_content(document, page_id)?;
     let (tf_index, old_name) = font_in_force_with_index(&content.operations, id.op_index)
@@ -2065,6 +2712,7 @@ const SUBSTITUTE_NAME: &[u8] = b"FS1";
 fn ensure_substitute_resource(
     document: &mut Document,
     page_id: ObjectId,
+    level: &[XObjectStep],
     base_font: &str,
 ) -> Result<ObjectId, AppError> {
     let mut font_dictionary = lopdf::Dictionary::new();
@@ -2074,7 +2722,7 @@ fn ensure_substitute_resource(
     font_dictionary.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
     let substitute_id = document.add_object(font_dictionary);
 
-    let resources = writable_resources_mut(document, page_id)?;
+    let resources = writable_resources_at(document, page_id, level)?;
     set_font_entry(resources, substitute_id)?;
 
     Ok(substitute_id)
@@ -2249,6 +2897,14 @@ pub struct ContentOperation {
     /// repoint the `BDC` at the original name and drop the clone again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub property_clone: Option<PropertyClone>,
+    /// The content stream this operation wrote (P2.7.3 X2). Empty is the page's own stream, so
+    /// every 0.5.0 inverse keeps its meaning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub xobject_path: Vec<XObjectStep>,
+    /// The draws this edit copied, outermost first — the other leg of the same transaction
+    /// (Q6). Empty at page level; undo restores the `Do` and drops each clone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub xobject_clones: Vec<XObjectClone>,
 }
 
 /// One run's switch from its original font resource to a standard-14 substitute.

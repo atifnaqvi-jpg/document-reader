@@ -189,26 +189,28 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
             nested_xobject: run.xobject_refusal,
         });
     }
-    let font = textlocate::font_info(document, page_id, &run.font_key).ok_or_else(|| {
-        AppError::TextRunNotEditable(format!(
-            "this run's font ({}) could not be resolved; add a text annotation instead (gate: {})",
-            String::from_utf8_lossy(&run.font_key),
-            Gate::SimpleFont.name()
-        ))
-    })?;
+    // P2.7.3 §6: the run's font is resolved at the level the run is addressed in. A form
+    // usually declares its own `/Font` and the page may not name that resource at all.
+    let font = textlocate::font_info_at(document, page_id, &run.id.xobject_path, &run.font_key)
+        .ok_or_else(|| {
+            AppError::TextRunNotEditable(format!(
+                "this run's font ({}) could not be resolved; add a text annotation instead (gate: {})",
+                String::from_utf8_lossy(&run.font_key),
+                Gate::SimpleFont.name()
+            ))
+        })?;
 
-    let fonts = document
-        .get_page_fonts(page_id)
-        .map_err(|error| AppError::Other(format!("could not read page fonts: {error}")))?;
-    let round_trips = fonts
-        .get(&run.font_key)
-        .copied()
-        .and_then(|font| font.get_font_encoding(document).ok())
-        .map(|encoding| {
-            let text = encoding.bytes_to_string(&run.bytes).unwrap_or_default();
-            encoding.string_to_bytes(&text) == run.bytes
-        })
-        .unwrap_or(false);
+    let round_trips =
+        textlocate::font_dictionary_at(document, page_id, &run.id.xobject_path, &run.font_key)
+            .map(|font| {
+                font.get_font_encoding(document)
+                    .map(|encoding| {
+                        let text = encoding.bytes_to_string(&run.bytes).unwrap_or_default();
+                        encoding.string_to_bytes(&text) == run.bytes
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
 
     Ok(RunGates {
         font,
@@ -1931,23 +1933,35 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         }));
     }
 
-    // P2.7.3 X1 boundary. Discovery reaches form-addressed runs, but this write path decodes
-    // the **page** stream and indexes it by `op_index`: writing here would land the bytes in
-    // an unrelated page operation. Refuse until X2's copy-on-write write exists; a refusal is
-    // recoverable, a silent corruption of untouched text is not (B-7/Q2).
-    if !run.id.xobject_path.is_empty() {
-        return Err(AppError::TextRunNotEditable(format!(
-            "text inside a form cannot be rewritten yet; add a text annotation instead (gate: {})",
-            Gate::NestedXObject.name()
-        )));
-    }
+    // P2.7.3 X2 (Q2/Q6): a run inside a form is edited by copying the **draw** the user
+    // clicked and writing the copy's stream. The page's own stream is never touched, so an
+    // `op_index` from the form's stream can never be applied to the page's (`change_page_content`
+    // would land it on an unrelated operation). Cloning happens before anything is measured, so
+    // a refusal leaves the document exactly as it was.
+    let clones = if run.id.xobject_path.is_empty() {
+        Vec::new()
+    } else {
+        textlocate::clone_draw(document, page_id, &run.id.xobject_path)?
+    };
+    let level: Vec<textlocate::XObjectStep> = clones
+        .iter()
+        .map(|clone| textlocate::XObjectStep {
+            name: clone.new_name.clone(),
+            op_index: clone.do_index,
+        })
+        .collect();
 
     // Stage 2 (T11): keep the original font when it can set the replacement; otherwise
     // MECH-A picks a standard-14 substitute. This runs BEFORE any mutation.
-    let plan = crate::editor::substitute::plan(
+    //
+    // P2.7.3 §6: the font is resolved at the run's own level, not the page's. A form usually
+    // declares its own `/Font`, and the page may not name that resource at all — the page
+    // lookup would report "no program" and substitute a face for text the original sets.
+    let font = textlocate::font_dictionary_at(document, page_id, &level, &run.font_key)
+        .ok_or_else(|| refuse(Gate::SimpleFont))?;
+    let plan = crate::editor::substitute::plan_with_font(
         document,
-        page_id,
-        &run.font_key,
+        Some(&font),
         &gates.font,
         &request.replacement,
         request.allow_substitution,
@@ -1959,16 +1973,9 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     // never a silent drop (`string_to_bytes` would drop it).
     let new_bytes = match &plan {
         crate::editor::substitute::Plan::KeepOriginal => {
-            let encoding = {
-                let fonts = document.get_page_fonts(page_id).map_err(|error| {
-                    AppError::Other(format!("could not read page fonts: {error}"))
-                })?;
-                fonts
-                    .get(&run.font_key)
-                    .copied()
-                    .and_then(|font| font.get_font_encoding(document).ok())
-                    .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?
-            };
+            let encoding = font
+                .get_font_encoding(document)
+                .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
             let bytes = encoding.string_to_bytes(&request.replacement);
             let round_tripped = encoding
                 .bytes_to_string(&bytes)
@@ -2031,9 +2038,38 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         fragments: writes,
         substitute: substitution.as_deref(),
         replacement: Some(&request.replacement),
+        level: level.clone(),
     };
-    let (inverse, actual_text_preserved) =
+    let (mut inverse, actual_text_preserved) =
         textlocate::apply_merged(document, request.page, page_id, &merged)?;
+    let mut clones = clones;
+    for clone in &mut clones {
+        // The private `/Resources` is created lazily by the write path, and only when the edit
+        // needed it (Q3). Comparing the clone against the form it came from records exactly
+        // what was made; predicting it here would record a copy that never happened.
+        let sibling = textlocate::XObjectStep {
+            name: clone.old_name.clone(),
+            op_index: clone.do_index,
+        };
+        let copied = textlocate::XObjectStep {
+            name: clone.new_name.clone(),
+            op_index: clone.do_index,
+        };
+        let before = textlocate::form_resources_id(
+            document,
+            page_id,
+            &[clone.parent_path.clone(), vec![sibling]].concat(),
+        );
+        let after = textlocate::form_resources_id(
+            document,
+            page_id,
+            &[clone.parent_path.clone(), vec![copied]].concat(),
+        );
+        if after.is_some() && after != before {
+            clone.cloned_resources = after;
+        }
+    }
+    inverse.xobject_clones = clones;
 
     Ok(EditOutcome {
         inverse,
@@ -2108,14 +2144,38 @@ fn validate_run_range(
 /// swaps in `font_swap.also`; all of them are restored here, so one merged edit is one undo. A
 /// stale inverse — one whose recorded bytes are not what the document now holds — refuses
 /// rather than replaying an edit the user did not make.
+///
+/// A form edit (P2.7.3 Q6) restores its operand bytes in the **clone's** stream, repoints every
+/// `Do` it changed back at the original name, and drops the clones — one pass, one undo entry.
 pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(), AppError> {
     let page_id = page_id(document, operation.page)?;
-    let mut content = textlocate::decoded_content(document, page_id)?;
+    let level = &operation.xobject_path;
+    let mut content = textlocate::read_level(document, page_id, level)?;
 
     // Every write the edit made, head first.
     let writes: Vec<&ContentOperation> = std::iter::once(operation)
         .chain(operation.also.iter())
         .collect();
+
+    // Q6, leg one: each `Do` must still name the clone this edit installed. Checking before
+    // any mutation means a `Do` someone else has since repointed refuses the whole undo rather
+    // than half reverting it and repointing a draw the user never edited.
+    for clone in &operation.xobject_clones {
+        let enclosing = textlocate::read_level(document, page_id, &clone.parent_path)?;
+        let operation_at_do = enclosing
+            .operations
+            .get(clone.do_index)
+            .ok_or(AppError::TextRunMismatch)?;
+        if operation_at_do.operator != "Do"
+            || operation_at_do
+                .operands
+                .first()
+                .and_then(|o| o.as_name().ok())
+                != Some(clone.new_name.as_slice())
+        {
+            return Err(AppError::TextRunMismatch);
+        }
+    }
 
     for write in &writes {
         let current = content
@@ -2130,7 +2190,7 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
         }
     }
 
-    let encoded = {
+    {
         for write in &writes {
             let slot = string_at_mut(
                 content
@@ -2169,17 +2229,11 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
             *bdc.operands.get_mut(1).ok_or(AppError::TextRunMismatch)? =
                 lopdf::Object::Name(clone.old_name.clone());
         }
+    }
 
-        content.encode().map_err(|error| {
-            AppError::Other(format!("could not re-encode page content: {error}"))
-        })?
-    };
+    textlocate::write_level(document, page_id, level, &content)?;
 
-    document
-        .change_page_content(page_id, encoded)
-        .map_err(|error| AppError::Other(format!("could not replace page content: {error}")))?;
-
-    // The clone object is now unreferenced; drop it so an undo leaves the file as it was
+    // The `/Properties` clone is now unreferenced; drop it so an undo leaves the file as it was
     // rather than accumulating one orphan per edit-then-undo cycle.
     if let Some(clone) = &operation.property_clone {
         if let Some(properties) = textlocate::properties_mut(document, page_id) {
@@ -2191,6 +2245,39 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
             if is_our_clone {
                 properties.remove(&clone.new_name);
                 document.objects.remove(&clone.clone_object);
+            }
+        }
+    }
+
+    // Q6, leg two: put each `Do` back, then drop what the edit created, so edit-then-undo
+    // leaves the file as it was rather than one orphan per cycle.
+    for clone in &operation.xobject_clones {
+        let mut enclosing = textlocate::read_level(document, page_id, &clone.parent_path)?;
+        let operation_at_do = enclosing
+            .operations
+            .get_mut(clone.do_index)
+            .ok_or(AppError::TextRunMismatch)?;
+        *operation_at_do
+            .operands
+            .first_mut()
+            .ok_or(AppError::TextRunMismatch)? = lopdf::Object::Name(clone.old_name.clone());
+        textlocate::write_level(document, page_id, &clone.parent_path, &enclosing)?;
+
+        textlocate::remove_xobject_name(
+            document,
+            page_id,
+            &clone.parent_path,
+            &clone.new_name,
+            clone.clone_object,
+        );
+        // The clone object before its resources: while the clone exists it still points at the
+        // private dictionary, so removing the dictionary first would leave it looking in use.
+        if !textlocate::object_is_referenced(document, clone.clone_object) {
+            document.objects.remove(&clone.clone_object);
+        }
+        if let Some(cloned) = clone.cloned_resources {
+            if !textlocate::object_is_referenced(document, cloned) {
+                document.objects.remove(&cloned);
             }
         }
     }
@@ -3565,16 +3652,14 @@ mod tests {
         assert!(!mergeable(&head, &next, false, None, None));
     }
 
-    /// P2.7.3 X1 boundary: discovery makes a form run *visible and clickable*, but the write
-    /// path in this phase still decodes the **page** stream by `op_index`. Writing a
-    /// form-addressed run through it would land the bytes in an unrelated page operation — a
-    /// silent corruption, far worse than a refusal.
+    /// P2.7.3 X2 replaces X1's refusal: a form-addressed run is now written — but only into the
+    /// **form**. The page path indexes the page stream by `op_index`, which is the *form's*
+    /// offset, so writing there would land the bytes in an unrelated page operation.
     ///
-    /// So `edit` refuses `nested-xobject` for any run whose path is non-empty. X2 replaces
-    /// this refusal with the copy-on-write write; until then the refusal is the honest answer,
-    /// and this test is what forces X2 to notice.
+    /// The page stream does change in exactly one place: the `Do` that is repointed at the
+    /// clone. Every text operand on it must still be what it was.
     #[test]
-    fn editing_a_form_run_is_refused_rather_than_written_to_the_page() {
+    fn editing_a_form_run_writes_the_form_and_not_the_page_stream() {
         let mut document = testpdf::xobject_single();
         let page = page_id(&document, 0).unwrap();
         let form_run = textlocate::locate_runs(&document, page)
@@ -3584,14 +3669,424 @@ mod tests {
             .expect("the form's run is located");
         assert_eq!(form_run.id.xobject_path.len(), 1);
 
-        let before = testpdf::bytes(&document);
-        let error = edit(&mut document, &request(&form_run, "BRAVO", 60.0, &measure_fixed(60.0)))
-            .expect_err("a form run must not be written through the page path");
+        // The page's own text, before and after: the fixture has none, which is the point —
+        // an `op_index` from the form must not address anything here.
+        let page_text = |document: &lopdf::Document| -> Vec<Vec<u8>> {
+            textlocate::decoded_content(document, page)
+                .unwrap()
+                .operations
+                .iter()
+                .filter(|operation| matches!(operation.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
+                .filter_map(|operation| operation.operands.first())
+                .filter_map(|operand| operand.as_str().ok().map(<[u8]>::to_vec))
+                .collect()
+        };
+        assert!(page_text(&document).is_empty());
+
+        edit(
+            &mut document,
+            &request(&form_run, "BRAVO", 60.0, &measure_fixed(60.0)),
+        )
+        .unwrap();
+
         assert!(
-            matches!(&error, AppError::TextRunNotEditable(message) if message.contains("nested-xobject")),
-            "the refusal must name the traversal gate, got {error:?}"
+            page_text(&document).is_empty(),
+            "no text operand appears on the page: the bytes went to the form"
         );
-        assert_eq!(testpdf::bytes(&document), before, "a refusal writes nothing");
+        assert_eq!(page_draws(&document, page), vec!["X1_edit1".to_string()]);
+        assert_eq!(
+            form_text(&document, page, &["X1_edit1"]).as_deref(),
+            Some("BRAVO")
+        );
+    }
+
+    // --- P2.7.3 X2: copy-on-write per draw ------------------------------------
+
+    /// The `Do` operands a page draws, in order, as resource names.
+    fn page_draws(document: &lopdf::Document, page: lopdf::ObjectId) -> Vec<String> {
+        textlocate::decoded_content(document, page)
+            .unwrap()
+            .operations
+            .iter()
+            .filter(|operation| operation.operator == "Do")
+            .filter_map(|operation| operation.operands.first())
+            .filter_map(|operand| operand.as_name().ok())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect()
+    }
+
+    /// The text a form draws, reached by the resource names that get to it.
+    fn form_text(
+        document: &lopdf::Document,
+        page: lopdf::ObjectId,
+        path: &[&str],
+    ) -> Option<String> {
+        let operations = testpdf::form_operations(document, page, path)?;
+        operations
+            .iter()
+            .find(|operation| operation.operator == "Tj")
+            .and_then(|operation| operation.operands.first())
+            .and_then(|operand| operand.as_str().ok())
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    /// Q2: the edit unit is the **draw**. Editing the instance the user clicked must change
+    /// that instance and nothing else, so the other draw of the same form has to keep its own
+    /// stream — byte for byte, not merely render the same.
+    #[test]
+    fn editing_one_draw_leaves_the_other_draw_byte_identical() {
+        let mut document = testpdf::xobject_two_draws();
+        let page = page_id(&document, 0).unwrap();
+
+        let before: Vec<u8> = testpdf::form_stream(&document, page, &["X1"])
+            .expect("the fixture draws X1")
+            .decompressed_content()
+            .unwrap();
+
+        // Pick the second draw: "the other one" is then the first, and an in-place edit would
+        // rewrite the stream both draws read. The second `Do` sits after the `cm`.
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.text == "ALPHA")
+            .max_by_key(|run| run.id.xobject_path[0].op_index)
+            .expect("both draws are located");
+        assert_eq!(run.id.xobject_path[0].op_index, 2);
+
+        edit(
+            &mut document,
+            &request(&run, "BRAVO", 60.0, &measure_fixed(60.0)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            page_draws(&document, page),
+            vec!["X1".to_string(), "X1_edit1".to_string()],
+            "only the clicked draw is repointed at the clone"
+        );
+        let after: Vec<u8> = testpdf::form_stream(&document, page, &["X1"])
+            .expect("the original form is still there")
+            .decompressed_content()
+            .unwrap();
+        assert_eq!(after, before, "the other draw's form is byte-identical");
+        assert_eq!(
+            form_text(&document, page, &["X1"]).as_deref(),
+            Some("ALPHA")
+        );
+        assert_eq!(
+            form_text(&document, page, &["X1_edit1"]).as_deref(),
+            Some("BRAVO"),
+            "the clicked draw reads the replacement"
+        );
+    }
+
+    /// Q2 again, one level out: a form drawn on two pages must be copied for the page that was
+    /// edited. §5.1 adds the second half — the pages share one indirect `/Resources`, so adding
+    /// the clone's name must not be a write into an object the other page reads.
+    #[test]
+    fn editing_a_shared_form_on_one_page_leaves_the_other_page_untouched() {
+        let mut document = testpdf::xobject_two_pages();
+        let first = page_id(&document, 0).unwrap();
+        let second = page_id(&document, 1).unwrap();
+
+        let run = textlocate::locate_runs(&document, first)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("page one's form run is located");
+        edit(
+            &mut document,
+            &request(&run, "BRAVO", 60.0, &measure_fixed(60.0)),
+        )
+        .unwrap();
+
+        assert_eq!(page_draws(&document, first), vec!["X1_edit1".to_string()]);
+        assert_eq!(
+            page_draws(&document, second),
+            vec!["X1".to_string()],
+            "page two still draws the original form"
+        );
+        assert_eq!(
+            form_text(&document, second, &["X1"]).as_deref(),
+            Some("ALPHA")
+        );
+        // The clone's name lives somewhere page one alone reads: page two's resources object
+        // is not the one page one now names, so a rendering-neutral mutation is still a write
+        // to another page's object (B-7).
+        assert_ne!(
+            resources_reference(&document, first),
+            resources_reference(&document, second),
+            "the edited page must not keep sharing its /Resources object"
+        );
+        assert_eq!(form_text(&document, second, &["X1_edit1"]).as_deref(), None);
+    }
+
+    /// The `/Resources` reference a page dictionary holds, as written.
+    fn resources_reference(
+        document: &lopdf::Document,
+        page: lopdf::ObjectId,
+    ) -> Option<lopdf::ObjectId> {
+        document
+            .get_dictionary(page)
+            .ok()?
+            .get(b"Resources")
+            .ok()?
+            .as_reference()
+            .ok()
+    }
+
+    /// §2.1: a nested path is copied at **every** level, outermost first. Copying only the
+    /// inner form would leave the outer one shared with the sibling draw that reached it.
+    #[test]
+    fn a_nested_run_is_editable_and_only_its_draw_changes() {
+        let mut document = testpdf::xobject_nested();
+        let page = page_id(&document, 0).unwrap();
+
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("the nested run is located");
+        assert_eq!(run.id.xobject_path.len(), 2);
+
+        edit(
+            &mut document,
+            &request(&run, "BRAVO", 60.0, &measure_fixed(60.0)),
+        )
+        .unwrap();
+
+        assert_eq!(page_draws(&document, page), vec!["X1_edit1".to_string()]);
+        assert_eq!(
+            form_text(&document, page, &["X1"]).as_deref(),
+            None,
+            "the original X1 draws X2, not text"
+        );
+        // The clone of X1 draws a clone of X2, and only that inner clone carries the edit.
+        let outer =
+            testpdf::form_operations(&document, page, &["X1_edit1"]).expect("the outer clone");
+        let inner_names: Vec<String> = outer
+            .iter()
+            .filter(|operation| operation.operator == "Do")
+            .filter_map(|operation| operation.operands.first())
+            .filter_map(|operand| operand.as_name().ok())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        assert_eq!(inner_names, vec!["X2_edit1".to_string()]);
+        assert_eq!(
+            form_text(&document, page, &["X2"]).as_deref(),
+            Some("ALPHA")
+        );
+        assert_eq!(
+            form_text(&document, page, &["X1_edit1", "X2_edit1"]).as_deref(),
+            Some("BRAVO")
+        );
+    }
+
+    /// Q3: the stream is copied always, `/Resources` only when the edit touches it — here a
+    /// MECH-A substitution. The substitute must land in the **clone's** private dictionary, so
+    /// the shared one another form reads is unchanged.
+    #[test]
+    fn a_substituted_font_gets_a_private_resources_dict() {
+        let mut document = testpdf::xobject_shared_resources();
+        let page = page_id(&document, 0).unwrap();
+
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("X1's run is located");
+        // 84pt is the substitute's width for BRAVO at 24pt, so the gate is not what this test
+        // is about; the resources dictionary is.
+        edit(
+            &mut document,
+            &request(&run, "BRAVO", 100.0, &measure_fixed(100.0)),
+        )
+        .unwrap();
+
+        // The clone declares its own /Resources, and it is not the object X2 still reads.
+        let clone = testpdf::form_stream(&document, page, &["X1_edit1"]).expect("the clone");
+        let clone_resources = clone
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|object| object.as_reference().ok())
+            .expect("the clone has a private /Resources object");
+        let original = testpdf::form_stream(&document, page, &["X2"]).expect("X2");
+        let original_resources = original
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|object| object.as_reference().ok())
+            .expect("X2 shares one /Resources object");
+        assert_ne!(clone_resources, original_resources);
+
+        let fonts = document
+            .get_dictionary(clone_resources)
+            .unwrap()
+            .get(b"Font")
+            .ok()
+            .and_then(|object| object.as_dict().ok())
+            .expect("the private copy keeps the form's /Font map");
+        assert!(
+            fonts.has(b"FS1"),
+            "the substitute is installed in the clone"
+        );
+
+        let shared = document
+            .get_dictionary(original_resources)
+            .unwrap()
+            .get(b"Font")
+            .ok()
+            .and_then(|object| object.as_dict().ok())
+            .expect("the shared /Font map");
+        assert!(
+            !shared.has(b"FS1"),
+            "the shared dictionary another form reads gains nothing"
+        );
+    }
+
+    /// Q6: one edit is one undo, and undo leaves **no orphan**. The `Do` goes back to the
+    /// original name, the clone name leaves the resources dictionary, and the clone object is
+    /// gone — so edit-then-undo returns the file to what it was, not to a grown version of it.
+    #[test]
+    fn undo_restores_the_do_and_drops_the_clone() {
+        let mut document = testpdf::xobject_single();
+        let page = page_id(&document, 0).unwrap();
+        let objects_before = document.objects.len();
+
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("the form's run is located");
+        let outcome = edit(
+            &mut document,
+            &request(&run, "BRAVO", 60.0, &measure_fixed(60.0)),
+        )
+        .unwrap();
+        assert_eq!(page_draws(&document, page), vec!["X1_edit1".to_string()]);
+
+        revert(&mut document, &outcome.inverse).unwrap();
+
+        assert_eq!(
+            page_draws(&document, page),
+            vec!["X1".to_string()],
+            "the Do names the original form again"
+        );
+        assert_eq!(
+            form_text(&document, page, &["X1"]).as_deref(),
+            Some("ALPHA")
+        );
+        assert_eq!(
+            form_text(&document, page, &["X1_edit1"]),
+            None,
+            "the clone name is gone from the resources"
+        );
+        assert_eq!(
+            document.objects.len(),
+            objects_before,
+            "no clone object is left behind"
+        );
+    }
+
+    /// Q6/Q3: an undo after a **substitution** must remove the private `/Resources` too. The
+    /// write path creates that dictionary lazily, so the inverse has to record what was actually
+    /// made — recording nothing would leak one resources object per substitute-then-undo.
+    #[test]
+    fn undo_after_a_substitution_leaves_no_orphan() {
+        let mut document = testpdf::xobject_shared_resources();
+        let page = page_id(&document, 0).unwrap();
+        let before: std::collections::HashSet<lopdf::ObjectId> =
+            document.objects.keys().copied().collect();
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("the form's run is located");
+        let outcome = edit(
+            &mut document,
+            &request(&run, "BRAVO", 100.0, &measure_fixed(100.0)),
+        )
+        .unwrap();
+        let clone = outcome
+            .inverse
+            .xobject_clones
+            .first()
+            .expect("the edit copied the draw");
+        assert!(
+            clone.cloned_resources.is_some(),
+            "a substitution gives the clone its own /Resources"
+        );
+        let private = clone.cloned_resources.expect("recorded above");
+        assert_ne!(
+            testpdf::form_stream(&document, page, &["X1_edit1"])
+                .and_then(|form| form.dict.get(b"Resources").ok())
+                .and_then(|entry| entry.as_reference().ok()),
+            testpdf::form_stream(&document, page, &["X1"])
+                .and_then(|form| form.dict.get(b"Resources").ok())
+                .and_then(|entry| entry.as_reference().ok()),
+            "the clone does not keep sharing the original's dictionary"
+        );
+
+        revert(&mut document, &outcome.inverse).unwrap();
+
+        assert!(
+            !document.objects.contains_key(&private),
+            "the private /Resources object is dropped on undo"
+        );
+        assert!(
+            !document.objects.contains_key(&clone.clone_object),
+            "the clone object is dropped on undo"
+        );
+        // The standard-14 substitute dictionary stays, exactly as it does after a page edit's
+        // undo: `/FS1` is reused across a page's substitutions, so it is shared state bounded
+        // at one object, not an orphan this edit created.
+        let leftovers: Vec<&lopdf::ObjectId> = document
+            .objects
+            .keys()
+            .filter(|id| !before.contains(*id))
+            .collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "only the page's shared substitute dictionary remains: {leftovers:?}"
+        );
+    }
+
+    /// Q6/Q2: the inverse is draw-scoped. Undo must restore the draw it edited and leave the
+    /// other draw — which was never touched — exactly as the edit left it.
+    #[test]
+    fn undo_leaves_the_other_draw_untouched() {
+        let mut document = testpdf::xobject_two_draws();
+        let page = page_id(&document, 0).unwrap();
+        let other_before = testpdf::form_stream(&document, page, &["X1"])
+            .expect("the fixture draws X1")
+            .decompressed_content()
+            .unwrap();
+
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.text == "ALPHA")
+            .max_by_key(|run| run.id.xobject_path[0].op_index)
+            .expect("both draws are located");
+        let outcome = edit(
+            &mut document,
+            &request(&run, "BRAVO", 60.0, &measure_fixed(60.0)),
+        )
+        .unwrap();
+        revert(&mut document, &outcome.inverse).unwrap();
+
+        assert_eq!(
+            page_draws(&document, page),
+            vec!["X1".to_string(), "X1".to_string()],
+            "both draws name the original form again"
+        );
+        let other_after = testpdf::form_stream(&document, page, &["X1"])
+            .expect("the original form is still there")
+            .decompressed_content()
+            .unwrap();
+        assert_eq!(other_after, other_before, "the untouched draw is unchanged");
     }
 
     /// The placeholder's own `Do` is not text either: even if the UI somehow sent it, the
