@@ -2122,6 +2122,55 @@ fn actualtext_is_rewritten_with_the_edit() {
     assert_eq!(String::from_utf16(&units).unwrap(), "OMEGA");
 }
 
+/// T30: a single inline `/Span` covering **two** operands describes both, so rewriting its
+/// `ActualText` for one of them would change text outside the edit. The write must disclose
+/// instead of rewriting.
+///
+/// This case had no test between T-3 and T-5: ruling B-7 renamed the only test that asserted
+/// "reported, not rewritten" into one that asserts the *named* property is cloned, and the
+/// inline multi-operand invariant went with the old name. §8 still claimed it.
+#[test]
+fn shared_actualtext_is_reported_not_rewritten() {
+    let path = fixture("actualtext-shared-inline.pdf");
+    let mut document = load(&path);
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let runs = textlocate::locate_runs(&document, page_id).unwrap();
+    assert_eq!(runs.len(), 2, "two operands in one span are two runs");
+
+    let outcome = edit_with(
+        &mut document,
+        0,
+        runs[0].id.clone(),
+        "ALPHA",
+        "OMEGA",
+        70.0,
+        70.0,
+    )
+    .unwrap();
+    assert!(
+        !outcome.actual_text_preserved,
+        "one span describing two operands cannot be rewritten for one of them (T30)"
+    );
+    assert_eq!(outcome.inverse.new_bytes, b"OMEGA", "the edit itself lands");
+
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let content = textlocate::decoded_content(&document, page_id).unwrap();
+    let actual = content
+        .operations
+        .iter()
+        .find(|operation| operation.operator == "BDC")
+        .and_then(|operation| operation.operands.get(1))
+        .and_then(|operand| operand.as_dict().ok())
+        .and_then(|properties| properties.get(b"ActualText").ok())
+        .and_then(|object| object.as_str().ok())
+        .expect("ActualText survives the edit");
+    assert_eq!(
+        decode_utf16_be(actual),
+        "ALPHA BETA",
+        "the span still describes both operands, so it must be byte-identical"
+    );
+}
+
 /// T30 + ruling B-7: a **named** `/Properties` entry is shared, so it is never rewritten in
 /// place. Copy-on-write gives the edited sequence its own entry: the edit lands, the caller is
 /// told the accessible text was preserved, and the shared entry keeps its original value.

@@ -1436,6 +1436,38 @@ pub fn actualtext_span() -> Document {
     )
 }
 
+/// Two `Tj` operands inside **one** inline `/Span <</ActualText…>>` (P2.7.1 T30). The span's
+/// `ActualText` describes both, so rewriting it for one of them would change text outside the
+/// edit: the write must disclose instead.
+pub fn actualtext_shared_inline() -> Document {
+    let actual: Vec<u8> = vec![0xFE, 0xFF]
+        .into_iter()
+        .chain("ALPHA BETA".encode_utf16().flat_map(|unit| unit.to_be_bytes()))
+        .collect();
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![72.into(), 700.into()]),
+            Operation::new(
+                "BDC",
+                vec![
+                    "Span".into(),
+                    Object::Dictionary(dictionary! {
+                        "ActualText" => Object::String(actual, lopdf::StringFormat::Literal),
+                    }),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ALPHA")]),
+            Operation::new("Td", vec![60.into(), 0.into()]),
+            Operation::new("Tj", vec![Object::string_literal("BETA")]),
+            Operation::new("EMC", vec![]),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
 /// `ActualText` in **PDFDocEncoding** (no `FE FF` BOM) carrying the bytes where that encoding
 /// departs from Latin-1: `0x80` is a bullet and `0xA0` a euro sign (P2.7.1 T-2).
 pub fn actualtext_pdf_doc_encoding() -> Document {

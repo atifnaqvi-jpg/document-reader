@@ -143,6 +143,10 @@ fn main() {
             testpdf::bytes(&testpdf::actualtext_span()),
         ),
         (
+            "actualtext-shared-inline.pdf",
+            testpdf::bytes(&testpdf::actualtext_shared_inline()),
+        ),
+        (
             "actualtext-pdfdocencoding.pdf",
             testpdf::bytes(&testpdf::actualtext_pdf_doc_encoding()),
         ),

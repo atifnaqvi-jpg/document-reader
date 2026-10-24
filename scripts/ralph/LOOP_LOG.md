@@ -293,3 +293,53 @@ when `ink_y` is reverted to `run.origin.1`.
   - Release tags to use going forward: either `v<version>` or `version-<version>`; both are
     accepted and both publish. `README.md` documents `v0.1.0`, the two most recent releases used
     `version-*` — either is now correct, so no doc change was needed.
+
+## Iteration 8 — T-5 — green
+- Task: make the P2.7.1 body's docs describe the committed code (T-5 was "commit the body";
+  the code was already committed, so the real remaining work was doc truth).
+- Test: `src-tauri/tests/docs_citations.rs` (new, 3 tests).
+  - `docs_cite_only_identifiers_that_exist` — red before: yes. It reported 7 unresolved
+    identifiers in `P2.7.1-mcid-DESIGN.md`, the real one being `page_properties_dict` (the
+    resolver is `properties_slot`); the other six resolved once the guard's own token filter was
+    corrected.
+  - `the_design_doc_acceptance_table_names_tests_that_exist` — red before: yes:
+    `shared_actualtext_is_reported_not_rewritten` did not exist.
+  - `the_stock_take_agrees_with_the_code_on_text_rise` — red before: yes, after correcting an
+    inverted assertion (the first draft passed against the stale doc, which is the failure mode
+    this task exists to catch).
+- Test: `shared_actualtext_is_reported_not_rewritten` in `textedit_gates.rs` — **not** red on
+  the code. The T30 inline multi-operand behaviour was already correct; what was missing was
+  the test. Proved it is not vacuous by deleting the `span_is_this_operation` check: the test
+  then fails at the `actual_text_preserved` assertion, and passes again when restored.
+- Files: `src-tauri/tests/docs_citations.rs` (new), `src-tauri/tests/textedit_gates.rs`,
+  `src-tauri/src/editor/testpdf.rs`, `src-tauri/examples/make_p24_fixtures.rs`,
+  `src-tauri/tests/fixtures/actualtext-shared-inline.pdf` (new),
+  `docs/P2.7.1-mcid-DESIGN.md`, `docs/P2.7-STOCK-TAKE.md`,
+  `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`.
+- Gate: cargo test 426 passed (334 lib + 92 integration), clippy clean, tsc clean,
+  vitest 62 passed.
+- Commit: see below.
+- Learned:
+  - **The rename was the defect, not just the doc.** Ruling B-7 renamed
+    `shared_actualtext_is_reported_not_rewritten` → `shared_actualtext_is_copied_before_it_is_rewritten`
+    and rewrote its *body* for the named-`/Properties` case. That is a case **replacement**, not
+    an addition: the T30 inline multi-operand invariant lost its only test and nobody noticed,
+    because the old name disappeared with it. When a ruling renames a test, re-read the body —
+    a rename that changes the fixture is a deletion wearing a rename's clothes.
+  - The new fixture is `actualtext-shared-inline.pdf`: **two** `Tj` in one inline `/Span`, whose
+    single `ActualText` describes both. Distinct from `actualtext-named-property.pdf` (named
+    entry, B-7 copy-on-write) and from `actualtext-span.pdf` (one operand, must rewrite). The
+    three-way split is the whole T30 contract.
+  - **`is_none_or` is Rust 1.82; the crate's MSRV is 1.77** (`rust-version` in `Cargo.toml`).
+    Clippy's `incompatible_msrv` catches it, and clippy gates `--all-targets`, so integration
+    tests are covered. Use `map_or(true, …)` in test code.
+  - `cargo clippy` printed `Finished` with a stale fingerprint after `touch`; deleting
+    `target/debug/.fingerprint/*docs_citations*` forced the real recheck. Do not trust a
+    0.4s "clean" clippy run after editing a file.
+  - The stock take contradicts itself in two places at once (a "Done" row and a
+    "Not done"/"Missing" bullet for the same item). A guard that checks only one of them can
+    pass while the doc still misleads — `docs_citations.rs` therefore asserts on the *pair*
+    (walker handles rise ⇒ no doc line may claim rise is absent).
+  - `docs/P2.7-REVIEW-OPEN-QUESTIONS.md` **cannot** be cited-checked naively: its §A quotes
+    superseded identifiers deliberately, as the record of what was wrong. That is T-6, and it
+    needs a marker distinguishing quoted defects from live claims.

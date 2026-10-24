@@ -108,8 +108,31 @@ under P2.7.4.
       `refs/tags/` (tag vs branch only — GitHub expressions cannot test the tag *name*), so the
       trigger globs are the single place that decides which tags are releases.
       `src-tauri/tests/release_workflow.rs` pins trigger, guard and the glob matcher itself.
-- [ ] **T-5** Commit the P2.7.1 body (code + fixtures + docs) as one feature commit, separate
+- [x] **T-5** Commit the P2.7.1 body (code + fixtures + docs) as one feature commit, separate
       from H0.
+      **Done — but the body's *code* was already committed** (2cb2f2f, 64ede4c, d187849, 31d523b,
+      647b436, cd8321e), so the remaining work was the part no task had ever checked: whether the
+      body's documents describe the code they ship. Three did not.
+      (1) `P2.7.1-mcid-DESIGN.md` §4 cited `page_properties_dict`, a helper that does not exist;
+      the resolver is `properties_slot`. (2) §8's acceptance table named
+      `shared_actualtext_is_reported_not_rewritten`, which ruling B-7 **renamed** to
+      `shared_actualtext_is_copied_before_it_is_rewritten` — and the rename took the T30
+      *inline* multi-operand case with it, so an invariant the contract claims had no test.
+      Restored as a real test on a new `actualtext-shared-inline.pdf` fixture (two `Tj` in one
+      `/Span`); it is not vacuous — deleting the `span_is_this_operation` check fails it.
+      (3) `P2.7-STOCK-TAKE.md` still reported `Ts` as absent and A7 as silently wrong after T-1
+      and H0 shipped, and still listed "commit P2.7.1" as outstanding; `P2.7-TEXT-EDITING-PARITY-PLAN.md`
+      still called A2/A3 **Missing** and dated its status to "uncommitted P2.7.1". All corrected
+      against 0.5.0.
+      `src-tauri/tests/docs_citations.rs` is the guard: it resolves every backticked snake_case
+      citation in the design doc and stock take against the tree, checks §8 names running tests,
+      and cross-checks the stock take's `Ts` claim against the walker. Deliberately excludes
+      `P2.7-REVIEW-OPEN-QUESTIONS.md`, whose §A *quotes* stale names as the defects to fix.
+- [ ] **T-6 Extend the doc guard to the remaining phase docs.** `P2.7-REVIEW-OPEN-QUESTIONS.md`
+      and `P2.7-TEXT-EDITING-PARITY-PLAN.md` are not covered by `docs_citations.rs`. The blocker is
+      structural, not effort: the review doc quotes superseded identifiers *on purpose*, so a naive
+      citation check would flag the record of the bug as the bug. Separate quoted-defect context
+      from live claims (e.g. a `> Defect (fixed):` marker the guard skips), then add both docs.
 
 ## H2. Next phase (order fixed by B-3 and the plan's own rule)
 
