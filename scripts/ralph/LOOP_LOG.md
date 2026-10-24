@@ -343,3 +343,53 @@ when `ink_y` is reverted to `run.origin.1`.
   - `docs/P2.7-REVIEW-OPEN-QUESTIONS.md` **cannot** be cited-checked naively: its §A quotes
     superseded identifiers deliberately, as the record of what was wrong. That is T-6, and it
     needs a marker distinguishing quoted defects from live claims.
+
+## Iteration 9 — T-6 — green
+- Task: extend `docs_citations.rs` to `P2.7-REVIEW-OPEN-QUESTIONS.md` and
+  `P2.7-TEXT-EDITING-PARITY-PLAN.md`, separating quoted-defect context from live claims.
+- Test: `docs_citations.rs`, 4 new/changed checks.
+  - `docs_cite_only_identifiers_that_exist` (extended to all four docs) — red before: **yes**:
+    `docs/P2.7-REVIEW-OPEN-QUESTIONS.md: t27_char_spacing_is_in_the_pen_walk`.
+  - `every_recorded_defect_states_its_disposition` (new) — red before: **yes**, on five rows
+    (A-1, A-2, A-3, A-5, A-6), none of which said whether its defect was fixed.
+  - `governed_docs_cite_only_paths_that_exist` (new) — red before: **yes**:
+    `docs/P2.7-REVIEW-OPEN-QUESTIONS.md: docs/P2.7-ADOBE-PARITY-PLAN.md`, a file ruling B-1
+    renamed away.
+  - `governed_docs_point_at_symbols_not_line_numbers` (new) — red before: **yes** (two drifted
+    pointers: `textlocate.rs:901` now lands on `.first()`, `:919` on a struct field).
+  - `a_struck_citation_is_retracted_but_an_unstruck_one_is_live` (new) — the exemption's own
+    unit test, including the unclosed-`~~` case. Green on first run by design; it is the control
+    that stops the exemption from silently growing to cover everything.
+- Files: `src-tauri/tests/docs_citations.rs`, `docs/P2.7-REVIEW-OPEN-QUESTIONS.md`,
+  `docs/P2.7-STOCK-TAKE.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`.
+- Gate: cargo test 430 passed (334 lib + 96 integration), clippy clean, tsc clean, vitest 62
+  passed.
+- Commit: see `docs(p2.7): check the review and plan docs against the tree`.
+- Learned:
+  - **The marker was already in the file.** The task proposed inventing `> Defect (fixed):`;
+    the audit already used `~~strikethrough~~` for retraction and it renders as retraction to a
+    human, so reusing it beat adding a second convention. The rule is now: *struck = the record,
+    unstruck = a claim*. Use `~~…~~` when retiring any text in these docs, or the guard will
+    treat the record of the bug as the bug.
+  - **A checker must not be able to satisfy itself.** `rust_sources()` now excludes
+    `docs_citations.rs`. Its own module header quotes the superseded
+    `t27_char_spacing_is_in_the_pen_walk`; with the guard in its own source set that name
+    "existed in the tree" and the citation test passed while checking nothing. Any guard that
+    scans source text has this hole — exclude the scanner.
+  - **Extending coverage found two defect classes the task did not name.** Line-number citations
+    (`file.rs:901`) rot on every edit; both existing ones had already drifted onto unrelated
+    code. They are symbol citations now. And §E promised a doc path that a ruling had renamed
+    away. Both are the same failure as a stale test name: plausible, unverifiable, wrong.
+  - **§A was the real defect, not just its citations.** Five of six rows were frozen in the
+    present tense ("Claims `Ts` is tracked") years after v1.1/v1.2 fixed them. A defect register
+    without a disposition column is indistinguishable from a live bug list. Rows now open with
+    **Fixed**/**Closed**/**Open**; A-6 (release cadence) is genuinely **Open** — that is a
+    programme question, not something this task may settle.
+  - Resolve doc paths against **both** the repo root and the crate root: crate-level design docs
+    write `examples/make_p24_fixtures.rs`, which is correct and would otherwise read as broken.
+  - Non-vacuity was proved by mutation, five ways: unstrike A-2's stale name, add a bogus plan
+    citation, drop A-6's marker, unstrike the §E path, rename a cited file stem. Each fails
+    exactly one test. Do this before committing a guard — the previous iteration's lesson was
+    that a stale-fingerprint clippy run and a self-satisfying scan look identical to green.
+  - Next unblocked task is **none**: every remaining item (P2.7.3–P2.7.6, P2.8) is `[!]` blocked
+    on an unwritten design doc or an unruled decision (C-4/C-5/C-6). T-6 was the last todo.

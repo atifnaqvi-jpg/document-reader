@@ -128,11 +128,28 @@ under P2.7.4.
       citation in the design doc and stock take against the tree, checks §8 names running tests,
       and cross-checks the stock take's `Ts` claim against the walker. Deliberately excludes
       `P2.7-REVIEW-OPEN-QUESTIONS.md`, whose §A *quotes* stale names as the defects to fix.
-- [ ] **T-6 Extend the doc guard to the remaining phase docs.** `P2.7-REVIEW-OPEN-QUESTIONS.md`
+- [x] **T-6 Extend the doc guard to the remaining phase docs.** `P2.7-REVIEW-OPEN-QUESTIONS.md`
       and `P2.7-TEXT-EDITING-PARITY-PLAN.md` are not covered by `docs_citations.rs`. The blocker is
       structural, not effort: the review doc quotes superseded identifiers *on purpose*, so a naive
       citation check would flag the record of the bug as the bug. Separate quoted-defect context
       from live claims (e.g. a `> Defect (fixed):` marker the guard skips), then add both docs.
+      **Done.** `~~strikethrough~~` is the marker (the review already used it, and it reads as
+      retraction to a human). `docs_citations.rs` now covers all four programme docs, and splits
+      every citation into *live* (must resolve) and *retracted* (audit record, exempt). Four
+      things had to change for the extension to be honest:
+      (1) the guard **excludes itself** from the source set — its own header quotes the superseded
+      `t27_char_spacing_is_in_the_pen_walk`, so without that it would have passed on its own
+      prose; (2) §A's rows had no disposition at all, so the audit read as six live defects —
+      each row now opens with **Fixed**/**Closed**/**Open** and the retracted wording is struck,
+      enforced by `every_recorded_defect_states_its_disposition`; (3) two `file.rs:NNN` pointers
+      had silently drifted (`textlocate.rs:901` is now `.first()`, `:919` is a struct field), so
+      both are symbol citations now and `governed_docs_point_at_symbols_not_line_numbers` keeps
+      them that way; (4) §E still promised `docs/P2.7-ADOBE-PARITY-PLAN.md`, a file B-1 renamed
+      away — now `governed_docs_cite_only_paths_that_exist` (paths resolve against either the
+      repo root or the crate root; a bare `x.rs` only has to name a real stem). Non-vacuity
+      proved by mutation: unstriking A-2's stale name, adding a bogus plan citation, dropping
+      A-6's marker, unstriking the stale §E path and renaming a file stem each fail exactly one
+      test.
 
 ## H2. Next phase (order fixed by B-3 and the plan's own rule)
 
