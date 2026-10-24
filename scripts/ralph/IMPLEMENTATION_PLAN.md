@@ -178,19 +178,17 @@ Design: `docs/P2.7.3-xobject-DESIGN.md` (frozen v1.0). Rulings: Q1 nesting/cycle
 draw**, Q3 private `/Resources` only when touched, Q6 grouped inverse from the start, B-7.
 Do the tasks in order; each is one iteration and one commit.
 
-- [ ] **X1 Address model + discovery.** Add `XObjectStep { name, op_index }`,
-      `RunId.xobject_path` and the TS `TextRunId` mirror, both `#[serde(default)]` so an empty
-      path means the page and every 0.5.0 payload still works. Make `locate_runs` descend
-      `Do` → `/Subtype /Form`, resolving fonts against the resources **in force at that level**
-      (per-key fallback to the enclosing dict). Add `Gate::NestedXObject` (`nested-xobject`)
-      with a message naming depth or cycle and the way out.
-      Acceptance: `locates_runs_inside_a_form_xobject` (text `ALPHA`, non-empty path);
-      `a_run_inside_a_nested_form_is_located` (depth 2 — this is what distinguishes the
-      level-by-level reading of Q1 from a one-level walk, so it must be present);
-      `a_cycle_refuses_with_nested_xobject_and_is_visible`; `depth_nine_refuses_with_nested_xobject`
-      (depth 8 editable, 9 refused). The refusal must be a visible placeholder run, and
-      `nested-xobject` must outrank `run-mismatch`.
-      While here: **drop `PageTextRun.mcid`** (ruled, stock take #9) and its TS field.
+- [x] **X1 Address model + discovery.** Commit `cdce29d`. `RunId.xobject_path` + TS mirror
+      (empty = page, so 0.5.0 payloads and inverses keep their meaning); `locate_runs` descends
+      `Do` → `/Subtype /Form` with per-key resource fallback; `Gate::NestedXObject`
+      (`nested-xobject`) with a message naming depth or cycle and the way out; `mcid` dropped.
+      Gate: `locates_runs_inside_a_form_xobject` (text `ALPHA`, non-empty path),
+      `a_run_inside_a_nested_form_is_located` (depth 2 — distinguishes the level-by-level
+      reading of Q1 from a one-level walk), `a_cycle_refuses_with_nested_xobject_and_is_visible`,
+      `depth_nine_refuses_with_nested_xobject` (8 editable, 9 refused),
+      `editing_a_placeholder_is_refused_with_nested_xobject`,
+      `the_nested_xobject_gate_outranks_run_mismatch`. Mutation of `MAX_XOBJECT_DEPTH` to 1
+      fails the depth-2 and depth-9 tests.
 - [ ] **X2 Copy-on-write per draw.** Clone each level along the path, outermost first; install
       each clone under a fresh name (`X1_edit1`, mirroring `fresh_property_name`) and repoint
       the enclosing `Do` at the clone. Copy `/Resources` **only** when the edit will touch it
