@@ -312,7 +312,7 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
     );
     assert!(
-        tests_step.contains("ignored") && tests_step.contains("ne 70"),
-        "the Linux job must assert exactly the 70 known-ignored tests"
+        tests_step.contains("ignored") && tests_step.contains("ne 71"),
+        "the Linux job must assert exactly the 71 known-ignored tests"
     );
 }

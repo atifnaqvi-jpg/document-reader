@@ -1,5 +1,24 @@
 # Agent instructions — Document Reader
 
+## Standing rule: `--include-ignored` must pass before a phase is marked `[x]`
+
+A phase is not complete until `cargo test -- --include-ignored` passes with PDFium available.
+Run it, and record the pass/fail counts in the commit message. This is a gate, not a
+reminder.
+
+The rule exists because the alternative was measured: P2.7.4 introduced a window bug that
+dropped the last glyph of every line (333pt measured against a true 342pt span). All 428
+non-PDFium tests passed. Only the `#[ignore]`d, PDFium-gated tests caught it. A plain
+`cargo test` therefore reports green while the document pass is broken on every line.
+
+The 71 `#[ignore]`d tests are the only coverage that opens a real PDF and exercises the
+rendering path. Treating them as optional means regressions on every real document ship
+unvalidated. Both CI workflows already assert this; local verification must match them.
+
+Note the asymmetry, and do not "fix" it by adding the flag to the Linux job: Linux has no
+PDFium, so `--include-ignored` there produces failures, not coverage. The Linux job instead
+asserts the exact ignored count, and the Windows job is where the real run happens.
+
 ## Standing rule: mutation-verify every guard that reads config text
 
 A guard test that parses a config file (`ci.yml`, `release-windows.yml`, `tauri.conf.json`,
@@ -28,16 +47,21 @@ silently returning "nothing found".
 
 ## PDFium in tests
 
-Any test calling `PdfProvider::*` must guard on the native library:
+Any test calling `PdfProvider::*` must carry `#[ignore]` and be run with the library present:
 
-- `tests/textedit_gates.rs` → `if !pdfium_ready() { return; }`
-- `tests/memory.rs` → `if support::skip_without_pdfium() { return; }`
+```rust
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+#[test]
+fn ...
+```
 
-Both log `skipping: PDFium not available on this machine`. Ubuntu CI has no PDFium, so an
-unguarded test fails there while passing on a developer machine that happens to have it.
-Skipping does not cost coverage: `windows-check` in `ci.yml` fails if any such line appears
-in a run that fetched PDFium. Do **not** use `#[ignore]` for this — the assertion only
-recognises the skip message.
+Ubuntu CI has no PDFium, so the test must stay out of the default run there. `#[ignore]` does
+that while keeping the omission *counted*: `ci.yml` asserts exactly 71 ignored on Linux, and
+the Windows job asserts 0 ignored after `--include-ignored`.
+
+An early `return` from a skip arm (`if !pdfium_ready() { return; }`) is forbidden. libtest
+captures the stdout of a passing test, so the skip message never reaches the log and the suite
+reports `0 ignored` while having run nothing. `tests/ci_workflow.rs` fails on that shape.
 
 ## Gates
 
