@@ -369,7 +369,10 @@ pub fn watermark(document: &mut Document, text: &str) -> Result<usize, AppError>
             ),
             Operation::new("rg", vec![0.5.into(), 0.5.into(), 0.5.into()]),
             Operation::new("BT", vec![]),
-            Operation::new("Tf", vec![Object::Name(WATERMARK_FONT.to_vec()), fitted.into()]),
+            Operation::new(
+                "Tf",
+                vec![Object::Name(WATERMARK_FONT.to_vec()), fitted.into()],
+            ),
             // Half the text's own extent, because `Tj` draws from the *baseline start* and
             // would otherwise centre the beginning of the text rather than the text.
             Operation::new(

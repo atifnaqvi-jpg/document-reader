@@ -48,7 +48,9 @@ fn rust_sources() -> Vec<(PathBuf, String)> {
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path.file_name().is_some_and(|name| name != "docs_citations.rs")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name != "docs_citations.rs")
             {
                 let text = read(&path);
                 files.push((path, text));
@@ -288,7 +290,13 @@ fn a_bare_stem_from_the_examples_directory_resolves() {
 /// reporting shipped work as outstanding.
 #[test]
 fn every_recorded_defect_states_its_disposition() {
-    const MARKERS: [&str; 5] = ["**Fixed", "**Closed", "**Open", "**Superseded", "**Retracted"];
+    const MARKERS: [&str; 5] = [
+        "**Fixed",
+        "**Closed",
+        "**Open",
+        "**Superseded",
+        "**Retracted",
+    ];
 
     let text = read(&repo_root().join("docs/P2.7-REVIEW-OPEN-QUESTIONS.md"));
     let section = text
@@ -346,7 +354,9 @@ fn a_struck_citation_is_retracted_but_an_unstruck_one_is_live() {
     assert!(!both.live.contains("t27_char_spacing_is_in_the_pen_walk"));
 
     let unclosed = cited_identifiers("~~`t27_char_spacing_is_in_the_pen_walk`", 3);
-    assert!(unclosed.live.contains("t27_char_spacing_is_in_the_pen_walk"));
+    assert!(unclosed
+        .live
+        .contains("t27_char_spacing_is_in_the_pen_walk"));
 }
 
 /// §8 of the design doc is the phase's acceptance table. Every test it names has to be a test

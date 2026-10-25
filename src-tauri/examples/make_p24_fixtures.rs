@@ -119,19 +119,10 @@ fn main() {
             testpdf::bytes(&testpdf::unmeasurable_chain_break()),
         ),
         // P2.4.4 §3: T24's grid-walk regression + generated-char alignment.
-        (
-            "tj-grid-walk.pdf",
-            testpdf::bytes(&testpdf::tj_grid_walk()),
-        ),
-        (
-            "tj-kern-seam.pdf",
-            testpdf::bytes(&testpdf::tj_kern_seam()),
-        ),
+        ("tj-grid-walk.pdf", testpdf::bytes(&testpdf::tj_grid_walk())),
+        ("tj-kern-seam.pdf", testpdf::bytes(&testpdf::tj_kern_seam())),
         // P2.6 T26: two operands, one baseline, one style -- the selection-range shape.
-        (
-            "two-run-line.pdf",
-            testpdf::bytes(&testpdf::two_run_line()),
-        ),
+        ("two-run-line.pdf", testpdf::bytes(&testpdf::two_run_line())),
         // P2.7.1: tagged structure as a merge boundary, and the ActualText shapes a write
         // must (and must not) rewrite.
         (

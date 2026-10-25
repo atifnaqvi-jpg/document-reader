@@ -65,7 +65,10 @@ fn every_fixture_the_design_doc_names_is_committed() {
         "§8's fixture table parsed to {named:?}; the table's shape changed and the check is blind"
     );
 
-    let missing: Vec<&String> = named.iter().filter(|name| !fixture(name).exists()).collect();
+    let missing: Vec<&String> = named
+        .iter()
+        .filter(|name| !fixture(name).exists())
+        .collect();
     assert!(
         missing.is_empty(),
         "§8 names fixtures that are not committed: {missing:?}"
@@ -74,7 +77,8 @@ fn every_fixture_the_design_doc_names_is_committed() {
 
 fn load(name: &str) -> lopdf::Document {
     let path = fixture(name);
-    lopdf::Document::load(&path).unwrap_or_else(|e| panic!("could not load {}: {e}", path.display()))
+    lopdf::Document::load(&path)
+        .unwrap_or_else(|e| panic!("could not load {}: {e}", path.display()))
 }
 
 fn runs(document: &lopdf::Document, page: u32) -> Vec<RawRun> {
@@ -156,13 +160,20 @@ fn the_single_and_nested_fixtures_locate_their_text_at_the_documented_depth() {
 #[test]
 fn the_two_draw_and_two_page_fixtures_repeat_the_same_form() {
     let draws = load("xobject-two-draws.pdf");
-    assert_eq!(page_draws(&draws, 0), vec!["X1".to_string(), "X1".to_string()]);
+    assert_eq!(
+        page_draws(&draws, 0),
+        vec!["X1".to_string(), "X1".to_string()]
+    );
     let located: Vec<usize> = runs(&draws, 0)
         .iter()
         .filter(|run| run.text == "ALPHA")
         .map(|run| run.id.xobject_path[0].op_index)
         .collect();
-    assert_eq!(located, vec![0, 2], "one run per draw, at different Do indices");
+    assert_eq!(
+        located,
+        vec![0, 2],
+        "one run per draw, at different Do indices"
+    );
 
     let pages = load("xobject-two-pages.pdf");
     for page in 0..2 {

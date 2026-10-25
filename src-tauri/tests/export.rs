@@ -331,7 +331,9 @@ fn a_watermark_keeps_the_resources_the_page_inherits() {
     let page_id = *reread.get_pages().get(&3).unwrap();
     let fonts = reread.get_page_fonts(page_id).unwrap();
     let base = |name: &[u8]| -> String {
-        let font = fonts.get(name).unwrap_or_else(|| panic!("{:?} is not a resource", name));
+        let font = fonts
+            .get(name)
+            .unwrap_or_else(|| panic!("{:?} is not a resource", name));
         String::from_utf8_lossy(font.get(b"BaseFont").unwrap().as_name().unwrap()).into_owned()
     };
     assert_eq!(

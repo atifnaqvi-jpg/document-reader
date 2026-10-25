@@ -61,7 +61,10 @@ pub fn read_only_guard(path: &Path) -> Result<(), AppError> {
 /// `"{stem} (unprotected).pdf"` first, then `(unprotected 2)`, `(3)`, … taking the first
 /// free name. A decrypted copy must never clobber an existing file: the user may have
 /// edited the previous one, and silently replacing it would destroy their work.
-pub fn unprotected_path(original: &Path, exists: impl Fn(&Path) -> bool) -> Result<PathBuf, AppError> {
+pub fn unprotected_path(
+    original: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, AppError> {
     let parent = original
         .parent()
         .ok_or_else(|| AppError::Other("document has no parent directory".to_string()))?;
@@ -191,7 +194,9 @@ fn verify_copy(path: &Path, expected_pages: u32, expected_text: &str) -> Result<
 
     // The real test: no password supplied, and it loads.
     let reloaded = Document::load_mem(&bytes).map_err(|error| {
-        AppError::Other(format!("the decrypted copy does not open without a password: {error}"))
+        AppError::Other(format!(
+            "the decrypted copy does not open without a password: {error}"
+        ))
     })?;
 
     let pages = reloaded.get_pages().len() as u32;
@@ -288,7 +293,11 @@ mod tests {
 
         // And the name follows the frozen convention.
         assert!(
-            copy.file_name().unwrap().to_str().unwrap().contains("(unprotected)"),
+            copy.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("(unprotected)"),
             "unexpected name: {outcome:?}"
         );
 
@@ -310,7 +319,10 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().contains("unprotected"))
             .collect();
-        assert!(copies.is_empty(), "a failed decrypt left a copy: {copies:?}");
+        assert!(
+            copies.is_empty(),
+            "a failed decrypt left a copy: {copies:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

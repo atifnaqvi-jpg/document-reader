@@ -85,11 +85,7 @@ impl PasswordStore {
     /// A closure rather than a `get() -> Option<&SessionPassword>` because the lock must
     /// not escape this function: handing out a reference would let a caller hold the
     /// password, which is exactly the lifetime T10 wants bounded.
-    pub fn with_password<T>(
-        &self,
-        path: &str,
-        f: impl FnOnce(&str) -> T,
-    ) -> Option<T> {
+    pub fn with_password<T>(&self, path: &str, f: impl FnOnce(&str) -> T) -> Option<T> {
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.get(path).map(|password| f(password.expose()))
     }
@@ -125,10 +121,7 @@ impl PasswordStore {
 
     /// Number of remembered passwords (diagnostics/tests).
     pub fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -155,9 +148,7 @@ mod tests {
     fn has_no_password_for_an_unknown_path() {
         let store = PasswordStore::new();
         assert!(!store.has("C:/docs/other.pdf"));
-        assert!(store
-            .with_password("C:/docs/other.pdf", |_| ())
-            .is_none());
+        assert!(store.with_password("C:/docs/other.pdf", |_| ()).is_none());
     }
 
     #[test]
@@ -186,7 +177,10 @@ mod tests {
     fn a_password_is_never_printed_in_debug_output() {
         let password = SessionPassword::new("hunter2");
         let rendered = format!("{password:?}");
-        assert!(!rendered.contains("hunter2"), "debug leaked the password: {rendered}");
+        assert!(
+            !rendered.contains("hunter2"),
+            "debug leaked the password: {rendered}"
+        );
         assert!(rendered.contains("redacted"));
     }
 
