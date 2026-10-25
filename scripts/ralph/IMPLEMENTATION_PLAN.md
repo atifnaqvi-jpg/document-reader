@@ -269,9 +269,13 @@ point at which text editing is declared complete. Never reach it by accident.
       `a_bare_stem_from_the_examples_directory_resolves` fails if the scan drops `examples/` —
       without it, widening the exemption would have "fixed" the same false positive while
       leaving the generator uncheckable.
-- [!] **P2.7.4 Transforms → 0.7.0** — **Blocked on:** design doc. H0/T-7 ship the refusal;
-      this phase replaces the refusal with correct measurement. Includes the rotation hotfix
-      lineage (H0, T-7).
+- [~] **P2.7.4 Transforms → 0.7.0** — Design doc frozen (`P2.7.4-transform-DESIGN.md`).
+      H0/T-7 ship the refusal; this phase replaces it with measurement along the run's own
+      advance axis. Measurement found a prerequisite defect: `RawRun::origin` is text-space and
+      never composed with the CTM, so `translated_by_graphics_matrix` refuses as `run-mismatch`
+      end-to-end while `a_run_translated_by_the_graphics_matrix_stays_editable` asserts it is
+      editable by testing only the font gates (third vacuous guard in this codebase).
+      Includes the rotation hotfix lineage (H0, T-7). Started 2026-10-25.
 - [!] **P2.7.5 CID/Identity-H → 0.8.0** — **Blocked on:** design doc. **C-4 is now ruled:**
       refuse today; substitute-with-consent once embedding ships. The design doc must state that
       explicitly.
