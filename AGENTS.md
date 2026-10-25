@@ -59,6 +59,12 @@ Ubuntu CI has no PDFium, so the test must stay out of the default run there. `#[
 that while keeping the omission *counted*: `ci.yml` asserts exactly 71 ignored on Linux, and
 the Windows job asserts 0 ignored after `--include-ignored`.
 
+**Adding an ignored test means updating that pin in the same commit.** The count is literal on
+purpose: a moving baseline would let a `#[ignore]` disappear unnoticed. The cost is that it
+breaks on the next added test — it did at `2ddbb4f`, where the pin still said 70 and the next
+push would have failed. Change the number, and say in the commit message that the new count
+was measured rather than incremented.
+
 An early `return` from a skip arm (`if !pdfium_ready() { return; }`) is forbidden. libtest
 captures the stdout of a passing test, so the skip message never reaches the log and the suite
 reports `0 ignored` while having run nothing. `tests/ci_workflow.rs` fails on that shape.
@@ -72,8 +78,13 @@ agree, or a local `cargo fmt --check` stops meaning anything about CI.
 ## Version and phase numbering
 
 One minor bump per phase (ruling Q7, `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`). CID is
-**P2.7.5 / 0.8.0**. **P2.8 is line-level reflow at 1.0.0** and must not be used for anything
-else. Six version carriers must agree (`tests/release_version.rs` enforces it), and
+**P2.7.5 / 0.8.0** and published first; transforms are **P2.7.4 / 0.8.1**, because 0.7.0 would
+sit below an already-published release. **P2.7.6 is 0.9.0** — the last minor before 1.0.0 —
+and **P2.8 is line-level reflow at 1.0.0**, not to be used for anything else. A version
+assigned to a phase that has not shipped is a *reservation, not a fact*: if a later phase
+publishes first, the earlier one needs a new number.
+
+Six version carriers must agree (`tests/release_version.rs` enforces it), and
 `docs/RELEASE-NOTES.md` must gain a section before the bump lands.
 
 Release tags publish as **pre-releases** until 1.0.0. The `prerelease: true` in

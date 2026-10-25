@@ -252,3 +252,105 @@ fn the_0_8_0_release_notes_cover_every_change_the_plan_claims() {
          acceptance claim cannot be checked against anything"
     );
 }
+
+/// Q7's corrected map, pinned because the mistake it fixes is a *documentation* mistake that
+/// no compiler can see: 0.7.0 was reserved for P2.7.4, then 0.8.0 (P2.7.5) published first,
+/// which left the transform phase numbered below a published release. The version was raised
+/// to 0.8.1 so published history stays monotonic.
+///
+/// The map is read **cell by cell** in both documents. `contains` anywhere in a section is
+/// not a check: an early draft of this test asserted the row's whole text contained "0.8.1"
+/// and passed with the version cell restored to 0.7.0, because the row also names its
+/// installer (`Document Reader_0.8.1_x64-setup.exe`). Measured, not assumed -- the mutation
+/// was run. The map is the claim, so the map's own cell is what is compared.
+fn version_cell(row: &str) -> String {
+    let fields: Vec<&str> = row.split('|').collect();
+    fields
+        .iter()
+        .rev()
+        .find(|field| !field.trim().is_empty())
+        .map(|field| {
+            field
+                .trim()
+                .trim_start_matches("**")
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches('*')
+                .to_string()
+        })
+        .unwrap_or_else(|| panic!("no version cell in row: {row}"))
+}
+
+#[test]
+fn the_0_8_1_notes_record_why_the_version_is_not_0_7_0() {
+    let section = release_section("0.8.1").expect("docs/RELEASE-NOTES.md has no 0.8.1 section");
+    let lower = section.to_lowercase();
+
+    for (topic, needle) in [
+        ("the phase it closes", "p2.7.4"),
+        ("the superseded 0.7.0 target", "0.7.0"),
+        ("the release that published first", "0.8.0"),
+        ("the reason it was raised", "semver"),
+        ("the divergence itself", "diverged"),
+    ] {
+        assert!(
+            lower.contains(needle),
+            "the 0.8.1 notes never mention {topic} (looked for {needle:?})"
+        );
+    }
+
+    // The corrected map, in the document users read.
+    let map: Vec<&str> = section
+        .lines()
+        .filter(|line| line.starts_with("| P2.7.") || line.starts_with("| P2.8"))
+        .collect();
+    assert!(
+        map.len() >= 5,
+        "the 0.8.1 notes must carry the corrected version map; found {} rows",
+        map.len()
+    );
+    let row = |phase: &str| -> String {
+        map.iter()
+            .find(|line| line.starts_with(&format!("| {phase}")))
+            .unwrap_or_else(|| panic!("the 0.8.1 map has no {phase} row"))
+            .to_string()
+    };
+    assert_eq!(
+        version_cell(&row("P2.7.4")),
+        "0.8.1",
+        "the map must name 0.8.1 for P2.7.4 (the release this section is about)"
+    );
+    assert_eq!(
+        version_cell(&row("P2.7.6")),
+        "0.9.0",
+        "the map must name 0.9.0 for P2.7.6: it is the last minor before 1.0.0, and leaving it \
+         at 0.8.x is the wall this correction exists to avoid"
+    );
+    assert_eq!(
+        version_cell(&row("P2.7.5")),
+        "0.8.0",
+        "the map must keep 0.8.0 attached to P2.7.5 -- the phase that published first is the \
+         fact the note has to explain"
+    );
+
+    // The same map in the plan, where the phase table is the contract.
+    let plan = read(&repo_root().join("docs/P2.7-TEXT-EDITING-PARITY-PLAN.md"));
+    let plan_row = |phase: &str| -> String {
+        plan.lines()
+            .find(|line| line.starts_with(&format!("| {phase} |")))
+            .unwrap_or_else(|| panic!("the plan has no {phase} row"))
+            .to_string()
+    };
+    assert!(
+        version_cell(&plan_row("P2.7.4")).starts_with("0.8.1"),
+        "the plan's P2.7.4 row must name 0.8.1 as the shipped version; cell: {:?}",
+        version_cell(&plan_row("P2.7.4"))
+    );
+    assert_eq!(
+        version_cell(&plan_row("P2.7.6")),
+        "0.9.0",
+        "the plan's P2.7.6 row must target 0.9.0; cell: {:?}",
+        version_cell(&plan_row("P2.7.6"))
+    );
+}

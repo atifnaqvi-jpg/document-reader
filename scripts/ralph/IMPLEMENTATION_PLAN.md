@@ -269,7 +269,8 @@ point at which text editing is declared complete. Never reach it by accident.
       `a_bare_stem_from_the_examples_directory_resolves` fails if the scan drops `examples/` —
       without it, widening the exemption would have "fixed" the same false positive while
       leaving the generator uncheckable.
-- [~] **P2.7.4 Transforms → 0.7.0** — Design doc frozen (`P2.7.4-transform-DESIGN.md`).
+- [~] **P2.7.4 Transforms → 0.8.1** (Q7 said 0.7.0; 0.8.0 published first, so 0.7.0 would
+  be a semver downgrade) — Design doc frozen (`P2.7.4-transform-DESIGN.md`).
   - [x] **Item 1, composition.** `RawRun::page_origin` (CTM applied to the text-space pen),
         `page_scale`, `advance_axis`, `up_axis`; `pair_run`, `locate_span`'s anchor and
         `assign_object_spans` now compare in page space. Text-space lengths are carried into

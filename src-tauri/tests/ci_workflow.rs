@@ -316,3 +316,25 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "the Linux job must assert exactly the 71 known-ignored tests"
     );
 }
+
+/// The `passed` floor is the other half of the same pin, and it had already drifted: it still
+/// said 419 when the measured non-PDFium baseline was 428, because nothing read it. A floor
+/// that nobody checks is a comment. This makes raising it an explicit act, in the same commit
+/// as whatever added the tests, exactly like the ignored count.
+///
+/// Mutation-verified: `-lt 431` -> `-lt 432` fails this test; restoring it passes.
+#[test]
+fn the_linux_job_pins_the_measured_passed_floor() {
+    let text = ci_workflow();
+    let tests_step = text
+        .split("- name: Tests")
+        .nth(1)
+        .expect("the Linux job must run the tests");
+    let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
+
+    assert!(
+        tests_step.contains(r#"if [ "$passed" -lt 431 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 431 (0.8.1). \
+         A floor below the current count cannot detect a test that stopped being collected."
+    );
+}

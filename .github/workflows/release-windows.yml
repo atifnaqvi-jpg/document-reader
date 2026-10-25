@@ -84,7 +84,7 @@ jobs:
       # them apart, so it is worth failing the release over.
       #
       # `--include-ignored` because PDFium-gated tests carry `#[ignore]`: without it this
-      # step would skip 69 tests and the only evidence they ran is that they said nothing.
+      # step would skip 71 tests and the only evidence they ran is that they said nothing.
       # The count comes from libtest's own summary rather than a grep for a skip message,
       # which libtest captures for passing tests and so can never match.
       - name: Assert the PDFium tests actually ran

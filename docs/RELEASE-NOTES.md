@@ -7,7 +7,7 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
-## 0.7.0
+## 0.8.1
 
 Closing **P2.7.4** — text drawn at an angle becomes editable in place. Rotated and skewed
 runs used to be refused outright; they are now measured, so the width gate compares two
@@ -16,10 +16,12 @@ quantities that are actually comparable.
 > **Pre-release.** P2.7.6 (font embedding) is still ahead, so text editing is not complete
 > and this is not a stability guarantee.
 >
-> **Version ordering.** Q7 assigns P2.7.4 to 0.7.0, but 0.8.0 (P2.7.5, CID) was published
-> first. This installer is therefore numerically *below* the published 0.8.0 while its tree
-> contains strictly more work. That is recorded, not hidden: an auto-updater comparing
-> semver would not offer it. See "Known ordering issue" below.
+> **This was drafted as 0.7.0 and is published as 0.8.1.** Q7 assigns P2.7.4 to 0.7.0, but
+> 0.8.0 (P2.7.5, CID) was published *before* this phase landed. 0.7.0 is therefore below an
+> already-published release, and an auto-updater comparing semver would never offer it. The
+> version was raised to 0.8.1 so that published history stays monotonic and the label
+> describes what the tree contains: transforms on top of CID. See "Phase and version
+> sequences diverged" below.
 
 ### Text at any angle is measured along its own axis
 
@@ -74,11 +76,43 @@ on a whole-line assertion happening to notice.
   correct for rounding noise, but a rotated line adjacent to a horizontal one at a nearly
   identical angle is treated as one line.
 
-### Known ordering issue
+### Phase and version sequences diverged
 
-`v0.8.0` is published and its tree does **not** contain this work (`RunFrame` is absent
-there). This release is numerically lower while being a superset. It is published as a
-pre-release, and the next phase (P2.7.6 → 0.9.0) will be numerically above both.
+The phase sequence and the version sequence did not run in the same order, and the history
+should say so rather than leave a gap someone has to reconstruct.
+
+Q7 assigns one minor bump per phase in phase order: 0.5.0 → P2.7.1, 0.6.0 → P2.7.3,
+0.7.0 → P2.7.4, 0.8.0 → P2.7.5, 0.9.0 → P2.7.6, 1.0.0 → P2.8. That ordering assumes the
+`0.7.0` slot would be filled before `0.8.0`. It was not: **P2.7.5 (CID) was numbered 0.8.0
+by ruling and published on 2026-10-25, while P2.7.4 (transforms) was still open.** CID
+shipped ahead of transforms, so the version sequence and the phase sequence diverged at that
+point — the published `v0.8.0` tree does not contain `RunFrame`, while this tree does.
+
+Labelling this release 0.7.0 would have reproduced the divergence permanently, with a
+superset numbered below a published subset. It was raised to **0.8.1** instead: it is above
+every published release, and the minor component still identifies the phase it closes
+(P2.7.4), so the map stays readable.
+
+**The ruling was corrected, not just this one number.** The open question in Q7 was whether
+the *next* phase would hit the same wall. It would: P2.7.6 was pencilled in at 0.9.0 while
+0.8.1 exists, which leaves no room between them for the phase after it. The corrected map is:
+
+| Phase | Version |
+|---|---|
+| P2.7.1 | 0.5.0 |
+| P2.7.3 | 0.6.0 |
+| P2.7.5 (CID) | 0.8.0 — published first |
+| P2.7.4 (transforms) | **0.8.1 — this release** |
+| P2.7.6 (embedding) | **0.9.0** |
+| P2.8 (reflow) | 1.0.0 |
+
+0.9.0 is the last minor before 1.0.0, so P2.7.6 is the last phase that may take a minor bump.
+That is consistent with P2.8 being the final phase of the agreed programme, and it is why
+1.0.0 must not be reached by accident.
+
+The lesson recorded here is narrower than "bump earlier": a version assigned to a phase that
+has not shipped is a reservation, not a fact. When a later phase ships first, the reserved
+number is spent and the earlier phase needs a new one.
 
 ---
 
@@ -139,7 +173,8 @@ their own font rather than implying the toggle covers them.
 
 ### Known gaps
 
-- Rotated and skewed text is refused, not editable (P2.7.4, targeted at 0.7.0).
+- Rotated and skewed text is refused, not editable (P2.7.4, shipped as 0.8.1 — this
+  section said 0.7.0 when `v0.8.0` was tagged; see §0.8.1).
 - Text inside nested Form XObjects beyond the depth cap is refused (P2.7.3).
 - A CID/Type0 font without a readable `/ToUnicode` is refused with `font-encoding`.
 - Non-WinAnsi text that needs an embedded font is refused with `GLYPHS_NOT_COVERABLE` (P2.7.6).
@@ -147,9 +182,9 @@ their own font rather than implying the toggle covers them.
   measured widths (P2.8, targeted at 1.0.0).
 
 > **Phase numbering.** This work was previously drafted as "P2.8, target v0.7.0". The frozen
-> plan (ruling Q7) is authoritative: CID is **P2.7.5 → 0.8.0**, 0.7.0 belongs to P2.7.4
-> transforms, and **P2.8 is line-level reflow at 1.0.0**. Only the label changed here; the
-> design and scope did not.
+> plan (ruling Q7) is authoritative: CID is **P2.7.5 → 0.8.0**, P2.7.4 transforms followed it
+> as **0.8.1** (not 0.7.0 — 0.8.0 was already published, see §0.8.1), and **P2.8 is
+> line-level reflow at 1.0.0**. Only the label changed here; the design and scope did not.
 
 ### Upgrading
 
