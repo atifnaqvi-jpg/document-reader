@@ -317,12 +317,43 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
     );
 }
 
+/// The render-smoke step ran **zero** tests for as long as it existed. All three tests in
+/// `tests/memory.rs` are `#[ignore]`d, and the step did not pass `--include-ignored`, so
+/// every run logged `0 passed; 0 failed; 3 ignored` and exited 0. It was green, it was named
+/// "Render smoke tests (real PDFium)", and it validated nothing.
+///
+/// Mutation-verified: dropping `--include-ignored` from that step fails this test.
+#[test]
+fn the_render_smoke_step_actually_runs_the_ignored_memory_tests() {
+    let text = ci_workflow();
+    let step = text
+        .split("- name: Render smoke tests (real PDFium)")
+        .nth(1)
+        .expect("the Windows job must have a render smoke step");
+    let step = step.split("- name:").next().unwrap_or(step);
+    let command = step
+        .lines()
+        .find(|line| line.trim_start().starts_with("run:"))
+        .expect("the render smoke step must have a run command");
+
+    assert!(
+        command.contains("--include-ignored"),
+        "the render smoke step must pass --include-ignored: every test in tests/memory.rs \
+         carries #[ignore], so without it the step reports 0 passed and 3 ignored. \
+         Command: {command:?}"
+    );
+    assert!(
+        command.contains("--test memory"),
+        "the render smoke step must target tests/memory.rs. Command: {command:?}"
+    );
+}
+
 /// The `passed` floor is the other half of the same pin, and it had already drifted: it still
 /// said 419 when the measured non-PDFium baseline was 428, because nothing read it. A floor
 /// that nobody checks is a comment. This makes raising it an explicit act, in the same commit
 /// as whatever added the tests, exactly like the ignored count.
 ///
-/// Mutation-verified: `-lt 431` -> `-lt 432` fails this test; restoring it passes.
+/// Mutation-verified: `-lt 432` -> `-lt 433` fails this test; restoring it passes.
 #[test]
 fn the_linux_job_pins_the_measured_passed_floor() {
     let text = ci_workflow();
@@ -333,8 +364,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 431 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 431 (0.8.1). \
+        tests_step.contains(r#"if [ "$passed" -lt 432 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 432 (0.8.1). \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }

@@ -85,11 +85,11 @@ jobs:
             echo "::error::$ignored tests ignored; 71 PDFium-gated tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
-          # Measured, not computed: 431 passed at 0.8.1 (Linux, no PDFium). Raising this to
+          # Measured, not computed: 432 passed at 0.8.1 (Linux, no PDFium). Raising this to
           # the measured value, rather than leaving headroom, is what makes a test that stops
           # being collected fail here instead of passing quietly.
-          if [ "$passed" -lt 431 ]; then
-            echo "::error::only $passed tests ran; 431 is the non-PDFium baseline at 0.8.1. A test stopped being collected."
+          if [ "$passed" -lt 432 ]; then
+            echo "::error::only $passed tests ran; 432 is the non-PDFium baseline at 0.8.1. A test stopped being collected."
             exit 1
           fi
 
@@ -149,11 +149,16 @@ jobs:
       #
       # PDFIUM_LIBRARY_PATH is set explicitly because the tests run from `target/`, not
       # from the install layout the app resolves the DLL from.
+      # `--include-ignored` is load-bearing here and was missing until 0.8.1: all three
+      # tests in this file carry `#[ignore]`, so the step reported
+      # `0 passed; 0 failed; 3 ignored` and exited 0 on every run since it was written.
+      # The step was named after the coverage it did not have. `--nocapture` stays because
+      # the point of this step is to see the allocation numbers in the log.
       - name: Render smoke tests (real PDFium)
         working-directory: src-tauri
         env:
           PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
-        run: cargo test --test memory -- --nocapture
+        run: cargo test --test memory -- --include-ignored --nocapture
 
       # A silently-skipped test suite is worse than none: it looks green while testing
       # nothing. Fail loudly if the guards turned out to be tripping.
