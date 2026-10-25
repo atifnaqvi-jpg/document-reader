@@ -300,3 +300,119 @@ fn the_glob_matcher_follows_the_documented_semantics() {
     assert!(!glob_matches("version-[0-9]*", "version-notes"));
     assert!(glob_matches("[0-9a-z]", "7"));
 }
+
+/// The publish step must say `prerelease: true`, and say it explicitly.
+///
+/// `softprops/action-gh-release` treats a missing key as `false`, so an omission publishes a
+/// full release — GitHub then offers it as "latest" and users read it as stable. Every phase
+/// before 1.0.0 is intermediate by ruling Q7, so the omission would misrepresent the build in
+/// exactly the way the version discipline exists to prevent.
+///
+/// Deliberately not a check for "the string appears anywhere": it must be a key at the
+/// `with:` depth of the publish step, because a `prerelease: true` left in a comment or
+/// attached to a different step would satisfy a substring search while changing nothing.
+///
+/// Anchored on the `uses:` line, not the `- ` line: the step's dash carries `name:` and the
+/// action is on a following line, which is how both this workflow and every readable one is
+/// written.
+fn publish_input(text: &str, key: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let uses = lines.iter().position(|line| {
+        let code = line.split('#').next().unwrap_or("").trim();
+        code.starts_with("uses:") && code.contains("softprops/action-gh-release")
+    })?;
+    let uses_indent = lines[uses].len() - lines[uses].trim_start().len();
+
+    let mut with_indent: Option<usize> = None;
+    for line in &lines[uses + 1..] {
+        let code = line.split('#').next().unwrap_or("");
+        if code.trim().is_empty() {
+            continue;
+        }
+        let indent = code.len() - code.trim_start().len();
+        let item = code.trim();
+
+        if indent <= uses_indent {
+            // Siblings of `uses:` live at the same depth; a new step starts lower.
+            if item.starts_with("- ") || indent < uses_indent {
+                break;
+            }
+            if item.trim_end_matches(':') == "with" {
+                with_indent = Some(indent);
+                continue;
+            }
+            with_indent = None;
+            continue;
+        }
+        if let Some(w) = with_indent {
+            if indent <= w {
+                with_indent = None;
+            } else if let Some(value) = item.strip_prefix(&format!("{key}:")) {
+                return Some(unquote(value));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn a_tag_publishes_a_prerelease_not_a_stable_release() {
+    let text = workflow();
+    assert!(
+        text.contains("softprops/action-gh-release"),
+        "the publish step is gone; this guard would otherwise pass vacuously"
+    );
+    assert_eq!(
+        publish_input(&text, "prerelease").as_deref(),
+        Some("true"),
+        "the publish step must set `prerelease: true` explicitly. Omission means `false`, \
+         which publishes a stable release for a phase that is not stable yet"
+    );
+}
+
+/// Guard the parser, so a matcher that finds nothing cannot make the test above pass by
+/// reading a `None` that looks like an expected absence.
+#[test]
+fn the_publish_input_reader_finds_only_the_publish_steps_keys() {
+    let sample = "\
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - name: Attach installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          prerelease: true
+      - name: Later step
+        with:
+          prerelease: false
+";
+    assert_eq!(publish_input(sample, "prerelease").as_deref(), Some("true"));
+    assert_eq!(
+        publish_input(sample, "files").as_deref(),
+        Some("dist/*.exe")
+    );
+    assert_eq!(publish_input(sample, "missing"), None);
+
+    let omitted = "\
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+";
+    assert_eq!(
+        publish_input(omitted, "prerelease"),
+        None,
+        "an omitted key must read as None, which is what separates it from `false` in the \
+         caller's assertion"
+    );
+
+    // A commented-out key is not a key.
+    let commented = "\
+      - uses: softprops/action-gh-release@v2
+        with:
+          # prerelease: true
+          files: dist/*.exe
+";
+    assert_eq!(publish_input(commented, "prerelease"), None);
+}

@@ -82,6 +82,28 @@ No data migration. Documents edited and saved by earlier versions re-open and ed
 Files saved by this version are ordinary PDFs with no new structures; the only content that
 changes is text the user actually edited.
 
+### Pre-release status, acceptance and provenance
+
+This is a **pre-release**, not a stable release. P2.7.4 (rotated/skewed text) and P2.7.6
+(embedding) are still ahead of it, so `fits-width` still refuses on the un-rotated axis only
+and non-WinAnsi text that needs an embedded font is still refused. Text editing is not
+complete until P2.8 at 1.0.0; do not read this version as a stability guarantee.
+
+**Acceptance.** P2.7.5 requires both a green gate and a confirmed installer (Q9), so both are
+recorded here:
+
+- Gate green: CI run `40157718290` on `2199903` — `Rust (fmt, clippy, test)`,
+  `Frontend (typecheck, test, build)` and `Windows compile check + render smoke` all passed,
+  on both `p2-windows-test` and `main`.
+- Installer confirmed: `Document Reader_0.8.0_x64-setup.exe`, built by run `40158689217` from
+  `2199903`, SHA-256 `5c11e43f02e05883597132f98cee4dc93400295e163241f33b602b141959d1cc`,
+  7,827,785 bytes, PE32 (NSIS). Hand-tested and accepted by the user on 2026-10-25; the
+  reported line on page 4 of the Maastricht brochure edits in place.
+- The asset attached to the `v0.8.0` release is **rebuilt** by the tag run from the same
+  application source, so it is source-identical to the accepted build but not byte-identical:
+  the NSIS packaging step embeds build metadata. Its own SHA-256 is listed on the release
+  page. This is a property of the toolchain, not a difference in what was tested.
+
 ## 0.6.0
 
 Closing **P2.7.3** — text inside Form XObjects becomes editable. The theme is still silent

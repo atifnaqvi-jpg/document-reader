@@ -232,4 +232,23 @@ fn the_0_8_0_release_notes_cover_every_change_the_plan_claims() {
         "the 0.8.0 notes must connect the refusal in 0.6.0 to the fix, since that is the \
          reported symptom users will be checking"
     );
+
+    // Q9 makes the phase's `[x]` conditional on a confirmed installer, and the confirmation
+    // exists only as a hand-test. If the notes drop it, nothing else records that 0.8.0 was
+    // accepted rather than merely built.
+    for (topic, needle) in [
+        ("the hand-test acceptance", "hand-tested"),
+        ("the installer checksum", "sha-256"),
+        ("the pre-release warning", "pre-release"),
+    ] {
+        assert!(
+            lower.contains(needle),
+            "the 0.8.0 notes never mention {topic} (looked for {needle:?})"
+        );
+    }
+    assert!(
+        section.contains("40157718290") && section.contains("40158689217"),
+        "the 0.8.0 notes must name the gate run and the installer build run, or the \
+         acceptance claim cannot be checked against anything"
+    );
 }
