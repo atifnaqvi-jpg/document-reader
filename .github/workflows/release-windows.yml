@@ -33,7 +33,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Same pin as .github/workflows/ci.yml: the installer must be built by the same
+      # compiler that the gates were defined against, or "green in CI" describes a
+      # different build than the one users download.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
 
       - uses: Swatinem/rust-cache@v2
         with:

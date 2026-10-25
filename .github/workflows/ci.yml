@@ -1,8 +1,17 @@
 name: CI
 
+# Every branch, not just the ones that end up on `main`.
+#
+# This used to run only on `push` to main/master and on pull requests. All of P2.7.x and the
+# CID phase were developed on the long-lived `p2-windows-test` branch, so this workflow never
+# ran on it: the fmt/clippy/vitest results reported for those phases were local runs, never a
+# gate. Unformatted code accumulated there for three weeks while the release workflow — which
+# runs `cargo test` but not fmt, clippy or vitest — kept building installers from it.
+#
+# A gate that does not run is not green, so the branch list is gone. `pull_request` is kept
+# because a PR still deserves a check before review.
 on:
   push:
-    branches: [main, master]
   pull_request:
 
 env:
@@ -21,8 +30,15 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `@stable`. rustfmt may change its output between releases, so a floating
+      # toolchain turns `cargo fmt --check` into a statement about the calendar rather than
+      # about the code: it can go green→red on a day nobody edited anything, or reformat a
+      # release branch mid-flight. Pinning is what makes the gate meaningful.
+      # `rust-version` in src-tauri/Cargo.toml is the MSRV floor (1.77); this is the toolchain
+      # the gates are defined against, and is allowed to be newer.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.91.0"
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
@@ -68,7 +84,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned for the same reason as the `rust` job: an unpinned compiler in the shipping
+      # target's check can fail — or start passing — without any code change.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
 
       - uses: Swatinem/rust-cache@v2
         with:

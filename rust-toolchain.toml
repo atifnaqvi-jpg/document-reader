@@ -1,0 +1,9 @@
+# Pins the toolchain the gates are defined against, so a local `cargo fmt --check` means the
+# same thing as CI's. Without this, rustfmt floats with whatever `stable` is and the format
+# gate can change verdict without anyone editing code.
+#
+# This is not the MSRV: `rust-version` in src-tauri/Cargo.toml (1.77) is the floor we support.
+# Keep this value in sync with `.github/workflows/ci.yml`.
+[toolchain]
+channel = "1.91.0"
+components = ["clippy", "rustfmt"]
