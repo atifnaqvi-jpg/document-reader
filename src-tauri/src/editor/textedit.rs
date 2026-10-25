@@ -514,10 +514,12 @@ fn rect_along(rect: &crate::editor::runmetrics::PdfiumRun, frame: RunFrame) -> (
         Point2::new(rect.x1, rect.y0),
         Point2::new(rect.x1, rect.y1),
     ];
-    corners.iter().map(|p| frame.along(*p)).fold(
-        (f32::INFINITY, f32::NEG_INFINITY),
-        |(lo, hi), value| (lo.min(value), hi.max(value)),
-    )
+    corners
+        .iter()
+        .map(|p| frame.along(*p))
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), value| {
+            (lo.min(value), hi.max(value))
+        })
 }
 
 /// A `PdfRect`'s extent along a frame's advance axis.
@@ -528,10 +530,12 @@ fn pdf_rect_along(rect: &crate::editor::geometry::PdfRect, frame: RunFrame) -> (
         Point2::new(rect.x1, rect.y0),
         Point2::new(rect.x1, rect.y1),
     ];
-    corners.iter().map(|p| frame.along(*p)).fold(
-        (f32::INFINITY, f32::NEG_INFINITY),
-        |(lo, hi), value| (lo.min(value), hi.max(value)),
-    )
+    corners
+        .iter()
+        .map(|p| frame.along(*p))
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), value| {
+            (lo.min(value), hi.max(value))
+        })
 }
 
 /// A box's extent across a frame's advance axis.
@@ -542,10 +546,12 @@ fn rect_across(rect: &crate::editor::runmetrics::PdfiumRun, frame: RunFrame) -> 
         Point2::new(rect.x1, rect.y0),
         Point2::new(rect.x1, rect.y1),
     ];
-    corners.iter().map(|p| frame.across(*p)).fold(
-        (f32::INFINITY, f32::NEG_INFINITY),
-        |(lo, hi), value| (lo.min(value), hi.max(value)),
-    )
+    corners
+        .iter()
+        .map(|p| frame.across(*p))
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), value| {
+            (lo.min(value), hi.max(value))
+        })
 }
 
 /// The baseline band a run's characters must sit in to count as that run's (P2.4.3 T23a).
@@ -792,8 +798,11 @@ fn object_window(
             break;
         }
         let origin = Point2::new(next.origin_x, next.origin_y);
+        // The *near* edge is what the original `next.x0` tested: a character belongs to the
+        // box while it starts before the box's far edge. Comparing the far edge instead drops
+        // the last glyph of every line (measured: 333pt against a true 342pt span).
         if !(band.0..=band.1).contains(&frame.across(origin))
-            || PdfiumCharGrid::along_max(next, frame) > along_hi + tol
+            || PdfiumCharGrid::along_min(next, frame) > along_hi + tol
         {
             break;
         }
@@ -1730,13 +1739,8 @@ fn describe_group(
     };
     let group_strong = head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong);
     let smallest_containing = head_pair.is_some_and(|pair| pair.smallest_containing);
-    let (width, box_suspicious) = match resolve_quota(
-        span,
-        box_width,
-        smallest_containing,
-        group_strong,
-        group_frame.is_horizontal(),
-    ) {
+    let (width, box_suspicious) =
+        match resolve_quota(span, box_width, smallest_containing, group_strong) {
             Quota::Box(box_width) => (Some(box_width), false),
             Quota::Span { width, suspicious } => (Some(width), suspicious),
             Quota::Unmeasurable => {
@@ -1960,7 +1964,6 @@ fn group_box_suspicious(
             box_width.map(|(lo, hi)| hi - lo),
             smallest_containing,
             strong,
-            frame.is_horizontal(),
         ),
         Quota::Span {
             suspicious: true,
@@ -1995,7 +1998,6 @@ fn resolve_quota(
     box_width: Option<f32>,
     smallest_containing: bool,
     strong: bool,
-    horizontal: bool,
 ) -> Quota {
     match span {
         Some(span) => {
@@ -2005,15 +2007,18 @@ fn resolve_quota(
                 suspicious,
             }
         }
-        // P2.7.4 Q2: a box's width is only a width when the text advances horizontally. For a
-        // turned run the box's `x` extent is the glyph *height* - measured at 18.12pt against
-        // an advance of 114.67pt - so trusting it would hand the gate a number six times too
-        // small and refuse every replacement that fits. No span means unmeasurable; the run
-        // refuses rather than guess with a number known to be the wrong quantity.
+        // P2.7.4 Q2: the box passed in here is already projected onto the run's advance axis
+        // (`pdf_rect_along`), so it is a width in the same sense the span is. For a turned run
+        // its page `x` extent would be the glyph height - 18.12pt against an advance of
+        // 114.67pt - which is why the projection, not a horizontal-only rule, is what makes
+        // this number trustworthy.
+        //
+        // Limitation: PDFium's box is axis-aligned in page space, so a skew (not a pure
+        // rotation) inflates the projected extent by up to the angle's factor. This path is a
+        // fallback used only when no span could be located; `BOX_SPAN_SLACK` absorbs the
+        // difference at the angles a page realistically uses.
         None => match box_width {
-            Some(box_width) if strong && smallest_containing && horizontal => {
-                Quota::Box(box_width)
-            }
+            Some(box_width) if strong && smallest_containing => Quota::Box(box_width),
             _ => Quota::Unmeasurable,
         },
     }
@@ -2608,8 +2613,7 @@ mod tests {
             // merge predicates have always assumed.
             page_origin: (x, 700.0),
             page_scale: Some(1.0),
-            advance_axis: (1.0, 0.0),
-            up_axis: (0.0, 1.0),
+            frame: RunFrame::PAGE,
             font_size: size,
             advance: approximation,
             // The approximation doubles as the exact metric here, so a unit test that does not
@@ -2622,7 +2626,6 @@ mod tests {
             style_class: font.to_string(),
             marked_content: Vec::new(),
             rise: 0.0,
-            rotated: false,
             xobject_refusal: None,
         }
     }
@@ -2632,6 +2635,41 @@ mod tests {
         // "He" then "llo", the second starting exactly where the first ends.
         let head = test_run("He", 72.0, 12.0, "F1");
         let next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        assert!(mergeable(&head, &next, false, None, None));
+    }
+
+    /// P2.7.4 Q7: fragments at different angles are not one line even when they abut. A merged
+    /// write puts the whole replacement in the head fragment and draws it through the head's
+    /// matrix, so a tail drawn at another angle would be re-laid along the head's axis.
+    ///
+    /// Everything the older gates look at is deliberately identical here: same face, same
+    /// size, contiguous, no space. Only the direction differs, so the test fails if the
+    /// direction check is removed rather than passing for some other reason.
+    #[test]
+    fn does_not_merge_fragments_drawn_at_different_angles() {
+        let head = test_run("He", 72.0, 12.0, "F1");
+        let mut next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        next.frame = RunFrame::from_vectors((0.0, 1.0), (-1.0, 0.0));
+
+        assert!(
+            !mergeable(&head, &next, false, None, None),
+            "a 90 degree tail must not join a horizontal head"
+        );
+        // The control: the same pair with matching frames does merge.
+        let upright = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        assert!(mergeable(&head, &upright, false, None, None));
+    }
+
+    /// A turned pair *does* merge with itself: the direction gate must separate angles, not
+    /// reject every non-horizontal run.
+    #[test]
+    fn merges_fragments_that_share_a_turned_direction() {
+        let turned = RunFrame::from_vectors((0.0, 1.0), (-1.0, 0.0));
+        let mut head = test_run("He", 72.0, 12.0, "F1");
+        head.frame = turned;
+        let mut next = test_run("llo", 72.0 + head.advance, 12.0, "F1");
+        next.frame = turned;
+
         assert!(mergeable(&head, &next, false, None, None));
     }
 
@@ -2929,7 +2967,7 @@ mod tests {
         rect.y1 = 712.0;
         rect.x1 = 79.2;
         assert_eq!(
-            rendered_baseline(&rect, &grid),
+            rendered_baseline(&rect, &grid, RunFrame::PAGE),
             700.0,
             "the baseline comes from the characters, not the descender-depth bottom edge"
         );
@@ -2940,7 +2978,7 @@ mod tests {
             text: String::new(),
             chars: Vec::new(),
         };
-        assert_eq!(rendered_baseline(&rect, &empty), 696.6);
+        assert_eq!(rendered_baseline(&rect, &empty, RunFrame::PAGE), 696.6);
     }
 
     /// A descender line's pair is strong **only** because the baseline is read from the grid.
@@ -3030,6 +3068,8 @@ mod tests {
             last: 0,
             x0: 1.0,
             x1: 2.0,
+            y0: 0.0,
+            y1: 0.0,
         };
         let mut pairs = vec![
             Some(Pair {
@@ -3132,6 +3172,8 @@ mod tests {
                     last,
                     x0,
                     x1,
+                    y0: 0.0,
+                    y1: 0.0,
                 }),
                 smallest_containing: true,
             })
@@ -3175,12 +3217,16 @@ mod tests {
             last: 3,
             x0: 46.0,
             x1: 85.18,
+            y0: 0.0,
+            y1: 0.0,
         };
         let tail = CharSpan {
             first: 5,
             last: 8,
             x0: 91.18,
             x1: 127.01,
+            y0: 0.0,
+            y1: 0.0,
         };
         let grid = |between: crate::editor::runmetrics::PdfiumChar| {
             crate::editor::runmetrics::PdfiumCharGrid {
@@ -3230,6 +3276,8 @@ mod tests {
             last: 8,
             x0: 86.18,
             x1: 122.01,
+            y0: 0.0,
+            y1: 0.0,
         };
         assert!(!seam_is_word_space(
             0,
@@ -3278,6 +3326,34 @@ mod tests {
     /// P2.4.2 T22: a group whose union box is line-sized for the group's own span is
     /// box-suspicious — the 0.4.1 `ence` orphan against a whole-line box. Two per-glyph
     /// fragments that *tile* their shared word box are not.
+    /// P2.7.4 Q2: a box's extent must be read along the run's advance axis. The `rotated_text`
+    /// fixture's box is (282.31,102.11)-(300.43,213.52): 18.12pt wide in page `x` (the glyph
+    /// height) but 111.41pt long along a 90 degree advance. Handing the width gate the former
+    /// would refuse every replacement that actually fits.
+    #[test]
+    fn a_box_is_measured_along_the_advance_axis_not_page_x() {
+        let rect = crate::editor::runmetrics::PdfiumRun {
+            text: "ROTATED".to_string(),
+            font_name: "Helvetica".to_string(),
+            font_size: 24.0,
+            x0: 282.312,
+            y0: 102.112,
+            x1: 300.432,
+            y1: 213.52,
+            width: 18.12,
+        };
+        let turned = RunFrame::from_vectors((0.0, 1.0), (-1.0, 0.0));
+        let (lo, hi) = rect_along(&rect, turned);
+        assert!(
+            (hi - lo - 111.408).abs() < 0.01,
+            "turned extent was {}; the page-x extent would be 18.12",
+            hi - lo
+        );
+        // And the page frame still reads the same box as 18.12 wide.
+        let (lo, hi) = rect_along(&rect, RunFrame::PAGE);
+        assert!((hi - lo - 18.12).abs() < 0.01);
+    }
+
     #[test]
     fn a_group_with_a_line_sized_box_is_suspicious() {
         let document = testpdf::simple_winansi();
@@ -3336,12 +3412,16 @@ mod tests {
             last: 6,
             x0: 72.0,
             x1: 72.0 + 50.4,
+            y0: 0.0,
+            y1: 0.0,
         };
         let next_span = CharSpan {
             first: 7,
             last: 10,
             x0: 122.4,
             x1: 122.4 + 24.0,
+            y0: 0.0,
+            y1: 0.0,
         };
         // Char-grid: gap = 0, the chain is whole.
         assert!(
@@ -3534,39 +3614,99 @@ mod tests {
         assert_eq!(error.code(), "SUBSTITUTE_REFUSED");
     }
 
-    /// P2.7 hotfix H0: a rotated run was previously **editable**, with `advance` measured
-    /// along the text axis and `fits-width` comparing it to a horizontal box. The write path
-    /// must now refuse it, naming the geometry rather than the font.
+    /// P2.7.4: a rotated run is **editable**, and its quota is its own advance (114.67pt),
+    /// not the horizontal extent of its box (18.12pt). The latter is the glyph height, so
+    /// trusting it would refuse every replacement that actually fits.
+    ///
+    /// Replaces the H0/T-7 refusal tests: the refusal those asserted is exactly what this
+    /// phase removes, so they are rewritten to guard the capability rather than deleted.
     #[test]
-    fn refuses_a_rotated_run_with_gate_h() {
+    fn a_rotated_run_is_editable_with_its_own_advance_as_quota() {
         let mut document = testpdf::rotated_text();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         assert!(
-            run.rotated,
-            "fixture must be rotated for this test to mean anything"
+            !run.frame.is_horizontal(),
+            "fixture must be turned for this test to mean anything"
         );
+        let expected = run.advance_exact.unwrap_or(run.advance);
+
+        let gates = resolve_gates(&document, 0, &run).unwrap();
+        let verdict = font_admissibility(&gates);
+        assert!(verdict.editable, "rotation is measured now, not refused");
+        assert_eq!(verdict.gate, None);
+
+        // A replacement that fits is written; one that does not refuses with both numbers.
+        // The fitting edit runs on a copy: writing it replaces the operand, after which the
+        // run is addressed by bytes that no longer exist.
+        let measure = measure_fixed(expected * 0.5);
+        edit(
+            &mut document.clone(),
+            &request(&run, "CHANGED", expected, &measure),
+        )
+        .expect("a replacement half the run's own advance must fit");
+
+        let measure = measure_fixed(expected * 2.0);
+        let error = edit(&mut document, &request(&run, "CHANGED", expected, &measure)).unwrap_err();
+        assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
+        assert!(
+            error.to_string().contains("fits-width"),
+            "a too-wide replacement must refuse on width, not geometry: {error}"
+        );
+        assert!(
+            error.to_string().contains("114.7"),
+            "the refusal must quote the run's own advance, not its box height: {error}"
+        );
+    }
+
+    /// The same capability when the rotation comes from the graphics matrix rather than `Tm`.
+    /// T-7 widened the *detection* to the composed matrix; this phase widens what detection
+    /// unlocks, so both routes must end up editable.
+    #[test]
+    fn a_run_rotated_by_the_graphics_matrix_is_editable() {
+        let document = testpdf::rotated_by_graphics_matrix();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(!run.frame.is_horizontal());
+
+        let gates = resolve_gates(&document, 0, &run).unwrap();
+        assert!(font_admissibility(&gates).editable);
+
+        let expected = run.advance_exact.unwrap_or(run.advance);
+        let measure = measure_fixed(expected * 0.5);
+        edit(
+            &mut document.clone(),
+            &request(&run, "CHANGED", expected, &measure),
+        )
+        .expect("a `cm` rotation is measured no differently from a `Tm` one");
+    }
+
+    /// Q5: mirroring keeps a refusal. The advance axis exists, but the glyphs run counter to
+    /// it, so a replacement would be drawn reflected. The gate must name *that*, and the write
+    /// path must refuse identically when a caller skips the picker.
+    #[test]
+    fn a_mirrored_run_refuses_as_mirrored() {
+        let mut document = testpdf::mirrored_by_graphics_matrix();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(run.frame.is_mirrored(), "fixture must be mirrored");
 
         let gates = resolve_gates(&document, 0, &run).unwrap();
         let verdict = font_admissibility(&gates);
         assert!(!verdict.editable);
-        assert_eq!(verdict.gate.as_deref(), Some("rotated-text"));
+        assert_eq!(verdict.gate.as_deref(), Some("mirrored-text"));
 
-        // The write path re-validates independently, so a caller that skipped the picker
-        // still refuses.
         let measure = measure_fixed(10.0);
         let error = edit(&mut document, &request(&run, "X", 100.0, &measure)).unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
-        assert!(error.to_string().contains("rotated-text"), "{error}");
+        assert!(error.to_string().contains("mirrored-text"), "{error}");
     }
 
-    /// H0.2: the refusal must reach the *picker*, not only the write path. A rotated run with
-    /// no PDFium box would otherwise refuse `run-mismatch` — the wrong reason — because the
-    /// unpaired check overwrites the verdict. Geometry must win.
+    /// The picker must reach the mirrored verdict, not overwrite it with `run-mismatch` when
+    /// no PDFium box is supplied: geometry wins, exactly as H0.2 required for rotation.
     #[test]
-    fn a_rotated_run_refuses_as_rotated_not_as_unpaired() {
-        let document = testpdf::rotated_text();
-        // No PDFium runs are supplied, which is the shape that used to overwrite the verdict.
+    fn a_mirrored_run_refuses_as_mirrored_not_as_unpaired() {
+        let document = testpdf::mirrored_by_graphics_matrix();
         let described = describe_runs(
             &document,
             0,
@@ -3582,50 +3722,9 @@ mod tests {
         assert!(!described[0].admissibility.editable);
         assert_eq!(
             described[0].admissibility.gate.as_deref(),
-            Some("rotated-text"),
-            "a rotated run must refuse for its geometry, not for a missing box"
+            Some("mirrored-text"),
+            "a mirrored run must refuse for its geometry, not for a missing box"
         );
-    }
-
-    /// P2.7 T-7: the same refusal must cover a run rotated by `cm` rather than `Tm`.
-    /// H0 read the text matrix alone, so this run was offered as editable with a horizontal
-    /// `advance` while the renderer drew it vertically — editable *and* mis-measured.
-    #[test]
-    fn refuses_a_run_rotated_by_the_graphics_matrix() {
-        let mut document = testpdf::rotated_by_graphics_matrix();
-        let run =
-            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
-        assert!(
-            run.rotated,
-            "fixture must be rotated for this test to mean anything"
-        );
-
-        let gates = resolve_gates(&document, 0, &run).unwrap();
-        assert_eq!(
-            font_admissibility(&gates).gate.as_deref(),
-            Some("rotated-text")
-        );
-
-        // The picker path, which is where a user would otherwise be offered the edit.
-        let described = describe_runs(
-            &document,
-            0,
-            &[],
-            &crate::editor::runmetrics::PdfiumCharGrid {
-                text: String::new(),
-                chars: Vec::new(),
-            },
-        )
-        .unwrap();
-        assert_eq!(described.len(), 1);
-        assert_eq!(
-            described[0].admissibility.gate.as_deref(),
-            Some("rotated-text")
-        );
-
-        let measure = measure_fixed(10.0);
-        let error = edit(&mut document, &request(&run, "X", 100.0, &measure)).unwrap_err();
-        assert!(error.to_string().contains("rotated-text"), "{error}");
     }
 
     /// The control for the test above: a `cm` that only translates must not be refused as
@@ -3717,11 +3816,11 @@ mod tests {
         let document = testpdf::translated_by_graphics_matrix();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
-        assert!(!run.rotated);
+        assert_eq!(run.frame, RunFrame::PAGE);
         let gates = resolve_gates(&document, 0, &run).unwrap();
         assert!(
-            !gates.rotated,
-            "a translating cm must not be refused as rotated"
+            !gates.mirrored,
+            "a translating cm must not be refused as mirrored"
         );
         assert!(
             font_admissibility(&gates).editable,
@@ -3746,7 +3845,7 @@ mod tests {
         let mut document = testpdf::unrotated_text();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
-        assert!(!run.rotated);
+        assert_eq!(run.frame, RunFrame::PAGE);
         let measure = measure_fixed(10.0);
         assert!(
             edit(&mut document, &request(&run, "EDITED", 200.0, &measure)).is_ok(),

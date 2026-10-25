@@ -1307,22 +1307,6 @@ impl TextMatrixWalk {
     fn rise(&self) -> f32 {
         self.rise
     }
-
-    /// True when the text matrix is not axis-aligned (P2.7 hotfix H0).
-    ///
-    /// The matrix maps text space to user space, so its first column `(a, b)` is where one
-    /// unit of text advance points. Kept as the raw predicate even after P2.7.4 made rotated
-    /// text editable: the traversal tests assert the *detection* is right, and the frame is
-    /// what the measurement path now uses. Refusal is no longer keyed on this.
-    #[cfg(test)]
-    fn is_rotated(&self) -> bool {
-        const EPSILON: f32 = 1e-4;
-        // Text space reaches the page through `tm x ctm`, so the axis a glyph advances along
-        // is the composed matrix's first column. Reading `tm` alone missed a `cm` rotation,
-        // which left the run editable while its `advance` was vertical (P2.7 T-7).
-        let composed = matrix_mul(self.tm, self.ctm);
-        composed[1].abs() > EPSILON || composed[2].abs() > EPSILON
-    }
 }
 
 /// Tracks the `BDC`/`BMC`/`EMC` stack across a page's operations (P2.7.1).
@@ -3162,7 +3146,10 @@ mod tests {
             !runs[0].frame.is_horizontal(),
             "a 90 degree matrix must give the run a turned frame"
         );
-        assert_eq!(runs[0].frame.advance, crate::editor::geometry::Point2::new(0.0, 1.0));
+        assert_eq!(
+            runs[0].frame.advance,
+            crate::editor::geometry::Point2::new(0.0, 1.0)
+        );
         // The origin still reads correctly: the first column of the matrix is the advance
         // direction, but `e`/`f` are still the pen position.
         assert_eq!(runs[0].origin, (300.0, 100.0));

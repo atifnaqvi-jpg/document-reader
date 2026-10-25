@@ -358,7 +358,10 @@ mod tests {
         // negative and the glyphs are reflected.
         let frame = RunFrame::from_vectors((-1.0, 0.0), (0.0, 1.0));
         assert!(frame.is_mirrored());
-        assert!(!frame.is_horizontal(), "a flipped advance is not left-to-right");
+        assert!(
+            !frame.is_horizontal(),
+            "a flipped advance is not left-to-right"
+        );
     }
 
     #[test]

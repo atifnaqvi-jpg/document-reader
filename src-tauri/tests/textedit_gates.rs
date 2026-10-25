@@ -2895,6 +2895,8 @@ fn an_untransformed_run_keeps_its_origin_exactly() {
         "with an identity CTM the composed origin must be the text-space origin"
     );
     assert_eq!(run.page_scale, Some(1.0));
-    assert_eq!(run.advance_axis, (1.0, 0.0));
-    assert_eq!(run.up_axis, (0.0, 1.0));
+    assert_eq!(
+        run.frame,
+        document_reader_lib::editor::geometry::RunFrame::PAGE
+    );
 }

@@ -356,7 +356,6 @@ impl PdfiumCharGrid {
             .map(|p| frame.along(*p))
             .fold(f32::NEG_INFINITY, f32::max)
     }
-
 }
 
 /// The four corners of a character's advance box.
