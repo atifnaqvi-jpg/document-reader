@@ -270,6 +270,15 @@ point at which text editing is declared complete. Never reach it by accident.
       without it, widening the exemption would have "fixed" the same false positive while
       leaving the generator uncheckable.
 - [~] **P2.7.4 Transforms → 0.7.0** — Design doc frozen (`P2.7.4-transform-DESIGN.md`).
+  - [x] **Item 1, composition.** `RawRun::page_origin` (CTM applied to the text-space pen),
+        `page_scale`, `advance_axis`, `up_axis`; `pair_run`, `locate_span`'s anchor and
+        `assign_object_spans` now compare in page space. Text-space lengths are carried into
+        page space in both `group_span`'s metric fallback and the write path's width gate.
+        Translate/scale/flip runs are editable end-to-end; rotation still refuses, unchanged.
+        Three mutations verified (revert composition → 27 failures; unscale the fallback and
+        the write path → the two new tests fail).
+  - [ ] **Item 2, unblock rotation.** Replace the `rotated-text` refusal with correct
+        measurement once 1 has landed.
       H0/T-7 ship the refusal; this phase replaces it with measurement along the run's own
       advance axis. Measurement found a prerequisite defect: `RawRun::origin` is text-space and
       never composed with the CTM, so `translated_by_graphics_matrix` refuses as `run-mismatch`

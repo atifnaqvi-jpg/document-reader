@@ -1960,6 +1960,89 @@ pub fn rotated_by_graphics_matrix() -> Document {
     )
 }
 
+/// Text under a `cm` that **scales** it, with no rotation at all (P2.7.4).
+///
+/// `rotated` is false here, so the H0 gate never applies — and yet the run was refused
+/// before P2.7.4, because `origin` is text-space and `pair_run` compared it to a page-space
+/// box. This fixture is the proof that the uncomposed origin was a *live* defect on
+/// untransformed-looking content rather than one latent behind the rotation refusal.
+///
+/// `factor` also makes the two spaces differ by exactly that factor, which is what catches a
+/// width gate that mixes text-space widths against page-space boxes.
+pub fn scaled_by_graphics_matrix(factor: f32) -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    factor.into(),
+                    0.into(),
+                    0.into(),
+                    factor.into(),
+                    0.into(),
+                    0.into(),
+                ],
+            ),
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    72.into(),
+                    700.into(),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
+            Operation::new("ET", vec![]),
+            Operation::new("Q", vec![]),
+        ]],
+    )
+}
+
+/// Text mirrored by an `x`-flip `cm`: not rotated, but not readable left-to-right either
+/// (P2.7.4 Q5). Kept as a fixture so the refusal can name what it is.
+pub fn mirrored_by_graphics_matrix() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    (-1).into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    600.into(),
+                    0.into(),
+                ],
+            ),
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    72.into(),
+                    700.into(),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
+            Operation::new("ET", vec![]),
+            Operation::new("Q", vec![]),
+        ]],
+    )
+}
+
 /// The control for [`rotated_by_graphics_matrix`]: the same `q`/`cm`/`Q` scaffolding with a
 /// pure translation, which moves the run without rotating it. Detection must not refuse
 /// text merely because a `cm` was present.

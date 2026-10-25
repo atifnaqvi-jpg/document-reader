@@ -529,7 +529,10 @@ fn locate_span(
 ) -> Option<CharSpan> {
     let band = grid_band(rect, run.font_size);
     let window_left = rect.x0 - origin_tolerance(run.font_size);
-    let anchor = window_left.max(run.origin.0 - ANCHOR_TOLERANCE);
+    // P2.7.4: the anchor is compared against the grid's page-space character origins, so it
+    // must be composed. Using the text-space origin here reintroduced the mismatch for any
+    // translated `cm` even once `pair_run` was fixed.
+    let anchor = window_left.max(run.page_origin.0 - ANCHOR_TOLERANCE);
     let from = grid
         .chars
         .iter()
@@ -572,15 +575,21 @@ fn pair_run(
     let tol = origin_tolerance(run.font_size);
     // Every vertical comparison uses the **ink** baseline, not the pen: `Ts` moves the drawn
     // glyphs without moving the pen, so a superscript's pen sits below its own box (B-5).
-    let ink_y = run.baseline();
+    //
+    // P2.7.4: and every *positional* comparison here uses **page** space, because the boxes
+    // came from PDFium. Comparing a text-space origin to a page-space box silently failed to
+    // pair any run under a non-identity `cm` -- which refused scale, translation and flip, not
+    // just rotation.
+    let ink_y = run.page_baseline();
+    let origin_x = run.page_origin.0;
 
     let mut best: Option<Pair> = None;
     let mut best_key: Option<(bool, f32, f32, f32, bool)> = None;
     for (index, rect) in rects.iter().enumerate() {
         // `contains` uses the box grown by the tolerance, which absorbs the ink offset and a
         // small metric disagreement without reaching a neighbouring line.
-        let contains = run.origin.0 >= rect.x0 - tol
-            && run.origin.0 <= rect.x1 + tol
+        let contains = origin_x >= rect.x0 - tol
+            && origin_x <= rect.x1 + tol
             && ink_y >= rect.y0 - tol
             && ink_y <= rect.y1 + tol;
         if !contains {
@@ -603,8 +612,8 @@ fn pair_run(
         // 3.19pt past the bold box the line's earlier operation drew, which split the whole
         // tail of the line into singletons. Only when both boxes contain the origin equally
         // (a word box inside a line box) does the leftmost edge still decide, as before.
-        let overshoot = (rect.x0 - run.origin.0)
-            .max(run.origin.0 - rect.x1)
+        let overshoot = (rect.x0 - origin_x)
+            .max(origin_x - rect.x1)
             .max(rect.y0 - ink_y)
             .max(ink_y - rect.y1)
             .max(0.0);
@@ -638,9 +647,7 @@ fn pair_run(
     // unpaired case T21 names, and guessing would put the run's text on the wrong line.
     let mut nearest: Option<(f32, usize, f32)> = None;
     for (index, rect) in rects.iter().enumerate() {
-        let dx = (rect.x0 - run.origin.0)
-            .max(run.origin.0 - rect.x1)
-            .max(0.0);
+        let dx = (rect.x0 - origin_x).max(origin_x - rect.x1).max(0.0);
         let dy = (rect.y0 - ink_y).max(ink_y - rect.y1).max(0.0);
         let distance = dx + dy;
         if nearest.map_or(true, |(best, _, _)| distance < best) {
@@ -862,9 +869,9 @@ fn resync_straddled_op_spans(
         let Some(op_left) = (index..end)
             .find(|run_index| {
                 !runs[*run_index].text.trim().is_empty()
-                    && runs[*run_index].origin.0 >= rect.x0 - origin_tolerance(font_size)
+                    && runs[*run_index].page_origin.0 >= rect.x0 - origin_tolerance(font_size)
             })
-            .map(|run_index| runs[run_index].origin.0)
+            .map(|run_index| runs[run_index].page_origin.0)
         else {
             index = end;
             continue;
@@ -1479,7 +1486,13 @@ fn group_span(
         return Some(grid_span);
     }
     if metric_measurable && metric_complete {
-        return Some(metric_span);
+        // P2.7.4: `metric_span` is a **text-space** sum (font metrics at `font_size`), while
+        // the grid path above is **page space**. They coincide only under an identity CTM, so
+        // the fallback must be carried through the transform or a scaled run would compare a
+        // text-space budget against a page-space replacement. No uniform scale means no honest
+        // conversion; report unmeasurable rather than pick one.
+        let scale = runs[group.first].page_scale?;
+        return Some(metric_span * scale);
     }
     None
 }
@@ -2065,7 +2078,19 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
             (width, Some(base_font.clone()), Some(note.clone()))
         }
     };
-    if let Some(error) = width_refusal(request.old_width, new_width) {
+    // P2.7.4: `new_width` above is a **text-space** length (font metrics at `font_size`), and
+    // `request.old_width` is the run's quota in **page space**. Under a non-identity CTM they
+    // differ by exactly the run's scale factor, so comparing them unchanged would refuse every
+    // scaled run with two numbers that look like a measurement disagreement. Converting the
+    // replacement through the same matrix is the honest comparison. No uniform scale means no
+    // honest comparison at all, so the run refuses rather than pick a factor.
+    let scaled_new_width = match run.page_scale {
+        Some(scale) => new_width * scale,
+        None => {
+            return Err(refuse(Gate::FitsWidth));
+        }
+    };
+    if let Some(error) = width_refusal(request.old_width, scaled_new_width) {
         return Err(error);
     }
 
@@ -2429,6 +2454,12 @@ mod tests {
             font_key: font.as_bytes().to_vec(),
             operator: "Tj".to_string(),
             origin: (x, 700.0),
+            // Identity transform: page space and text space coincide, which is what these
+            // merge predicates have always assumed.
+            page_origin: (x, 700.0),
+            page_scale: Some(1.0),
+            advance_axis: (1.0, 0.0),
+            up_axis: (0.0, 1.0),
             font_size: size,
             advance: approximation,
             // The approximation doubles as the exact metric here, so a unit test that does not
@@ -3447,16 +3478,111 @@ mod tests {
         assert!(error.to_string().contains("rotated-text"), "{error}");
     }
 
-    /// The control for the test above: a `cm` that only translates leaves the run editable,
-    /// so the wider detection did not start refusing ordinary pages.
+    /// The control for the test above: a `cm` that only translates must not be refused as
+    /// rotated, so the wider detection did not start refusing ordinary pages.
+    ///
+    /// This test used to be named `..._stays_editable` and asserted only that the *font* gates
+    /// passed. That was true and irrelevant: the run was refused end-to-end as `run-mismatch`,
+    /// because `page_origin` was the text-space origin and never met PDFium's box. A test whose
+    /// name makes a claim its body never checks is worse than no test, so this one now asserts
+    /// the composition that actually decides editability. The end-to-end verdict is covered by
+    /// `a_translated_run_is_editable_end_to_end` in `tests/textedit_gates.rs`, which needs
+    /// PDFium and so cannot live here.
+    /// P2.7.4: the write path must compare a **page-space** replacement width against the
+    /// page-space quota. The replacement is measured by the font in text space, so under a
+    /// scale-2 CTM it needs doubling before the comparison; forgetting that accepts a
+    /// replacement twice as wide as the space it has to fit, which is silent corruption rather
+    /// than a refusal.
+    ///
+    /// The run is re-located from the document inside `edit`, so the scale must come from the
+    /// file's own `cm` and not from a field this test sets — otherwise the test would be
+    /// asserting against its own fixture rather than the code path.
     #[test]
-    fn a_run_translated_by_the_graphics_matrix_stays_editable() {
+    fn the_width_gate_compares_page_space_to_page_space() {
+        let measure = measure_fixed(10.0);
+        // `measure_fixed(10.0)` reports a flat 10pt, so the replacement is 10pt in text space
+        // and 20pt of page under a scale-2 `cm`. A 15pt quota separates the two.
+        let quota = 15.0;
+
+        let mut identity = testpdf::unrotated_text();
+        let plain =
+            textlocate::locate_runs(&identity, page_id(&identity, 0).unwrap()).unwrap()[0].clone();
+        assert_eq!(plain.page_scale, Some(1.0));
+        assert!(
+            edit(&mut identity, &request(&plain, "WWWW", quota, &measure)).is_ok(),
+            "10pt of text fits a 15pt quota, so the unscaled case must stay editable"
+        );
+
+        let mut scaled = testpdf::scaled_by_graphics_matrix(2.0);
+        let run =
+            textlocate::locate_runs(&scaled, page_id(&scaled, 0).unwrap()).unwrap()[0].clone();
+        assert_eq!(
+            run.page_scale,
+            Some(2.0),
+            "the fixture's cm must be seen as a uniform scale of 2"
+        );
+        let error = edit(&mut scaled, &request(&run, "WWWW", quota, &measure)).unwrap_err();
+        assert_eq!(
+            error.code(),
+            "TEXT_RUN_NOT_EDITABLE",
+            "20pt of page-space ink must not be accepted against a 15pt quota: {error}"
+        );
+    }
+
+    /// P2.7.4: when the char grid cannot locate a fragment, the quota falls back to in-file
+    /// font metrics — which are **text space**. A scaled run must have that fallback carried
+    /// into page space, or the gate compares a text-space budget to a page-space replacement.
+    ///
+    /// `group_span` needs no PDFium, so this covers the branch the end-to-end fixtures cannot:
+    /// they always have a grid, which is exactly why `metric_span * scale` survived a mutation
+    /// until this test existed.
+    #[test]
+    fn the_metric_fallback_is_scaled_into_page_space() {
+        let document = testpdf::unrotated_text();
+        let mut run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        run.page_scale = Some(3.0);
+
+        let group = RunGroup::new(0, 1);
+        // No pair means no grid span, so the in-file metric is the only measurable path.
+        let span = group_span(&document, 0, std::slice::from_ref(&run), &[None], &group)
+            .expect("Helvetica on a Type1 font has metrics");
+        let unscaled = measured_span(&document, 0, &run).expect("in-file metrics");
+        assert!(
+            (span - unscaled * 3.0).abs() < 1e-3,
+            "fallback span {span:.3}pt is not the text-space width {unscaled:.3}pt times the \
+             page scale 3.0; the units bug is back"
+        );
+
+        // No uniform scale means no honest conversion: report unmeasurable, never guess.
+        run.page_scale = None;
+        assert_eq!(
+            group_span(&document, 0, std::slice::from_ref(&run), &[None], &group),
+            None
+        );
+    }
+
+    #[test]
+    fn a_run_translated_by_the_graphics_matrix_is_not_refused_as_rotated() {
         let document = testpdf::translated_by_graphics_matrix();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         assert!(!run.rotated);
         let gates = resolve_gates(&document, 0, &run).unwrap();
-        assert!(font_admissibility(&gates).editable);
+        assert!(
+            !gates.rotated,
+            "a translating cm must not be refused as rotated"
+        );
+        assert!(
+            font_admissibility(&gates).editable,
+            "the font gates must still accept it: {:?}",
+            font_admissibility(&gates)
+        );
+
+        // The fixture's `cm` translates by `(100, 50)`; the pen is at `(72, 700)`. The page-space
+        // origin must reflect that, or pairing cannot find the ink PDFium drew.
+        assert_eq!(run.origin, (72.0, 700.0));
+        assert_eq!(run.page_origin, (172.0, 750.0));
     }
 
     /// The control for the refusal above: the same text in an axis-aligned matrix stays

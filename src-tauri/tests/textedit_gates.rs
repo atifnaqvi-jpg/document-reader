@@ -2765,3 +2765,214 @@ fn p2_8_maastricht_lecture_line_is_editable_in_its_own_fonts() {
         dash.admissibility
     );
 }
+
+// --- P2.7.4: text-space origin must be composed before meeting PDFium -------------
+
+/// The verdict a user actually sees, for a fixture written to a temp file.
+///
+/// Deliberately goes through `describe_runs` — the picker's own entry point — rather than
+/// calling the font gates directly. The test this replaces called `resolve_gates` and
+/// `font_admissibility` only, so it asserted a claim about the font gates while its name
+/// claimed the run was editable, and it passed throughout the period in which the run was
+/// refused end-to-end as `run-mismatch`.
+fn verdict_of(document: &mut lopdf::Document, name: &str) -> Vec<textedit::PageTextRun> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.pdf"));
+    document.save(&path).unwrap();
+    let reloaded = load(&path);
+    textedit::describe_runs(&reloaded, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0)).unwrap()
+}
+
+/// One page showing `ROTATED` at `Tm (72 700)` under `cm`.
+///
+/// Built here rather than reusing `testpdf` because that module is behind the `testfixtures`
+/// feature, and the gate runs plain `cargo test`: a test that needs a non-default feature is
+/// a test the gate can skip silently.
+fn transformed(cm: [f32; 6]) -> lopdf::Document {
+    use lopdf::dictionary;
+    let mut document = lopdf::Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
+    });
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let operations = vec![
+        lopdf::content::Operation::new("q", vec![]),
+        lopdf::content::Operation::new(
+            "cm",
+            cm.iter()
+                .map(|value| (*value).into())
+                .collect::<Vec<lopdf::Object>>(),
+        ),
+        lopdf::content::Operation::new("BT", vec![]),
+        lopdf::content::Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        lopdf::content::Operation::new(
+            "Tm",
+            vec![
+                1.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                72.into(),
+                700.into(),
+            ],
+        ),
+        lopdf::content::Operation::new("Tj", vec![lopdf::Object::string_literal("ROTATED")]),
+        lopdf::content::Operation::new("ET", vec![]),
+        lopdf::content::Operation::new("Q", vec![]),
+    ];
+    let body = lopdf::content::Content { operations };
+    let content_id = document.add_object(lopdf::Stream::new(
+        lopdf::Dictionary::new(),
+        body.encode().unwrap(),
+    ));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        lopdf::Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document
+}
+
+/// A `cm` that only translates moves the ink without rotating or scaling it. It must be
+/// **editable end-to-end**, not merely pass the font gates.
+///
+/// `RawRun::origin` is text-space; PDFium's box is page-space. For this fixture they differ by
+/// `(100, 50)`, so before P2.7.4 the run paired with no box and `describe_single` refused it
+/// `run-mismatch` — while a test named `a_run_translated_by_the_graphics_matrix_stays_editable`
+/// asserted the opposite of what the user saw.
+#[test]
+fn a_translated_run_is_editable_end_to_end() {
+    if !pdfium_ready() {
+        return;
+    }
+    let mut document = transformed([1.0, 0.0, 0.0, 1.0, 100.0, 50.0]);
+    let runs = verdict_of(&mut document, "translated");
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert!(
+        run.rect.is_some(),
+        "the composed origin must find the box PDFium drew; got verdict {:?}",
+        run.admissibility
+    );
+    assert!(
+        run.admissibility.editable,
+        "a translating cm is not a rotation and must not be refused: {:?}",
+        run.admissibility
+    );
+}
+
+/// The same, for **scale** — the case the rotation gate never covered at all.
+///
+/// `rotated` is false for both factors, so nothing in H0 or T-7 ever looked at them. Both
+/// refused `run-mismatch` before P2.7.4. The two factors are the point: 2.0 and 0.5 differ by
+/// 4×, so a width gate that mixes text-space and page-space widths fails on one of them
+/// whatever constant it hard-codes.
+#[test]
+fn a_scaled_run_is_editable_end_to_end_at_any_factor() {
+    if !pdfium_ready() {
+        return;
+    }
+    for factor in [2.0_f32, 0.5] {
+        let mut document = transformed([factor, 0.0, 0.0, factor, 0.0, 0.0]);
+        let runs = verdict_of(&mut document, "scaled");
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert!(
+            run.admissibility.editable,
+            "scale {factor}: transform is not rotation; got {:?}",
+            run.admissibility
+        );
+        let width = run.width.expect("an editable run needs a measured width");
+        // The quota is page space, so it must track the factor rather than stay 114.67.
+        let expected = 114.672 * factor;
+        assert!(
+            (width - expected).abs() < expected * 0.05,
+            "scale {factor}: quota {width:.2}pt is not page-space advance {expected:.2}pt; \
+             a text-space width leaking through is exactly the units bug this guards"
+        );
+    }
+}
+
+/// The composed origin must equal where PDFium actually drew the ink, not merely be
+/// plausible. This is the assertion that fails if the composition is reverted.
+#[test]
+fn the_composed_origin_lands_on_pdfiums_first_character() {
+    if !pdfium_ready() {
+        return;
+    }
+    for (name, mut document) in [
+        ("translated", transformed([1.0, 0.0, 0.0, 1.0, 100.0, 50.0])),
+        ("rotated", transformed([0.0, 1.0, -1.0, 0.0, 300.0, 100.0])),
+        ("scaled", transformed([2.0, 0.0, 0.0, 2.0, 0.0, 0.0])),
+        ("identity", transformed([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{name}.pdf"));
+        document.save(&path).unwrap();
+        let reloaded = load(&path);
+        let page = textlocate::page_id(&reloaded, 0).unwrap();
+        let run = &textlocate::locate_runs(&reloaded, page).unwrap()[0];
+        let grid = char_grid(&path, 0);
+        let first = grid.chars.first().expect("the grid must see the text");
+
+        let dx = run.page_origin.0 - first.origin_x;
+        let dy = run.page_origin.1 - first.origin_y;
+        assert!(
+            dx.abs() < 1.0 && dy.abs() < 1.0,
+            "{name}: composed origin ({:.2},{:.2}) is {:.2}pt from PDFium's ink ({:.2},{:.2}); \
+             a reverted composition shows the uncomposed text-space origin here",
+            run.page_origin.0,
+            run.page_origin.1,
+            (dx * dx + dy * dy).sqrt(),
+            first.origin_x,
+            first.origin_y
+        );
+    }
+}
+
+/// The unrotated path is the regression proof for the whole phase: `dot(p, (1,0)) == p.x`,
+/// so composing must not move anything when the CTM is the identity.
+#[test]
+fn an_untransformed_run_keeps_its_origin_exactly() {
+    if !pdfium_ready() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("identity.pdf");
+    transformed([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        .save(&path)
+        .unwrap();
+    let document = load(&path);
+    let page = textlocate::page_id(&document, 0).unwrap();
+    let run = &textlocate::locate_runs(&document, page).unwrap()[0];
+
+    assert_eq!(run.origin, (72.0, 700.0));
+    assert_eq!(
+        run.page_origin, run.origin,
+        "with an identity CTM the composed origin must be the text-space origin"
+    );
+    assert_eq!(run.page_scale, Some(1.0));
+    assert_eq!(run.advance_axis, (1.0, 0.0));
+    assert_eq!(run.up_axis, (0.0, 1.0));
+}

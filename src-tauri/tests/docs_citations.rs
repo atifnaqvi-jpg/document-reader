@@ -172,8 +172,9 @@ fn cited_paths(text: &str) -> Citations {
 
 /// The documents that make claims about the shipped body and the programme: the phase contract,
 /// the audit that supersedes the plan, the plan itself, and the review whose §A is the record.
-const GOVERNED_DOCS: [&str; 5] = [
+const GOVERNED_DOCS: [&str; 6] = [
     "docs/P2.7.1-mcid-DESIGN.md",
+    "docs/P2.7.4-transform-DESIGN.md",
     "docs/P2.7.3-xobject-DESIGN.md",
     "docs/P2.7-STOCK-TAKE.md",
     "docs/P2.7-REVIEW-OPEN-QUESTIONS.md",

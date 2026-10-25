@@ -133,6 +133,36 @@ pub struct RawRun {
     /// merging must compare the **ink** baseline, which is `origin.1 + rise`, or a superscript
     /// pairs to the box below the one it is drawn in.
     pub rise: f32,
+    /// The run's origin in **page space**, i.e. the text-space origin composed with the CTM
+    /// (P2.7.4).
+    ///
+    /// [`Self::origin`] is the text-space pen position: it is what `Td`/`T*`/`TJ` arithmetic
+    /// advances, and comparing one run's `origin` to another's cancels any transform, so those
+    /// comparisons stay in text space. But PDFium reports ink in page space, so every
+    /// comparison *across the lopdf/PDFium boundary* must use this. Before it existed,
+    /// `pair_run` compared a text-space point to a page-space box, and any text under a
+    /// non-identity `cm` — scale, translation, flip, not just rotation — failed to pair and was
+    /// refused `run-mismatch`.
+    pub page_origin: (f32, f32),
+
+    /// The composed matrix's uniform scale factor, `sqrt(|det(tm x ctm)|)`, and whether that
+    /// scale is uniform (P2.7.4).
+    ///
+    /// [`Self::advance`] is a **text-space** length; a PDFium box is **page space**. They
+    /// differ by exactly this factor, so the width gate must apply it to whichever side it
+    /// converts. `None` when the axes scale differently (anisotropy): there is no single
+    /// honest width then, and the run refuses rather than guess.
+    pub page_scale: Option<f32>,
+
+    /// Unit vectors of the composed matrix's two axes, in page space: where one unit of text
+    /// advance points, and where the glyph "up" direction points (P2.7.4).
+    ///
+    /// For an untransformed page these are `(1, 0)` and `(0, 1)`, so every formula written in
+    /// terms of them reduces to today's. They exist so a rise, a span or a seam can be carried
+    /// through the transform rather than assumed horizontal.
+    pub advance_axis: (f32, f32),
+    pub up_axis: (f32, f32),
+
     /// True when the text matrix was not axis-aligned (P2.7 hotfix H0).
     ///
     /// [`Self::advance`] is measured along the text axis. For a rotated run that axis is not
@@ -180,6 +210,15 @@ impl RawRun {
     /// draws 5pt above its pen, so comparing pen positions would place it on the wrong line.
     pub fn baseline(&self) -> f32 {
         self.origin.1 + self.rise
+    }
+
+    /// The **page-space** ink baseline, for comparing against PDFium (P2.7.4).
+    ///
+    /// The transform moves the ink along its own "up" direction, so `Ts` cannot simply be
+    /// added to `page_origin.1`; the rise must be carried through the matrix like any other
+    /// text-space offset. For the identity CTM this equals [`Self::baseline`].
+    pub fn page_baseline(&self) -> f32 {
+        self.page_origin.1 + self.rise * self.up_axis.1
     }
 
     /// The innermost `MCID` this run sits in, if any.
@@ -813,6 +852,11 @@ fn walk_level<'a>(
                 .map(|(_, origin)| *origin)
                 .unwrap_or_else(|| walker.origin());
             let advance_exact = metrics.advance(&text, walker.size);
+            // P2.7.4: the same origin, carried into page space. `origin` stays in text space
+            // because `Td`/`TJ` arithmetic and every run-to-run comparison live there; this is
+            // only for comparing against PDFium, which knows nothing of text space.
+            let page_origin = walker.to_page(origin.0, origin.1);
+            let (advance_axis, up_axis, page_scale) = walker.axes();
 
             runs.push(RawRun {
                 id: RunId {
@@ -825,6 +869,10 @@ fn walk_level<'a>(
                 font_key: font_key.clone(),
                 operator: operation.operator.clone(),
                 origin,
+                page_origin,
+                page_scale,
+                advance_axis,
+                up_axis,
                 font_size: walker.size,
                 advance: spaced_advance(&metrics, &text, walker),
                 advance_exact: advance_exact.map(|width| spaced_width(width, &text, walker)),
@@ -885,6 +933,10 @@ fn placeholder_run(
         font_key: Vec::new(),
         operator: "Do".to_string(),
         origin: (0.0, 0.0),
+        page_origin: (0.0, 0.0),
+        page_scale: Some(1.0),
+        advance_axis: (1.0, 0.0),
+        up_axis: (0.0, 1.0),
         font_size: 0.0,
         advance: 0.0,
         advance_exact: None,
@@ -1196,6 +1248,60 @@ impl TextMatrixWalk {
     /// The translation component of the current text matrix.
     fn origin(&self) -> (f32, f32) {
         (self.tm[4], self.tm[5])
+    }
+
+    /// The composed text-to-page matrix, `tm x ctm` (P2.7.4).
+    ///
+    /// This is the matrix the renderer actually draws through. Everything that crosses into
+    /// page space — the composed origin, the advance axis, the scale factor — is derived from
+    /// it, so all of them agree with each other and with PDFium by construction.
+    fn composed(&self) -> [f32; 6] {
+        matrix_mul(self.tm, self.ctm)
+    }
+
+    /// A text-space point carried into page space by the **CTM**.
+    ///
+    /// Deliberately *not* the composed matrix: [`Self::origin`] is `tm`'s translation column,
+    /// so it is already the point `(0, 0)` mapped through `Tm`. Composing it again with `tm`
+    /// applies that translation twice — which reads on an untransformed page as an origin
+    /// displaced by exactly its own coordinates. `Tm`'s scaling reaches the page through
+    /// [`Self::axes`], which is where the full product belongs.
+    fn to_page(&self, x: f32, y: f32) -> (f32, f32) {
+        let m = self.ctm;
+        (x * m[0] + y * m[2] + m[4], x * m[1] + y * m[3] + m[5])
+    }
+
+    /// Unit vectors of the composed matrix's advance and "up" axes, in page space, plus its
+    /// uniform scale factor (P2.7.4).
+    ///
+    /// `scale` is `None` when the two axes scale differently, because then no single number
+    /// converts a text-space length to a page-space length and the width gate has nothing
+    /// honest to compare.
+    fn axes(&self) -> ((f32, f32), (f32, f32), Option<f32>) {
+        let m = self.composed();
+        let unit = |x: f32, y: f32| {
+            let length = (x * x + y * y).sqrt();
+            if length > f32::EPSILON {
+                (x / length, y / length)
+            } else {
+                // A degenerate matrix collapses text to a point; there is no axis. Report the
+                // untransformed one so callers divide by something, and let `scale` be `None`
+                // so nothing is measured through it.
+                (1.0, 0.0)
+            }
+        };
+        let advance = unit(m[0], m[1]);
+        let up = unit(m[2], m[3]);
+        let advance_scale = (m[0] * m[0] + m[1] * m[1]).sqrt();
+        let up_scale = (m[2] * m[2] + m[3] * m[3]).sqrt();
+        let uniform =
+            (advance_scale - up_scale).abs() <= 1e-3 * advance_scale.max(up_scale).max(1.0);
+        let scale = if uniform && advance_scale > f32::EPSILON {
+            Some(advance_scale)
+        } else {
+            None
+        };
+        (advance, up, scale)
     }
 
     /// The text rise (`Ts`) in force, in points.
