@@ -3089,6 +3089,54 @@ mod tests {
         );
     }
 
+    /// The window's **near-edge** boundary, in the one geometry that separates it from the
+    /// far-edge one (P2.7.4).
+    ///
+    /// A box-bound character belongs to the object while it *starts* before the box's far
+    /// edge. Testing its far edge instead drops every glyph that straddles the boundary, and
+    /// because PDFium's box stops at the text's advance a run's own last glyph straddles it
+    /// whenever the next character follows in the grid. That is why the defect shortened
+    /// every line by one glyph.
+    ///
+    /// The fixture is built so only the near edge can work: the box is 109.0 wide, the
+    /// straddling character starts at 108.5 and ends at 117.5. Its *origin* is inside the
+    /// box plus tolerance; its *far edge* is not. Measured on the real brochure, 132
+    /// window extensions occur across 199 objects, so this is the common case, not a corner.
+    #[test]
+    fn the_window_admits_a_glyph_that_starts_inside_the_box() {
+        let mut chars = Vec::new();
+        let mut x = 46.0_f32;
+        for ch in "Data".chars() {
+            chars.push(grid_char(ch, x, 9.0, 700.0, false));
+            x += 9.0;
+        }
+        // 46 + 36 = 82; these two straddle the box edge at 109.
+        chars.push(grid_char('S', 82.0, 9.0, 700.0, false));
+        chars.push(grid_char('c', 91.0, 17.5, 700.0, false));
+        // Starts inside the box (108.5 < 109), ends outside it (117.5 > 109).
+        chars.push(grid_char('i', 108.5, 9.0, 700.0, false));
+        let grid = crate::editor::runmetrics::PdfiumCharGrid {
+            text: "DataSci".to_string(),
+            chars,
+        };
+
+        // The object's own text is a **prefix**: the trailing character is claimed by the
+        // window's extension, which is the code path the boundary belongs to. A box whose
+        // text already matches every grid character never reaches it and tests nothing.
+        let mut rect = test_box("DataSc", 46.0);
+        rect.font_size = 15.0;
+        rect.x1 = 109.0;
+
+        let window = object_window(&rect, &grid, RunFrame::PAGE)
+            .expect("the object's text locates in the grid");
+        assert_eq!(
+            window,
+            (0, 6),
+            "the character starting at 108.5 is inside a box ending at 109.0; \
+             rejecting it is the far-edge bug that dropped the last glyph of every line"
+        );
+    }
+
     /// Builds one box per run, sized to that run's **own** measured span (P2.4.2 T22), so a
     /// group test that is not about box-vs-span sees ordinary, non-suspicious boxes. Text is
     /// space-free so the widened O-Chain-2 gap never applies.
