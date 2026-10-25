@@ -3587,15 +3587,21 @@ mod tests {
 
     /// The control for the refusal above: the same text in an axis-aligned matrix stays
     /// editable, so H0 did not make ordinary pages refuse.
+    ///
+    /// The edit itself is what decides that, so the edit is what this asserts. Checking only
+    /// `font_admissibility` would restate the fixture rather than the outcome: the run could be
+    /// refused for a transform reason and this test would still pass.
     #[test]
     fn an_axis_aligned_run_stays_editable() {
-        let document = testpdf::unrotated_text();
+        let mut document = testpdf::unrotated_text();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
         assert!(!run.rotated);
-
-        let gates = resolve_gates(&document, 0, &run).unwrap();
-        assert!(font_admissibility(&gates).editable);
+        let measure = measure_fixed(10.0);
+        assert!(
+            edit(&mut document, &request(&run, "EDITED", 200.0, &measure)).is_ok(),
+            "an axis-aligned run must remain editable"
+        );
     }
 
     #[test]
