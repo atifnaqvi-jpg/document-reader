@@ -114,6 +114,20 @@ The lesson recorded here is narrower than "bump earlier": a version assigned to 
 has not shipped is a reservation, not a fact. When a later phase ships first, the reserved
 number is spent and the earlier phase needs a new one.
 
+### Build status
+
+**Built, not published, not yet accepted.** Per Q9 this phase stays `[~]` until the installer
+has been hand-tested.
+
+- Gate: CI run `40244724597` on `cb8693e` — all three jobs green. Linux `432 passed / 71
+  ignored`, Windows `502 passed / 0 ignored`.
+- Installer: run `40244727545` (workflow_dispatch, so artifact only — no tag, no release).
+  `Document Reader_0.8.1_x64-setup.exe`, 7,824,005 bytes, SHA-256
+  `7a20148667a2eff36231c6e2bedd442866a70d5325892e2d122f21a3c2be0a17`, artifact `12618531386`.
+- Payload measured, not assumed: `document-reader.exe` 20,630,528 bytes and `pdfium.dll`
+  7,380,992 bytes, both `machine 0x8664`, both PE32+. The version resource reports `0.8.1`.
+  (The NSIS stub itself is x86, which is normal and unrelated to the payload.)
+
 ---
 
 ## 0.8.0
