@@ -24,22 +24,9 @@ fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     path
 }
 
-/// PDFium-guarded: without the library there is nothing to verify against, and a silent
-/// pass would be worse than a skip (CI asserts the skip count is zero on Windows).
-fn pdfium_ready() -> bool {
-    if !PdfProvider::pdfium_available() {
-        eprintln!("skipping: PDFium not available on this machine");
-        return false;
-    }
-    true
-}
-
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_watermarked_document_still_opens_and_renders_in_pdfium() {
-    if !pdfium_ready() {
-        return;
-    }
-
     let mut document = lopdf::Document::load_mem(&sample()).unwrap();
     let stamped = watermark(&mut document, "DRAFT").unwrap();
     assert_eq!(stamped, 2, "every page is stamped");
@@ -60,11 +47,8 @@ fn a_watermarked_document_still_opens_and_renders_in_pdfium() {
 }
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_watermark_is_centred_on_the_page() {
-    if !pdfium_ready() {
-        return;
-    }
-
     // The watermark used to be placed at `(width * 0.15, height * 0.15)` -- 15% in from
     // the bottom-left corner, which is what the user saw. Proving it is now centred needs
     // the rendered pixels: the content stream's own numbers only say where the text was
@@ -121,11 +105,8 @@ fn a_watermark_is_centred_on_the_page() {
 }
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn watermarking_twice_still_produces_a_renderable_document() {
-    if !pdfium_ready() {
-        return;
-    }
-
     // Guards the content-array append: a second pass must add another stream rather than
     // overwrite the first, and the page must still render.
     let mut document = lopdf::Document::load_mem(&sample()).unwrap();
@@ -141,11 +122,8 @@ fn watermarking_twice_still_produces_a_renderable_document() {
 }
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn flattening_removes_the_annotation_objects_but_keeps_the_page_renderable() {
-    if !pdfium_ready() {
-        return;
-    }
-
     // Flatten on a document with no annotations is the degenerate case, and it must not
     // disturb the pages: it is the shape the UI hits when the user exports an unannotated
     // file.
@@ -163,11 +141,8 @@ fn flattening_removes_the_annotation_objects_but_keeps_the_page_renderable() {
 }
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn flattening_bakes_real_annotations_so_they_no_longer_exist_as_objects() {
-    if !pdfium_ready() {
-        return;
-    }
-
     use document_reader_lib::editor::annotate::apply_annotations;
     use document_reader_lib::model::{Annotation, AnnotationKind};
 
@@ -215,11 +190,8 @@ fn flattening_bakes_real_annotations_so_they_no_longer_exist_as_objects() {
 }
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn flattening_with_a_watermark_applies_both() {
-    if !pdfium_ready() {
-        return;
-    }
-
     let (bytes, _) = export_with_flatten(&sample(), &[], Some("CONFIDENTIAL")).unwrap();
     let path = write_temp("flattened-watermarked.pdf", &bytes);
 
@@ -230,11 +202,8 @@ fn flattening_with_a_watermark_applies_both() {
 }
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn page_png_exports_a_real_png() {
-    if !pdfium_ready() {
-        return;
-    }
-
     let path = write_temp("for-png.pdf", &sample());
     let png = page_png(&path, 0, 1.0).unwrap();
 

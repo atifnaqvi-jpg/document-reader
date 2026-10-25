@@ -82,20 +82,38 @@ jobs:
 
       # A skipped suite looks exactly like a passing one. This is the check that tells
       # them apart, so it is worth failing the release over.
+      #
+      # `--include-ignored` because PDFium-gated tests carry `#[ignore]`: without it this
+      # step would skip 69 tests and the only evidence they ran is that they said nothing.
+      # The count comes from libtest's own summary rather than a grep for a skip message,
+      # which libtest captures for passing tests and so can never match.
       - name: Assert the PDFium tests actually ran
         working-directory: src-tauri
         env:
           PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
         shell: pwsh
         run: |
-          $output = cargo test 2>&1 | Out-String
+          $output = cargo test -- --include-ignored 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { Write-Output $output; exit $LASTEXITCODE }
-          $skipped = ([regex]::Matches($output, "skipping: PDFium")).Count
-          if ($skipped -gt 0) {
-            Write-Error "PDFium tests skipped ($skipped) despite PDFium being fetched; the installer would ship unvalidated"
+
+          $ignored = 0
+          foreach ($match in [regex]::Matches($output, "(\d+) ignored")) {
+            $ignored += [int]$match.Groups[1].Value
+          }
+          if ($ignored -gt 0) {
+            Write-Error "PDFium tests were ignored ($ignored) despite --include-ignored; the installer would ship unvalidated"
             exit 1
           }
-          Write-Output "PDFium tests ran (0 skips)."
+
+          $passed = 0
+          foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
+            $passed += [int]$match.Groups[1].Value
+          }
+          if ($passed -lt 400) {
+            Write-Error "Only $passed tests ran; expected the full suite"
+            exit 1
+          }
+          Write-Output "PDFium tests ran: $passed passed, 0 ignored."
 
       - name: Build installer
         run: npm run tauri build

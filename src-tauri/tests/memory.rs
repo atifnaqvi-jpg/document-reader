@@ -43,11 +43,8 @@ const CACHE_BUDGET: usize = 1024 * 1024;
 const SCALE: f32 = 1.0;
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn reading_a_large_document_keeps_the_render_cache_within_its_budget() {
-    if support::skip_without_pdfium() {
-        return;
-    }
-
     let path = support::write_large_pdf("large-memory.pdf", PAGES);
     let content_hash = document_reader_lib::library::hash_file(&path).unwrap();
 
@@ -120,10 +117,8 @@ fn reading_a_large_document_keeps_the_render_cache_within_its_budget() {
 const RSS_PAGES: u32 = 120;
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn resident_memory_does_not_grow_with_the_number_of_pages_read() {
-    if support::skip_without_pdfium() {
-        return;
-    }
     let Some(_) = support::resident_bytes() else {
         eprintln!("skipping: resident memory is not readable on this platform");
         return;
@@ -178,11 +173,8 @@ fn resident_memory_does_not_grow_with_the_number_of_pages_read() {
 }
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn the_fixture_generator_produces_a_pdf_pdfium_can_count() {
-    if support::skip_without_pdfium() {
-        return;
-    }
-
     // Guards the generator itself: if it quietly produced a malformed file, the two
     // memory tests above would fail on a page count mismatch and send someone chasing a
     // rendering bug instead of a test-support one.

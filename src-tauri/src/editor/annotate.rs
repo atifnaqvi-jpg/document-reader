@@ -816,13 +816,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn a_saved_document_reopens_in_pdfium_with_the_annotation_on_the_right_page() {
         use crate::provider::PdfProvider;
-
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
 
         // P2 §7 item 4: annotate -> save -> re-open -> annotations present. Every test
         // above reads the result back with *lopdf*, which is the same library that wrote

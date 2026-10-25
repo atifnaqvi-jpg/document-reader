@@ -159,7 +159,6 @@ mod tests {
     use super::*;
     use crate::db::search;
     use crate::index::IndexState;
-    use crate::provider::PdfProvider;
 
     fn fixture(name: &str) -> String {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -205,12 +204,8 @@ mod tests {
     /// PDFium-dependent: indexes the real fixture through PDFium and checks the text
     /// layer landed in FTS5.
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn indexes_a_pdf_fixture_through_pdfium_into_the_search_index() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let (db, render, service) = setup();
         let entry = db
             .with(|connection| {
@@ -236,12 +231,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn a_completed_run_records_a_done_status() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let (db, render, service) = setup();
         let entry = db
             .with(|connection| {
@@ -257,12 +248,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn re_indexing_the_same_pdf_is_idempotent() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let (db, render, service) = setup();
         let entry = db
             .with(|connection| {

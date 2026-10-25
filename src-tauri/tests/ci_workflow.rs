@@ -15,7 +15,7 @@
 //! release branch mid-flight. The pin has to agree between CI and `rust-toolchain.toml`, or a
 //! local `cargo fmt --check` proves nothing about what CI will say.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -154,5 +154,165 @@ fn the_toolchain_is_pinned_and_the_pin_agrees() {
         pins.contains(&channel),
         "CI pins {pins:?} but rust-toolchain.toml pins {channel:?}; a local \
          `cargo fmt --check` would then prove nothing about CI"
+    );
+}
+
+/// A test that reports `ok` without running is worse than no test: the summary cannot tell it
+/// apart from a pass. `tests/textedit_gates.rs` used to open 33 of 60 tests with
+/// `if !pdfium_ready() { return; }`, which printed a line to *captured* output and then
+/// asserted nothing, so the suite said `60 passed; 0 failed; 0 ignored` in a twentieth of its
+/// real runtime. A harness that reports work it did not do is the most dangerous kind of
+/// green, because every later measurement is taken through it.
+///
+/// `#[ignore]` was the ruling: it converts an unreported omission into a counted one. This
+/// test is the other half -- it fails if a skip arm is reintroduced, so the counting cannot
+/// quietly stop. It matches the *shape* of a skip (a helper that greps availability and
+/// returns early) rather than one file, because the defect is the shape, not the name.
+/// Every `fn` carrying `#[test]`, with its attributes and brace-matched body.
+fn test_functions(text: &str) -> Vec<(String, String, String)> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut cursor = 0;
+    while let Some(offset) = text[cursor..].find("#[test]") {
+        let start = cursor + offset;
+        let Some(fn_at) = text[start..].find("fn ") else {
+            break;
+        };
+        let fn_at = start + fn_at;
+        let name_start = fn_at + 3;
+        let name_end = text[name_start..]
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map(|i| name_start + i)
+            .unwrap_or(text.len());
+        let Some(brace) = text[name_end..].find('{') else {
+            break;
+        };
+        let mut depth = 0usize;
+        let mut index = name_end + brace;
+        let end = loop {
+            match bytes[index] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break index;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+            if index >= bytes.len() {
+                break bytes.len() - 1;
+            }
+        };
+        found.push((
+            text[name_start..name_end].to_string(),
+            text[start..start + (fn_at - start)].to_string(),
+            text[name_end + brace..=end].to_string(),
+        ));
+        cursor = end;
+    }
+    found
+}
+
+#[test]
+fn no_test_skips_itself_instead_of_being_ignored() {
+    fn sources(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(sources(&path));
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for root in ["src", "tests"] {
+        for path in sources(&manifest.join(root)) {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (name, attrs, body) in test_functions(&text) {
+                if attrs.contains("#[ignore") {
+                    continue;
+                }
+                // The tell is an early `return` guarded by an availability probe. Matching the
+                // body rather than the raw file keeps this detector from finding its own text.
+                let skips = body.lines().any(|line| {
+                    line.contains("if !")
+                        && (line.contains("pdfium_available()") || line.contains("pdfium_ready()"))
+                }) && body.contains("return;");
+                if skips {
+                    offenders.push(format!(
+                        "{}: {name}",
+                        path.strip_prefix(&manifest).unwrap_or(&path).display()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these tests skip their own body instead of carrying `#[ignore]`, so a green suite \
+         cannot tell that they never ran: {offenders:#?}"
+    );
+}
+
+/// The Windows job exists because it is the only one that can load PDFium. That makes its
+/// assertion the only evidence the gated tests ran at all, so the assertion has to be
+/// capable of failing. The previous version was not: it grepped plain `cargo test` output
+/// for "skipping: PDFium", but libtest captures the stdout of passing tests, so the string
+/// never reached the log and the check passed unconditionally.
+#[test]
+fn the_windows_job_asks_for_ignored_tests_and_counts_them() {
+    let text = ci_workflow();
+
+    assert!(
+        text.contains("cargo test -- --include-ignored"),
+        "the Windows job must run the `#[ignore]`d PDFium tests, not skip them"
+    );
+    assert!(
+        !text.contains(r#"Matches($output, "skipping: PDFium")"#),
+        "the captured-stdout grep cannot match in a passing suite; count libtest's `ignored` instead"
+    );
+    let assertion = text
+        .split("- name: Assert the PDFium tests actually ran")
+        .nth(1)
+        .expect("the Windows job must assert the PDFium tests ran");
+    assert!(
+        assertion.contains("ignored") && assertion.contains("if ($ignored -gt 0)"),
+        "the assertion must fail when tests were ignored, using libtest's own count"
+    );
+}
+
+/// The Linux job cannot load PDFium, so its gated tests stay ignored -- which is why a skip
+/// arm must not reappear there, and why the count is asserted rather than trusted. Both
+/// halves of that argument have failed in this repository before: guards that skipped
+/// silently, and a CI check that could never fail.
+#[test]
+fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
+    let text = ci_workflow();
+    let tests_step = text
+        .split("- name: Tests")
+        .nth(1)
+        .expect("the Linux job must run the tests");
+    let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
+
+    assert!(
+        !tests_step.contains("--include-ignored"),
+        "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
+    );
+    assert!(
+        tests_step.contains("ignored") && tests_step.contains("ne 70"),
+        "the Linux job must assert exactly the 70 known-ignored tests"
     );
 }

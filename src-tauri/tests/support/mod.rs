@@ -108,16 +108,6 @@ pub fn pdfium_available() -> bool {
     document_reader_lib::provider::PdfProvider::pdfium_available()
 }
 
-/// Skips the calling test's body when PDFium is missing. Returns `true` if the caller
-/// should return early.
-pub fn skip_without_pdfium() -> bool {
-    if pdfium_available() {
-        return false;
-    }
-    eprintln!("skipping: PDFium not available on this machine");
-    true
-}
-
 /// Current resident set size in bytes, or `None` where it cannot be read.
 ///
 /// Linux only: `/proc/self/statm` is exact and dependency-free. Windows CI cannot report

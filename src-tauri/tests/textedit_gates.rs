@@ -63,17 +63,6 @@ fn load(path: &Path) -> lopdf::Document {
     lopdf::Document::load(path).unwrap_or_else(|e| panic!("could not load {}: {e}", path.display()))
 }
 
-/// True when PDFium is present, so the metric-dependent gates can be skipped rather than
-/// failing on a machine without the native library. CI asserts the skip count is zero on
-/// Windows; locally (aarch64 Linux) the arm64 build is loaded via `PDFIUM_LIBRARY_PATH`.
-fn pdfium_ready() -> bool {
-    if support::pdfium_available() {
-        return true;
-    }
-    eprintln!("skipping: PDFium not available on this machine");
-    false
-}
-
 fn pdfium_runs(path: &Path, page: u32) -> Vec<PdfiumRun> {
     runmetrics::extract_runs(path, page, None).expect("PDFium run extraction failed")
 }
@@ -499,10 +488,8 @@ fn too_wide_is_refused_by_gate_d_with_both_widths() {
 /// The PDFium-measured version: the widths the gate compares come from real metrics, not
 /// constants, and the measured replacement really does overflow the narrow run.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn measured_widths_refuse_a_genuinely_wider_replacement() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("too-wide.pdf");
     let runs = pdfium_runs(&path, 0);
     let run = runs.iter().find(|run| run.text == "HI").expect("HI run");
@@ -554,10 +541,8 @@ fn bomb_is_refused_as_content_too_large() {
 // --- F2: multi-stream page -----------------------------------------------------
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_multi_stream_page_edits_and_stays_renderable() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("multi-stream-page.pdf");
     let mut document = load(&path);
 
@@ -598,13 +583,11 @@ fn encrypted_documents_refuse_every_edit() {
 // --- T8: decrypt a copy --------------------------------------------------------
 
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn decrypt_copy_writes_an_unprotected_file() {
     // The page count below goes through PDFium, so this needs the same guard as its
     // siblings. It was written during the window when `ci.yml` did not trigger for this
     // branch, so its absence only surfaced when the gate was widened.
-    if !pdfium_ready() {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let original = dir.path().join("secret.pdf");
     let original_bytes = std::fs::read(fixture("encrypted-aes.pdf")).unwrap();
@@ -637,10 +620,8 @@ fn decrypt_copy_writes_an_unprotected_file() {
 /// The picker's list pairs lopdf addresses with PDFium geometry, and precomputes the
 /// verdict: an editable run has a rect and a width, and a refused run carries its gate.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("simple-winansi.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -685,10 +666,8 @@ fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
 /// each fragment's origin falls inside that box, and T18 then merges the five into ONE picker
 /// entry with one width.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn fragmented_tj_fragments_pair_by_origin_not_text() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("fragmented-tj.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -761,10 +740,8 @@ fn fragmented_tj_fragments_pair_by_origin_not_text() {
 /// a point apart. A merger that ignored the font or the size would weld them into one run that
 /// no single font could re-encode. They must stay two entries, each merged internally.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn fragments_never_merge_across_a_font_or_a_size() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("fragmented-mixed-fonts.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -798,10 +775,8 @@ fn fragments_never_merge_across_a_font_or_a_size() {
 /// is that union's advance — not any one glyph's — and a replacement longer than the union must
 /// be refused with both numbers.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn merged_width_refusal_quotes_both_widths() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("fragmented-wider-merged.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -847,10 +822,8 @@ fn merged_width_refusal_quotes_both_widths() {
 /// The head fragment takes the replacement, the four tail fragments are cleared, the `TJ`
 /// numbers between them are left alone, and a single undo restores all five originals.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_merged_edit_is_one_atomic_write_and_one_undo() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("fragmented-tj.pdf");
     let described = {
         let document = load(&path);
@@ -909,10 +882,8 @@ fn a_merged_edit_is_one_atomic_write_and_one_undo() {
 
 /// §5 `fragmented-unpairable.pdf`: T21 — the refusal names the missing box.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn an_unpaired_run_refuses_naming_the_missing_box() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("fragmented-unpairable.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -960,10 +931,8 @@ fn an_unpaired_run_refuses_naming_the_missing_box() {
 /// The picker's rect is in the same PDF-point space as annotations, so the overlay can
 /// reuse the geometry converter rather than inventing a second coordinate path.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_run_rect_converts_through_the_shared_geometry() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("simple-winansi.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -990,10 +959,8 @@ fn a_run_rect_converts_through_the_shared_geometry() {
 /// `1.5em` gap away — a chain break. With the program's own `hmtx` metrics the gap is zero and the
 /// line is one run (P2.4.2 Phase A).
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn chain_break_orphan_merges_once_exact_metrics_run() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("chain-break-orphan.pdf");
     let document = load(&path);
 
@@ -1040,10 +1007,8 @@ fn chain_break_orphan_merges_once_exact_metrics_run() {
 /// §3 `space-kern-gap.pdf`: an inter-word gap carried as kerning merges when, and only when,
 /// PDFium's reconstructed text shows the space (P2.4.2 O-Chain-2).
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn space_kern_gap_merges_a_kerned_word_break() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("space-kern-gap.pdf");
     let runs = pdfium_runs(&path, 0);
     // PDFium reconstructs the space the producer carried as kerning; without that signal the
@@ -1077,10 +1042,8 @@ fn space_kern_gap_merges_a_kerned_word_break() {
 /// reads as a word space is still **editable**. The display text gains the separator; the
 /// write path must accept the document's own bytes and replace them.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_kerned_word_break_is_editable_without_the_display_space() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("space-kern-gap.pdf");
     let document = load(&path);
     let runs = pdfium_runs(&path, 0);
@@ -1147,10 +1110,8 @@ fn a_kerned_word_break_is_editable_without_the_display_space() {
 /// T22 fixes it: the tail's quota is its **own** measured span (24pt), the pair is flagged
 /// box-suspicious, and the same replacement now **hard-refuses** quoting both widths (O1).
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn the_orphans_own_span_is_the_quota_and_a_wider_replacement_refuses() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("wider-replacement-orphan.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -1230,10 +1191,8 @@ fn the_orphans_own_span_is_the_quota_and_a_wider_replacement_refuses() {
 /// O1: the replacement that the user actually wrote into the tail must fit the tail's own span
 /// — a ~24pt quota is generous for two glyphs and refuses a word.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_small_replacement_still_fits_the_orphans_own_span() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("wider-replacement-orphan.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -1267,11 +1226,8 @@ fn a_small_replacement_still_fits_the_orphans_own_span() {
 /// the index service. It asserts the new text is searchable *and* the old text is not,
 /// which is the difference between "re-extracted" and "stale rows survive".
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_substitution_edit_re_indexes_the_copy_so_search_finds_the_new_text() {
-    if !pdfium_ready() {
-        return;
-    }
-
     let db = Db::open_in_memory().unwrap();
     let render = Arc::new(RenderService::new());
     let index_service = IndexService::new();
@@ -1330,10 +1286,8 @@ fn a_substitution_edit_re_indexes_the_copy_so_search_finds_the_new_text() {
 /// T23a measures the span from PDFium's character grid instead: the run is editable and its
 /// quota is the union of its characters' advance boxes.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn an_unmeasurable_font_run_is_measurable_from_the_char_grid() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("unmeasurable-font.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -1383,10 +1337,8 @@ fn an_unmeasurable_font_run_is_measurable_from_the_char_grid() {
 /// and the line is **one** editable run with one quota. A short replacement fits; an over-wide
 /// one hard-refuses quoting both widths (O1).
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("unmeasurable-chain-break.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -1502,10 +1454,8 @@ fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
 /// The box's `y0` sits 3.39pt *below* the 441.41 baseline because `versity` has a descender —
 /// which is why `rendered_baseline` (T24) reads the baseline from the grid, not the box edge.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t24_real_maastricht_line_one_is_one_editable_run() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("real-maastricht-brochure.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 1, &pdfium_runs(&path, 1), &char_grid(&path, 1))
@@ -1626,10 +1576,8 @@ fn t24_real_maastricht_line_one_is_one_editable_run() {
 /// character-aligned spans merge it into one run whose quota is the true span (38 glyphs x
 /// 0.6em at 15pt = 342pt).
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t24_synthetic_wide_glyph_tj_merges_via_character_alignment() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("tj-grid-walk.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -1665,10 +1613,8 @@ fn t24_synthetic_wide_glyph_tj_merges_via_character_alignment() {
 /// mis-measure both. With it skipped, the two fragments keep exactly their own rendered chars
 /// (4 and 3), their spans are exact, and they merge across the seam.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t24_generated_space_is_skipped_when_aligning_fragments() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("tj-kern-seam.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -1710,10 +1656,8 @@ fn t24_generated_space_is_skipped_when_aligning_fragments() {
 /// T25 regression guard: the brochure's page-3 "missing data …" line must be ONE merged,
 /// editable run (the blue-text bug).
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t25_maastricht_missing_word_line_is_one_editable_run() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("real-maastricht-brochure.pdf");
     let document = load(&path);
     let page = 2u32;
@@ -1764,10 +1708,8 @@ fn t25_maastricht_missing_word_line_is_one_editable_run() {
 /// `concepts of pro` pick ended at the wrong glyph. The operation-level resync is what makes
 /// the spans run rightward again; without it this line splits at the `ce. `/`Fu` seam.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t25_maastricht_syllabus_line_is_one_editable_run() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("real-maastricht-brochure.pdf");
     let document = load(&path);
     let page = 2u32;
@@ -1824,10 +1766,8 @@ fn t25_maastricht_syllabus_line_is_one_editable_run() {
 /// Preferring the box the origin sits deeper inside keeps the pair on its own ink. This is a
 /// regression guard, not a tolerance change: the boxes and the merge window are untouched.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t26_maastricht_overview_line_is_one_editable_run() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("real-maastricht-brochure.pdf");
     let document = load(&path);
     let page = 2u32;
@@ -1898,10 +1838,8 @@ fn t26_maastricht_overview_line_is_one_editable_run() {
 ///    `/Widths` — no AFM entry, no embedded program — so `advance_exact` was `None` and the
 ///    chain broke at the very first seam. Reading `/Widths` makes every seam exact.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t26_maastricht_page_two_runs_are_whole_lines() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("real-maastricht-brochure.pdf");
     let document = load(&path);
     let page = 2u32;
@@ -1995,10 +1933,8 @@ fn t26_a_selection_range_is_replaced_in_one_write() {
 
 /// A range that spans two baselines is refused `selection-range`, never written.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn t26_a_range_across_lines_is_refused() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("real-maastricht-brochure.pdf");
     let page = 2u32;
     let document = load(&path);
@@ -2056,10 +1992,8 @@ fn t26_a_range_across_lines_is_refused() {
 /// paragraphs on one baseline. Nothing in the old predicates could see it — same style, same
 /// size, zero gap — so only the document's own structure separates them.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn mcid_boundary_stops_a_geometric_merge() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("mcid-boundaries.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -2077,10 +2011,8 @@ fn mcid_boundary_stops_a_geometric_merge() {
 /// The pair of assertions is the phase's whole safety argument: the boundary changes
 /// behaviour only where the document has structure to offer.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn untagged_adjacent_runs_still_merge() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("two-run-line.pdf");
     let document = load(&path);
     let runs = textedit::describe_runs(&document, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
@@ -2719,10 +2651,8 @@ fn decode_utf16_be(bytes: &[u8]) -> String {
 ///   It is the *same face* (`ABCDEE+Monaco`) throughout, so the face rule keeps it together;
 ///   only the bullet and the dash are separate, and they are separate fonts.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn p2_8_maastricht_lecture_line_is_editable_in_its_own_fonts() {
-    if !pdfium_ready() {
-        return;
-    }
     let path = fixture("real-maastricht-brochure.pdf");
     let document = load(&path);
     let page = 3u32;
@@ -2862,10 +2792,8 @@ fn transformed(cm: [f32; 6]) -> lopdf::Document {
 /// `run-mismatch` — while a test named `a_run_translated_by_the_graphics_matrix_stays_editable`
 /// asserted the opposite of what the user saw.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_translated_run_is_editable_end_to_end() {
-    if !pdfium_ready() {
-        return;
-    }
     let mut document = transformed([1.0, 0.0, 0.0, 1.0, 100.0, 50.0]);
     let runs = verdict_of(&mut document, "translated");
     assert_eq!(runs.len(), 1);
@@ -2889,10 +2817,8 @@ fn a_translated_run_is_editable_end_to_end() {
 /// 4×, so a width gate that mixes text-space and page-space widths fails on one of them
 /// whatever constant it hard-codes.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn a_scaled_run_is_editable_end_to_end_at_any_factor() {
-    if !pdfium_ready() {
-        return;
-    }
     for factor in [2.0_f32, 0.5] {
         let mut document = transformed([factor, 0.0, 0.0, factor, 0.0, 0.0]);
         let runs = verdict_of(&mut document, "scaled");
@@ -2917,10 +2843,8 @@ fn a_scaled_run_is_editable_end_to_end_at_any_factor() {
 /// The composed origin must equal where PDFium actually drew the ink, not merely be
 /// plausible. This is the assertion that fails if the composition is reverted.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn the_composed_origin_lands_on_pdfiums_first_character() {
-    if !pdfium_ready() {
-        return;
-    }
     for (name, mut document) in [
         ("translated", transformed([1.0, 0.0, 0.0, 1.0, 100.0, 50.0])),
         ("rotated", transformed([0.0, 1.0, -1.0, 0.0, 300.0, 100.0])),
@@ -2954,10 +2878,8 @@ fn the_composed_origin_lands_on_pdfiums_first_character() {
 /// The unrotated path is the regression proof for the whole phase: `dot(p, (1,0)) == p.x`,
 /// so composing must not move anything when the CTM is the identity.
 #[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
 fn an_untransformed_run_keeps_its_origin_exactly() {
-    if !pdfium_ready() {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("identity.pdf");
     transformed([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])

@@ -697,12 +697,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn renders_page_zero_of_the_fixture_to_a_valid_png() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let rendered = PdfProvider::render_page_at(&fixture_pdf(), 0, 1.0).unwrap();
 
         // PNG magic number: a valid encoded image, not raw pixels.
@@ -716,12 +712,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn renders_are_scaled_by_the_requested_factor() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let small = PdfProvider::render_page_at(&fixture_pdf(), 0, 1.0).unwrap();
         let large = PdfProvider::render_page_at(&fixture_pdf(), 0, 2.0).unwrap();
 
@@ -731,12 +723,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn extracts_the_text_layer_of_the_fixture_per_page() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let path = fixture_pdf();
         for (page, token) in [(0_u32, "ALPHA"), (1, "BRAVO"), (2, "CHARLIE")] {
             let text = PdfProvider::extract_page_text(&path, page).unwrap();
@@ -748,12 +736,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn text_extraction_does_not_bleed_between_pages() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let path = fixture_pdf();
         let page_two = PdfProvider::extract_page_text(&path, 1).unwrap();
         assert!(page_two.contains("BRAVO"));
@@ -768,24 +752,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn out_of_range_page_is_an_error_not_a_panic() {
-        // Deliberately not PDFium-gated in spirit, but page access needs the library.
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let error = PdfProvider::render_page_at(&fixture_pdf(), 99, 1.0).unwrap_err();
         assert_eq!(error.code(), "OTHER");
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn provider_trait_render_and_extract_use_the_entry_path() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let entry = fixture_entry();
         let bytes = PdfProvider.render_page(&entry, 0, 1.0).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
@@ -810,21 +785,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn page_count_matches_the_fixture() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
         assert_eq!(PdfProvider::page_count(&fixture_pdf()).unwrap(), 3);
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn the_handle_cache_reuses_one_document_for_repeated_access() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let handles = DocumentHandles::new();
         let path = fixture_pdf();
 
@@ -839,12 +807,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn distinct_paths_get_distinct_handles() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let mut other = fixture_pdf();
         other.set_file_name("sample-copy.pdf");
         std::fs::copy(fixture_pdf(), &other).unwrap();
@@ -858,12 +822,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn a_changed_content_hash_does_not_reuse_the_old_handle() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let handles = DocumentHandles::new();
         let path = fixture_pdf();
         handles.acquire(&path, Some("hash-a")).unwrap();
@@ -874,12 +834,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn forgetting_a_document_closes_it() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let handles = DocumentHandles::new();
         let path = fixture_pdf();
         handles.acquire(&path, Some("h")).unwrap();
@@ -890,12 +846,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn the_cache_is_bounded_and_evicts_the_least_recently_used() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let mut copies = Vec::new();
         for index in 0..(MAX_OPEN_DOCUMENTS + 2) {
             let mut copy = fixture_pdf();
@@ -924,12 +876,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn cached_render_and_extract_agree_with_the_uncached_paths() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let handles = DocumentHandles::new();
         let path = fixture_pdf();
 
@@ -947,12 +895,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn concurrent_renders_of_the_same_document_do_not_interleave_badly() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         // Two threads, one document: the per-document mutex serialises them. A third
         // thread works a different document, which is the case that used to corrupt
         // the heap — see `concurrent_renders_and_evictions_do_not_corrupt_pdfium`.
@@ -1008,12 +952,8 @@ mod tests {
     /// The failure mode is a process abort, not a wrong return value, so a clean join is
     /// the whole assertion.
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn concurrent_renders_and_evictions_do_not_corrupt_pdfium() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let handles = Arc::new(DocumentHandles::new());
         let source = fixture_pdf();
 
@@ -1076,12 +1016,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn an_unavailable_page_reports_an_error_through_the_cache() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let handles = DocumentHandles::new();
         let error =
             PdfProvider::render_cached(&handles, &fixture_pdf(), None, 42, 1.0, true).unwrap_err();

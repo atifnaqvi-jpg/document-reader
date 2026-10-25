@@ -618,12 +618,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn service_serves_the_second_request_for_a_page_from_cache() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let service = RenderService::new();
         let path = fixture_pdf();
 
@@ -637,12 +633,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn pre_rendering_fills_both_neighbours() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let service = RenderService::new();
         let path = fixture_pdf();
         service.render("doc-1", &path, None, 1, 1.0, true).unwrap();
@@ -665,12 +657,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn pre_rendering_at_the_edges_only_fills_what_exists() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let service = RenderService::new();
         let path = fixture_pdf();
 
@@ -695,12 +683,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn forgetting_a_document_closes_its_handle_too() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let service = RenderService::new();
         let path = fixture_pdf();
         service.render("doc-1", &path, None, 0, 1.0, true).unwrap();
@@ -715,12 +699,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn forgetting_a_document_drops_handles_even_when_the_hash_changed() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let service = RenderService::new();
         let path = fixture_pdf();
 
@@ -740,12 +720,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn page_count_goes_through_the_shared_handle() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let service = RenderService::new();
         let path = fixture_pdf();
 
@@ -757,12 +733,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn a_new_page_request_supersedes_an_in_flight_pre_render() {
-        if !PdfProvider::pdfium_available() {
-            eprintln!("skipping: PDFium not available on this machine");
-            return;
-        }
-
         let service = RenderService::new();
         let path = fixture_pdf();
 
