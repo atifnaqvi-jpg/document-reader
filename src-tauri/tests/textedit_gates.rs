@@ -599,6 +599,12 @@ fn encrypted_documents_refuse_every_edit() {
 
 #[test]
 fn decrypt_copy_writes_an_unprotected_file() {
+    // The page count below goes through PDFium, so this needs the same guard as its
+    // siblings. It was written during the window when `ci.yml` did not trigger for this
+    // branch, so its absence only surfaced when the gate was widened.
+    if !pdfium_ready() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let original = dir.path().join("secret.pdf");
     let original_bytes = std::fs::read(fixture("encrypted-aes.pdf")).unwrap();
