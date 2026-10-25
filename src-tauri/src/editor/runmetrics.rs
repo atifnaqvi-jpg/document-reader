@@ -23,6 +23,7 @@ use std::path::Path;
 
 use pdfium_render::prelude::*;
 
+use crate::editor::geometry::{Point2, RunFrame};
 use crate::model::AppError;
 
 /// One text object as PDFium sees it, for the picker's display and hit-testing.
@@ -157,20 +158,34 @@ pub struct PdfiumCharGrid {
 }
 
 /// The character range one piece of text occupies in the grid, and its measured span.
+///
+/// `x0`/`x1` are the union of the matched characters' advance boxes **projected onto the
+/// run's advance axis** (P2.7.4 §4). For horizontal text that is the page's `x` extent, so
+/// every existing consumer reads the number it always did; for a turned run it is the extent
+/// *along the line*, which is the only width a width gate may compare. The raw `y0`/`y1` are
+/// kept so a box's perpendicular extent can be projected onto the up axis instead.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharSpan {
     /// First and last grid indices of the match.
     pub first: usize,
     pub last: usize,
-    /// The union of the matched characters' advance boxes, in points.
+    /// The span's start and end along the advance axis, in points.
     pub x0: f32,
     pub x1: f32,
+    /// The union of the matched characters' advance boxes' perpendicular extent.
+    pub y0: f32,
+    pub y1: f32,
 }
 
 impl CharSpan {
-    /// The span width in points.
+    /// The span width in points, along the run's advance axis.
     pub fn width(&self) -> f32 {
         self.x1 - self.x0
+    }
+
+    /// The span's extent along the run's up axis.
+    pub fn height(&self) -> f32 {
+        self.y1 - self.y0
     }
 }
 
@@ -220,6 +235,23 @@ impl PdfiumCharGrid {
         band: (f32, f32),
         x_min: f32,
     ) -> Option<CharSpan> {
+        self.locate_in_frame(text, from, band, x_min, RunFrame::PAGE)
+    }
+
+    /// [`Self::locate`] measured in a run's own frame (P2.7.4).
+    ///
+    /// `from` and `x_min` are indices and positions *along* the advance axis; `band` is the
+    /// window *across* it. The returned [`CharSpan`] carries along-axis coordinates. For
+    /// [`RunFrame::PAGE`] this is exactly [`Self::locate`]'s arithmetic — the frame's
+    /// projections are `x` and `y` — so no horizontal caller's result moves.
+    pub fn locate_in_frame(
+        &self,
+        text: &str,
+        from: usize,
+        band: (f32, f32),
+        x_min: f32,
+        frame: RunFrame,
+    ) -> Option<CharSpan> {
         let needle = normalise_whitespace(text.chars());
         if needle.is_empty() {
             return None;
@@ -256,29 +288,88 @@ impl PdfiumCharGrid {
                 let indices = &map[position..position + needle.len()];
                 let on_band = indices.iter().all(|index| {
                     let ch = &self.chars[*index];
-                    (band.0..=band.1).contains(&ch.origin_y) && ch.x0 >= x_min
+                    let origin = Point2::new(ch.origin_x, ch.origin_y);
+                    (band.0..=band.1).contains(&frame.across(origin))
+                        && Self::along_min(ch, frame) >= x_min
                 });
                 if on_band {
-                    let x0 = indices
-                        .iter()
-                        .map(|index| self.chars[*index].x0)
-                        .fold(f32::INFINITY, f32::min);
-                    let x1 = indices
-                        .iter()
-                        .map(|index| self.chars[*index].x1)
-                        .fold(f32::NEG_INFINITY, f32::max);
-                    return Some(CharSpan {
-                        first: indices[0],
-                        last: *indices.last().expect("needle is non-empty"),
-                        x0,
-                        x1,
-                    });
+                    return Some(Self::span_of(indices, &self.chars, frame));
                 }
             }
             position += 1;
         }
         None
     }
+
+    /// Builds the span for a run of grid indices, projected into `frame`.
+    pub fn span_of(indices: &[usize], chars: &[PdfiumChar], frame: RunFrame) -> CharSpan {
+        let mut span = CharSpan {
+            first: indices[0],
+            last: *indices.last().expect("a span has at least one character"),
+            x0: f32::INFINITY,
+            x1: f32::NEG_INFINITY,
+            y0: f32::INFINITY,
+            y1: f32::NEG_INFINITY,
+        };
+        for index in indices {
+            let corners = corners(&chars[*index]);
+            span.x0 = span.x0.min(
+                corners
+                    .iter()
+                    .map(|p| frame.along(*p))
+                    .fold(f32::INFINITY, f32::min),
+            );
+            span.x1 = span.x1.max(
+                corners
+                    .iter()
+                    .map(|p| frame.along(*p))
+                    .fold(f32::NEG_INFINITY, f32::max),
+            );
+            span.y0 = span.y0.min(
+                corners
+                    .iter()
+                    .map(|p| frame.across(*p))
+                    .fold(f32::INFINITY, f32::min),
+            );
+            span.y1 = span.y1.max(
+                corners
+                    .iter()
+                    .map(|p| frame.across(*p))
+                    .fold(f32::NEG_INFINITY, f32::max),
+            );
+        }
+        span
+    }
+
+    /// The near edge of a character's advance box along `frame`'s advance axis.
+    pub fn along_min(ch: &PdfiumChar, frame: RunFrame) -> f32 {
+        corners(ch)
+            .iter()
+            .map(|p| frame.along(*p))
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The far edge of a character's advance box along `frame`'s advance axis.
+    pub fn along_max(ch: &PdfiumChar, frame: RunFrame) -> f32 {
+        corners(ch)
+            .iter()
+            .map(|p| frame.along(*p))
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+}
+
+/// The four corners of a character's advance box.
+///
+/// Projecting all four — rather than assuming which edge is "near" — is what makes the
+/// projection correct for a turned or skewed axis, where any corner can be the extreme.
+fn corners(ch: &PdfiumChar) -> [Point2; 4] {
+    [
+        Point2::new(ch.x0, ch.y0),
+        Point2::new(ch.x0, ch.y1),
+        Point2::new(ch.x1, ch.y0),
+        Point2::new(ch.x1, ch.y1),
+    ]
 }
 
 /// Reads PDFium's whole-page character grid (P2.4.3 T23a).

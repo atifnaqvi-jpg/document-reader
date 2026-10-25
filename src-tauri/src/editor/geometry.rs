@@ -64,6 +64,109 @@ impl PdfRect {
 /// Below this, a rect is treated as a dead click rather than a mark.
 pub const MIN_DIMENSION_POINTS: f32 = 0.5;
 
+/// A page-space point, in PDF points with the origin bottom-left.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Point2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Point2 {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+/// The frame a run's text is laid out in, expressed in page space (P2.7.4 §4).
+///
+/// Every quantity the picker measures — where the run starts, how wide it is, which line it
+/// sits on, how far the next fragment is — is *relative to the direction the text advances*.
+/// For horizontal text that direction is `(1, 0)`, so `along` is `x` and `across` is `y` and
+/// every existing formula is unchanged bit for bit. For rotated text the same formulas keep
+/// working once they are written in terms of the axes rather than the page's own.
+///
+/// `advance` is where one unit of text advance points; `up` is the glyphs' up direction.
+/// They are unit vectors but need not be perpendicular: a skew leaves them at an angle, and
+/// nothing measured here requires orthogonality — only that `advance` is the measurement
+/// direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunFrame {
+    pub advance: Point2,
+    pub up: Point2,
+}
+
+impl RunFrame {
+    /// The page's own axes: the frame every unrotated run is measured in.
+    pub const PAGE: Self = Self {
+        advance: Point2::new(1.0, 0.0),
+        up: Point2::new(0.0, 1.0),
+    };
+
+    /// Builds a frame from two vectors, normalising each. A degenerate vector falls back to
+    /// the page axis for that direction, so callers never divide by zero; the caller is
+    /// responsible for refusing a run whose transform has no usable scale.
+    pub fn from_vectors(advance: (f32, f32), up: (f32, f32)) -> Self {
+        fn unit(vector: (f32, f32), fallback: Point2) -> Point2 {
+            let length = (vector.0 * vector.0 + vector.1 * vector.1).sqrt();
+            if length > f32::EPSILON {
+                Point2::new(vector.0 / length, vector.1 / length)
+            } else {
+                fallback
+            }
+        }
+        Self {
+            advance: unit(advance, Point2::new(1.0, 0.0)),
+            up: unit(up, Point2::new(0.0, 1.0)),
+        }
+    }
+
+    /// How far along the advance axis a page-space point lies.
+    pub fn along(&self, point: Point2) -> f32 {
+        point.x * self.advance.x + point.y * self.advance.y
+    }
+
+    /// How far along the up axis a page-space point lies: the run's "baseline coordinate".
+    pub fn across(&self, point: Point2) -> f32 {
+        point.x * self.up.x + point.y * self.up.y
+    }
+
+    /// The page-space point `along` units down the advance axis and `across` units up.
+    ///
+    /// Exact inverse of [`Self::along`]/[`Self::across`] only when the axes are orthogonal.
+    /// Projections are what this phase measures with, so the inverse is used for placing
+    /// anchors and for tests, not for reconstructing ink boxes under a skew.
+    pub fn point(&self, along: f32, across: f32) -> Point2 {
+        Point2::new(
+            along * self.advance.x + across * self.up.x,
+            along * self.advance.y + across * self.up.y,
+        )
+    }
+
+    /// True when the advance axis is the page's `x` axis, which is what lets a box's width be
+    /// trusted as a width (P2.7.4 Q2).
+    pub fn is_horizontal(&self) -> bool {
+        const EPSILON: f32 = 1e-4;
+        self.advance.x > 0.0 && self.advance.y.abs() <= EPSILON
+    }
+
+    /// True when the frame reverses handedness — the glyphs are reflected, so the text does
+    /// not read left-to-right along its own advance axis (Q5).
+    pub fn is_mirrored(&self) -> bool {
+        self.advance.x * self.up.y - self.advance.y * self.up.x < 0.0
+    }
+
+    /// Whether two fragments share one text direction, within a small angular tolerance.
+    ///
+    /// Per Q7, fragments at different angles are not one line even when they are adjacent:
+    /// a merged write puts the whole replacement in the head fragment, drawn through the
+    /// head's matrix, so the tail's text would move.
+    pub fn same_direction(&self, other: &Self) -> bool {
+        const COSINE: f32 = 0.9998; // ≈1.15°
+        let dot = self.advance.x * other.advance.x + self.advance.y * other.advance.y;
+        dot >= COSINE
+    }
+}
+
 /// Converts a rect captured in the UI (top-left origin, CSS px at `scale`) into
 /// PDF points. `page_height_points` is the unrotated page height from PDFium.
 ///
@@ -218,5 +321,63 @@ mod tests {
         assert!((py1 - rect.y1).abs() < 0.001);
         assert!((px1 - rect.x1).abs() < 0.001);
         assert!((py0 - rect.y0).abs() < 0.001);
+    }
+
+    /// The property the whole of P2.7.4 depends on: the page frame must reduce every
+    /// projection to the coordinate the pre-phase code read directly. If this ever fails,
+    /// unrotated behaviour has changed.
+    #[test]
+    fn the_page_frame_projects_onto_x_and_y() {
+        let frame = RunFrame::PAGE;
+        for (x, y) in [(0.0, 0.0), (72.5, 700.25), (-400.0, 172.0)] {
+            assert_eq!(frame.along(Point2::new(x, y)), x);
+            assert_eq!(frame.across(Point2::new(x, y)), y);
+            assert_eq!(frame.point(x, y), Point2::new(x, y));
+        }
+        assert!(frame.is_horizontal());
+        assert!(!frame.is_mirrored());
+    }
+
+    /// A 90° run: advance points up the page, glyphs point left. Measured values, from the
+    /// `rotated_text` fixture's own axes.
+    #[test]
+    fn a_quarter_turn_projects_along_the_rotated_axis() {
+        let frame = RunFrame::from_vectors((0.0, 1.0), (-1.0, 0.0));
+        // A character one em further down the page is one em further along the line.
+        assert_eq!(frame.along(Point2::new(300.0, 117.33)), 117.33);
+        assert_eq!(frame.across(Point2::new(300.0, 117.33)), -300.0);
+        // The horizontal extent of that ink (18pt of glyph height) is *not* advance.
+        assert_eq!(frame.along(Point2::new(282.31, 117.33)), 117.33);
+        assert!(!frame.is_horizontal());
+        assert!(!frame.is_mirrored());
+    }
+
+    #[test]
+    fn a_mirrored_frame_is_detected_by_handedness() {
+        // An x-flip: advance still points right, but up points down, so the determinant is
+        // negative and the glyphs are reflected.
+        let frame = RunFrame::from_vectors((-1.0, 0.0), (0.0, 1.0));
+        assert!(frame.is_mirrored());
+        assert!(!frame.is_horizontal(), "a flipped advance is not left-to-right");
+    }
+
+    #[test]
+    fn frames_agree_only_within_the_angular_tolerance() {
+        let horizontal = RunFrame::PAGE;
+        let near = RunFrame::from_vectors((1.0, 0.01), (0.0, 1.0));
+        let turned = RunFrame::from_vectors((0.0, 1.0), (-1.0, 0.0));
+        assert!(horizontal.same_direction(&horizontal));
+        assert!(
+            horizontal.same_direction(&near),
+            "a fraction of a degree is a rounding difference, not a new line"
+        );
+        assert!(!horizontal.same_direction(&turned));
+    }
+
+    #[test]
+    fn a_degenerate_axis_falls_back_instead_of_dividing_by_zero() {
+        let frame = RunFrame::from_vectors((0.0, 0.0), (0.0, 0.0));
+        assert!(frame.advance.x.is_finite() && frame.advance.y.is_finite());
+        assert!(frame.up.x.is_finite() && frame.up.y.is_finite());
     }
 }

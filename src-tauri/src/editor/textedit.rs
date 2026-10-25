@@ -21,6 +21,7 @@
 
 use lopdf::Document;
 
+use crate::editor::geometry::{Point2, RunFrame};
 use crate::editor::runmetrics::{CharSpan, PdfiumCharGrid};
 use crate::editor::textlocate::{
     self, is_simple_font, page_id, ContentOperation, FontInfo, RawRun, RunId, XObjectRefusal,
@@ -43,9 +44,9 @@ pub enum Gate {
     /// (g) the selected runs are not one contiguous, same-style span on one baseline
     /// (P2.6 T26).
     SelectionRange,
-    /// (h) the run's text matrix is rotated or skewed, so its advance is not a horizontal
-    /// width and the width gate would measure the wrong axis (P2.7 hotfix H0).
-    RotatedText,
+    /// (h) the run's glyphs are mirrored (`det M < 0`): the advance axis exists, but a
+    /// replacement would read opposite to the direction the text is drawn (P2.7.4 Q5).
+    MirroredText,
     /// (i) the text sits in a Form XObject this walk refused to enter: nested past the cap, or
     /// drawing itself (P2.7.3 Q1). Carries no text, so there is nothing to rewrite.
     NestedXObject,
@@ -62,7 +63,7 @@ impl Gate {
             Gate::FitsWidth => "fits-width",
             Gate::RunMismatch => "run-mismatch",
             Gate::SelectionRange => "selection-range",
-            Gate::RotatedText => "rotated-text",
+            Gate::MirroredText => "mirrored-text",
             Gate::NestedXObject => "nested-xobject",
         }
     }
@@ -95,9 +96,9 @@ impl Gate {
                  since it was selected); select a narrower range, or use the annotation \
                  tools to add a note"
             }
-            Gate::RotatedText => {
-                "this text is rotated or skewed, so its width cannot yet be measured reliably; \
-                 select a narrower range, or use the annotation tools to add a note"
+            Gate::MirroredText => {
+                "this text is mirrored, so a replacement would read against its drawing \
+                 direction; select a narrower range, or use the annotation tools to add a note"
             }
             Gate::NestedXObject => {
                 "this text sits in a form nested too deeply to edit, or in a form that draws \
@@ -166,8 +167,9 @@ pub struct RunGates {
     pub font: FontInfo,
     /// True when `encode_text(decode_text(bytes)) == bytes` for the run's bytes.
     pub round_trips: bool,
-    /// True when the run's text matrix was not axis-aligned (P2.7 hotfix H0).
-    pub rotated: bool,
+    /// True when the run's frame reverses handedness, so its glyphs are reflected
+    /// (P2.7.4 Q5).
+    pub mirrored: bool,
     /// Why this run is a Form XObject refusal placeholder (P2.7.3 X1), if it is one.
     pub nested_xobject: Option<XObjectRefusal>,
     /// A CID/Type0 font's `/ToUnicode` exists, so its codes can be read back (P2.7.5).
@@ -192,7 +194,7 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
                 subtype: None,
             },
             round_trips: false,
-            rotated: false,
+            mirrored: false,
             nested_xobject: run.xobject_refusal,
             cid_readable: false,
         });
@@ -231,7 +233,7 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
     Ok(RunGates {
         font,
         round_trips,
-        rotated: run.rotated,
+        mirrored: run.frame.is_mirrored(),
         nested_xobject: run.xobject_refusal,
         cid_readable,
     })
@@ -248,11 +250,11 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
 /// no substitute can cover still refuses, with `GLYPHS_NOT_COVERABLE` or
 /// `SUBSTITUTE_REFUSED`.
 pub fn font_admissibility(gates: &RunGates) -> Admissibility {
-    // A rotated run is refused before anything else: its `advance` is not a horizontal width,
-    // so no downstream measurement (width gate, PDFium pairing) can be trusted for it.
-    // Font capability is irrelevant when the geometry is the thing that cannot be read.
-    if gates.rotated {
-        return Admissibility::refused(Gate::RotatedText);
+    // P2.7.4: rotation is no longer a refusal - a turned run is measured along its own
+    // advance axis. Mirroring still is: the axis exists, but the glyphs run counter to it, so
+    // a replacement would be drawn reflected and the caret has no honest meaning (Q5).
+    if gates.mirrored {
+        return Admissibility::refused(Gate::MirroredText);
     }
     // A placeholder is not text: there is no operand to rewrite, so the only honest answer is
     // that the text inside that form is out of reach (P2.7.3 Q1/§4.2).
@@ -504,14 +506,68 @@ struct Pair {
 /// nothing and the span falls back to the font metrics — the safe direction.
 const ANCHOR_TOLERANCE: f32 = 0.1;
 
+/// A box's extent along a frame's advance axis.
+fn rect_along(rect: &crate::editor::runmetrics::PdfiumRun, frame: RunFrame) -> (f32, f32) {
+    let corners = [
+        Point2::new(rect.x0, rect.y0),
+        Point2::new(rect.x0, rect.y1),
+        Point2::new(rect.x1, rect.y0),
+        Point2::new(rect.x1, rect.y1),
+    ];
+    corners.iter().map(|p| frame.along(*p)).fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(lo, hi), value| (lo.min(value), hi.max(value)),
+    )
+}
+
+/// A `PdfRect`'s extent along a frame's advance axis.
+fn pdf_rect_along(rect: &crate::editor::geometry::PdfRect, frame: RunFrame) -> (f32, f32) {
+    let corners = [
+        Point2::new(rect.x0, rect.y0),
+        Point2::new(rect.x0, rect.y1),
+        Point2::new(rect.x1, rect.y0),
+        Point2::new(rect.x1, rect.y1),
+    ];
+    corners.iter().map(|p| frame.along(*p)).fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(lo, hi), value| (lo.min(value), hi.max(value)),
+    )
+}
+
+/// A box's extent across a frame's advance axis.
+fn rect_across(rect: &crate::editor::runmetrics::PdfiumRun, frame: RunFrame) -> (f32, f32) {
+    let corners = [
+        Point2::new(rect.x0, rect.y0),
+        Point2::new(rect.x0, rect.y1),
+        Point2::new(rect.x1, rect.y0),
+        Point2::new(rect.x1, rect.y1),
+    ];
+    corners.iter().map(|p| frame.across(*p)).fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(lo, hi), value| (lo.min(value), hi.max(value)),
+    )
+}
+
 /// The baseline band a run's characters must sit in to count as that run's (P2.4.3 T23a).
 ///
-/// Centred on the paired box's baseline and widened by the same font-size-relative tolerance
-/// pairing uses, so the walk stays on one line: half a point would be too tight for a large
-/// face and too loose for a small one, exactly as [`origin_tolerance`] argues for pairing.
-fn grid_band(rect: &crate::editor::runmetrics::PdfiumRun, font_size: f32) -> (f32, f32) {
+/// Centred on the paired box's near edge across the advance axis and widened by the same
+/// font-size-relative tolerance pairing uses, so the walk stays on one line: half a point
+/// would be too tight for a large face and too loose for a small one, exactly as
+/// [`origin_tolerance`] argues for pairing. In the page frame the near edge is `rect.y0`, so
+/// an unrotated caller sees the band it always did.
+fn grid_band(
+    rect: &crate::editor::runmetrics::PdfiumRun,
+    frame: RunFrame,
+    font_size: f32,
+) -> (f32, f32) {
     let tol = origin_tolerance(font_size);
-    (rect.y0 - tol, rect.y0 + tol)
+    let (near, _) = rect_across(rect, frame);
+    (near - tol, near + tol)
+}
+
+/// Projects a page-space point onto a frame's axes, for the pairing comparisons.
+fn projected(point: Point2, frame: RunFrame) -> (f32, f32) {
+    (frame.along(point), frame.across(point))
 }
 
 /// Finds a run's text in PDFium's character grid, anchored at the run's own text-space origin
@@ -527,18 +583,25 @@ fn locate_span(
     rect: &crate::editor::runmetrics::PdfiumRun,
     grid: &PdfiumCharGrid,
 ) -> Option<CharSpan> {
-    let band = grid_band(rect, run.font_size);
-    let window_left = rect.x0 - origin_tolerance(run.font_size);
+    let frame = run.frame;
+    let band = grid_band(rect, frame, run.font_size);
+    let (window_left, _) = rect_along(rect, frame);
+    let window_left = window_left - origin_tolerance(run.font_size);
     // P2.7.4: the anchor is compared against the grid's page-space character origins, so it
     // must be composed. Using the text-space origin here reintroduced the mismatch for any
     // translated `cm` even once `pair_run` was fixed.
-    let anchor = window_left.max(run.page_origin.0 - ANCHOR_TOLERANCE);
+    let (origin_along, _) = projected(run.page_point(), frame);
+    let anchor = window_left.max(origin_along - ANCHOR_TOLERANCE);
     let from = grid
         .chars
         .iter()
-        .position(|ch| (band.0..=band.1).contains(&ch.origin_y) && ch.origin_x >= anchor)
+        .position(|ch| {
+            let origin = Point2::new(ch.origin_x, ch.origin_y);
+            (band.0..=band.1).contains(&frame.across(origin))
+                && PdfiumCharGrid::along_min(ch, frame) >= anchor
+        })
         .unwrap_or(0);
-    grid.locate(&run.text, from, band, window_left)
+    grid.locate_in_frame(&run.text, from, band, window_left, frame)
 }
 
 /// Reads one baseline per box, once, for a whole page (P2.4.4 T24).
@@ -550,10 +613,33 @@ fn box_baselines(
     rects: &[crate::editor::runmetrics::PdfiumRun],
     grid: &PdfiumCharGrid,
 ) -> Vec<f32> {
+    // A box's baseline must be read in the frame it will be compared in. Until a run is
+    // matched there is no frame to use, so the page frame is the fallback: it is the only
+    // frame in which a horizontal box is ever compared, and `pair_run` re-reads a box's
+    // baseline in the run's own frame before use.
     rects
         .iter()
-        .map(|rect| rendered_baseline(rect, grid))
+        .map(|rect| rendered_baseline(rect, grid, RunFrame::PAGE))
         .collect()
+}
+
+/// Reads the rendered baseline of one box in a run's frame, on demand (P2.7.4).
+///
+/// [`box_baselines`] precomputes every baseline in the page frame, which is all a horizontal
+/// comparison needs. A turned run's `across` coordinate is its page `x`, so the cached value
+/// would be the wrong number; this recomputes for the boxes that run actually considers.
+fn baseline_in_frame(
+    rect: &crate::editor::runmetrics::PdfiumRun,
+    baselines: &[f32],
+    index: usize,
+    grid: &PdfiumCharGrid,
+    frame: RunFrame,
+) -> f32 {
+    if frame.is_horizontal() {
+        baselines.get(index).copied().unwrap_or(rect.y0)
+    } else {
+        rendered_baseline(rect, grid, frame)
+    }
 }
 
 /// Matches one lopdf run to a PDFium box by **geometry** (P2.4.1 T17), and walks its text in
@@ -580,25 +666,31 @@ fn pair_run(
     // came from PDFium. Comparing a text-space origin to a page-space box silently failed to
     // pair any run under a non-identity `cm` -- which refused scale, translation and flip, not
     // just rotation.
-    let ink_y = run.page_baseline();
-    let origin_x = run.page_origin.0;
+    // P2.7.4: the comparisons are made in the run's own frame. `along` is the axis the text
+    // advances on and `across` the line it sits on; in the page frame these are `x` and `y`,
+    // so horizontal text compares exactly as before.
+    let frame = run.frame;
+    let (origin_along, _) = projected(run.page_point(), frame);
+    let ink_across = run.page_baseline();
 
     let mut best: Option<Pair> = None;
     let mut best_key: Option<(bool, f32, f32, f32, bool)> = None;
     for (index, rect) in rects.iter().enumerate() {
         // `contains` uses the box grown by the tolerance, which absorbs the ink offset and a
         // small metric disagreement without reaching a neighbouring line.
-        let contains = origin_x >= rect.x0 - tol
-            && origin_x <= rect.x1 + tol
-            && ink_y >= rect.y0 - tol
-            && ink_y <= rect.y1 + tol;
+        let (along_lo, along_hi) = rect_along(rect, frame);
+        let (across_lo, across_hi) = rect_across(rect, frame);
+        let contains = origin_along >= along_lo - tol
+            && origin_along <= along_hi + tol
+            && ink_across >= across_lo - tol
+            && ink_across <= across_hi + tol;
         if !contains {
             continue;
         }
-        let baseline = baselines.get(index).copied().unwrap_or(rect.y0);
+        let baseline = baseline_in_frame(rect, baselines, index, grid, frame);
         // `baselines` is the *rendered* baseline from the grid, so it already includes `Ts`.
         // Comparing the pen position instead would make every raised run a weak pair (B-5).
-        let baseline_delta = (ink_y - baseline).abs();
+        let baseline_delta = (ink_across - baseline).abs();
         let strong = baseline_delta <= BASELINE_TOLERANCE;
         // Prefer strong over weak, then the smallest baseline delta, then the box the origin
         // sits deepest inside — and, per §3 step 2, exact text equality as the *final*
@@ -612,16 +704,16 @@ fn pair_run(
         // 3.19pt past the bold box the line's earlier operation drew, which split the whole
         // tail of the line into singletons. Only when both boxes contain the origin equally
         // (a word box inside a line box) does the leftmost edge still decide, as before.
-        let overshoot = (rect.x0 - origin_x)
-            .max(origin_x - rect.x1)
-            .max(rect.y0 - ink_y)
-            .max(ink_y - rect.y1)
+        let overshoot = (along_lo - origin_along)
+            .max(origin_along - along_hi)
+            .max(across_lo - ink_across)
+            .max(ink_across - across_hi)
             .max(0.0);
         let key = (
             !strong,
             baseline_delta,
             overshoot,
-            rect.x0,
+            along_lo,
             run.text != rect.text,
         );
         if best_key.map_or(true, |current| key < current) {
@@ -647,11 +739,17 @@ fn pair_run(
     // unpaired case T21 names, and guessing would put the run's text on the wrong line.
     let mut nearest: Option<(f32, usize, f32)> = None;
     for (index, rect) in rects.iter().enumerate() {
-        let dx = (rect.x0 - origin_x).max(origin_x - rect.x1).max(0.0);
-        let dy = (rect.y0 - ink_y).max(ink_y - rect.y1).max(0.0);
-        let distance = dx + dy;
+        let (along_lo, along_hi) = rect_along(rect, frame);
+        let (across_lo, across_hi) = rect_across(rect, frame);
+        let d_along = (along_lo - origin_along)
+            .max(origin_along - along_hi)
+            .max(0.0);
+        let d_across = (across_lo - ink_across)
+            .max(ink_across - across_hi)
+            .max(0.0);
+        let distance = d_along + d_across;
         if nearest.map_or(true, |(best, _, _)| distance < best) {
-            nearest = Some((distance, index, rect.x0));
+            nearest = Some((distance, index, along_lo));
         }
     }
     nearest
@@ -681,16 +779,22 @@ fn pair_run(
 fn object_window(
     rect: &crate::editor::runmetrics::PdfiumRun,
     grid: &PdfiumCharGrid,
+    frame: RunFrame,
 ) -> Option<(usize, usize)> {
     let tol = origin_tolerance(rect.font_size);
-    let band = (rect.y0 - tol, rect.y1 + tol);
-    let span = grid.locate(&rect.text, 0, band, rect.x0 - tol)?;
+    let (along_lo, along_hi) = rect_along(rect, frame);
+    let (across_lo, across_hi) = rect_across(rect, frame);
+    let band = (across_lo - tol, across_hi + tol);
+    let span = grid.locate_in_frame(&rect.text, 0, band, along_lo - tol, frame)?;
     let mut last = span.last;
     while let Some(next) = grid.chars.get(last + 1) {
         if next.generated || next.unicode.is_none() {
             break;
         }
-        if !(band.0..=band.1).contains(&next.origin_y) || next.x0 > rect.x1 + tol {
+        let origin = Point2::new(next.origin_x, next.origin_y);
+        if !(band.0..=band.1).contains(&frame.across(origin))
+            || PdfiumCharGrid::along_max(next, frame) > along_hi + tol
+        {
             break;
         }
         last += 1;
@@ -730,7 +834,10 @@ fn assign_object_spans(
         if members.is_empty() {
             continue;
         }
-        let Some((first, last)) = object_window(rect, grid) else {
+        // The frame comes from the run that owns the box. Every member of one PDFium object
+        // shares its text direction, so any member is a valid source; the head is used.
+        let frame = runs[members[0]].frame;
+        let Some((first, last)) = object_window(rect, grid, frame) else {
             continue;
         };
 
@@ -763,21 +870,8 @@ fn assign_object_spans(
                 continue;
             }
             cursor += expected.len();
-            let x0 = assigned
-                .iter()
-                .map(|index| grid.chars[*index].x0)
-                .fold(f32::INFINITY, f32::min);
-            let x1 = assigned
-                .iter()
-                .map(|index| grid.chars[*index].x1)
-                .fold(f32::NEG_INFINITY, f32::max);
             if let Some(pair) = pairs[run_index].as_mut() {
-                pair.span = Some(CharSpan {
-                    first: assigned[0],
-                    last: *assigned.last().expect("expected is non-empty"),
-                    x0,
-                    x1,
-                });
+                pair.span = Some(PdfiumCharGrid::span_of(assigned, &grid.chars, frame));
             }
         }
     }
@@ -861,17 +955,20 @@ fn resync_straddled_op_spans(
             index = end;
             continue;
         }
-        let band = grid_band(rect, font_size);
+        let frame = runs[anchor].frame;
+        let band = grid_band(rect, frame, font_size);
         // The window opens where the operation starts drawing, not where its box starts: a
         // line-sized box reaches back to the line's margin, and locating from there would find
         // an earlier occurrence of the same text. A leading whitespace operand has no ink to
         // place it, so the first inked operand anchors.
+        let (rect_along_lo, _) = rect_along(rect, frame);
         let Some(op_left) = (index..end)
             .find(|run_index| {
                 !runs[*run_index].text.trim().is_empty()
-                    && runs[*run_index].page_origin.0 >= rect.x0 - origin_tolerance(font_size)
+                    && frame.along(runs[*run_index].page_point())
+                        >= rect_along_lo - origin_tolerance(font_size)
             })
-            .map(|run_index| runs[run_index].page_origin.0)
+            .map(|run_index| frame.along(runs[run_index].page_point()))
         else {
             index = end;
             continue;
@@ -880,9 +977,13 @@ fn resync_straddled_op_spans(
         let from = grid
             .chars
             .iter()
-            .position(|ch| (band.0..=band.1).contains(&ch.origin_y) && ch.origin_x >= window_left)
+            .position(|ch| {
+                let origin = Point2::new(ch.origin_x, ch.origin_y);
+                (band.0..=band.1).contains(&frame.across(origin))
+                    && PdfiumCharGrid::along_min(ch, frame) >= window_left
+            })
             .unwrap_or(0);
-        let Some(span) = grid.locate(&text, from, band, window_left) else {
+        let Some(span) = grid.locate_in_frame(&text, from, band, window_left, frame) else {
             index = end;
             continue;
         };
@@ -907,12 +1008,15 @@ fn resync_straddled_op_spans(
             .iter()
             .map(|run| run.text.chars().count())
             .sum();
-        let (tail_lo, tail_hi) = grid_band(rect, font_size * 2.0);
+        let tail_tol = origin_tolerance(font_size * 2.0);
+        let (tail_near, _) = rect_across(rect, frame);
+        let tail_band = (tail_near - tail_tol, tail_near + tail_tol);
         let mut next = span.last + 1;
         let mut added = 0;
         while added < trailing.min(total.saturating_sub(slots.len())) && next < grid.chars.len() {
             let ch = &grid.chars[next];
-            if !(tail_lo..=tail_hi).contains(&ch.origin_y) {
+            let across = frame.across(Point2::new(ch.origin_x, ch.origin_y));
+            if !(tail_band.0..=tail_band.1).contains(&across) {
                 break;
             }
             if ch.unicode.is_some() && !ch.generated {
@@ -937,21 +1041,8 @@ fn resync_straddled_op_spans(
                 continue;
             }
             cursor += expected.len();
-            let x0 = assigned
-                .iter()
-                .map(|slot| grid.chars[*slot].x0)
-                .fold(f32::INFINITY, f32::min);
-            let x1 = assigned
-                .iter()
-                .map(|slot| grid.chars[*slot].x1)
-                .fold(f32::NEG_INFINITY, f32::max);
             if let Some(pair) = pairs[run_index].as_mut() {
-                pair.span = Some(CharSpan {
-                    first: assigned[0],
-                    last: *assigned.last().expect("expected is non-empty"),
-                    x0,
-                    x1,
-                });
+                pair.span = Some(PdfiumCharGrid::span_of(assigned, &grid.chars, frame));
             }
         }
 
@@ -973,8 +1064,14 @@ fn resync_straddled_op_spans(
 /// was the descender — and [`group_runs`] merges strong pairs only, so the line could not merge
 /// however exact its spans were. When the grid carries nothing in the box's window the bottom
 /// edge still stands in, so an in-memory test with an empty grid behaves exactly as before.
-fn rendered_baseline(rect: &crate::editor::runmetrics::PdfiumRun, grid: &PdfiumCharGrid) -> f32 {
+fn rendered_baseline(
+    rect: &crate::editor::runmetrics::PdfiumRun,
+    grid: &PdfiumCharGrid,
+    frame: RunFrame,
+) -> f32 {
     let tol = origin_tolerance(rect.font_size);
+    let (along_lo, along_hi) = rect_along(rect, frame);
+    let (across_lo, across_hi) = rect_across(rect, frame);
     // The modal pen origin of the box's own characters. Characters from the line above or below
     // sit in a different band and are excluded, so one line yields one baseline.
     let mut counts: Vec<(f32, usize)> = Vec::new();
@@ -982,18 +1079,21 @@ fn rendered_baseline(rect: &crate::editor::runmetrics::PdfiumRun, grid: &PdfiumC
         if ch.generated || ch.unicode.is_none() {
             continue;
         }
-        if ch.x0 < rect.x0 - tol || ch.x0 > rect.x1 + tol {
+        let point = Point2::new(ch.origin_x, ch.origin_y);
+        let along = frame.along(point);
+        let across = frame.across(point);
+        if along < along_lo - tol || along > along_hi + tol {
             continue;
         }
-        if !(rect.y0 - tol..=rect.y1 + tol).contains(&ch.origin_y) {
+        if !(across_lo - tol..=across_hi + tol).contains(&across) {
             continue;
         }
         match counts
             .iter_mut()
-            .find(|(value, _)| (*value - ch.origin_y).abs() < 0.01)
+            .find(|(value, _)| (*value - across).abs() < 0.01)
         {
             Some((_, count)) => *count += 1,
-            None => counts.push((ch.origin_y, 1)),
+            None => counts.push((across, 1)),
         }
     }
     counts
@@ -1006,7 +1106,7 @@ fn rendered_baseline(rect: &crate::editor::runmetrics::PdfiumRun, grid: &PdfiumC
             }
         })
         .map(|(value, _)| value)
-        .unwrap_or(rect.y0)
+        .unwrap_or(across_lo)
 }
 
 /// True when `index` is the **smallest** box that contains the run's text-space origin.
@@ -1024,14 +1124,24 @@ fn smallest_containing(
     let Some(candidate) = rects.get(index) else {
         return false;
     };
-    let width = candidate.x1 - candidate.x0;
+    // P2.7.4: page space, in the run's frame. The text-space `origin` is the same point only
+    // under an identity CTM.
+    let frame = run.frame;
+    let along = frame.along(run.page_point());
+    let across = run.page_baseline();
+    let (candidate_lo, candidate_hi) = rect_along(candidate, frame);
+    let width = candidate_hi - candidate_lo;
     !rects.iter().enumerate().any(|(other_index, other)| {
-        other_index != index
-            && run.origin.0 >= other.x0 - tol
-            && run.origin.0 <= other.x1 + tol
-            && run.baseline() >= other.y0 - tol
-            && run.baseline() <= other.y1 + tol
-            && (other.x1 - other.x0) < width
+        if other_index == index {
+            return false;
+        }
+        let (along_lo, along_hi) = rect_along(other, frame);
+        let (across_lo, across_hi) = rect_across(other, frame);
+        along >= along_lo - tol
+            && along <= along_hi + tol
+            && across >= across_lo - tol
+            && across <= across_hi + tol
+            && (along_hi - along_lo) < width
     })
 }
 
@@ -1101,10 +1211,19 @@ fn seam_is_word_space(
     // Only the slots strictly between the two spans can hold the seam. Requiring exactly one
     // keeps a run of generated characters from being collapsed into a single space.
     let between = &grid.chars[head_span.last + 1..next_span.first];
+    // P2.7.4: "no advance of its own" is measured along the run's axis. For a turned run the
+    // page-space `x` extent of the generated slot is the glyph height, not an advance.
+    let frame = runs[head_index].frame;
+    let generated_advance = if between.len() == 1 {
+        PdfiumCharGrid::along_max(&between[0], frame)
+            - PdfiumCharGrid::along_min(&between[0], frame)
+    } else {
+        f32::INFINITY
+    };
     if !(between.len() == 1
         && between[0].generated
         && between[0].unicode == Some(' ')
-        && (between[0].x1 - between[0].x0).abs() < 0.01)
+        && generated_advance.abs() < 0.01)
     {
         return false;
     }
@@ -1138,6 +1257,8 @@ fn measured_gap(
     match (head_span, next_span) {
         (Some(head_span), Some(next_span)) => next_span.x0 - head_span.x1,
         _ => {
+            // Both sides are lopdf quantities in **text space**, so this path needs no
+            // projection: they share the head's frame and the difference cancels it.
             let advance = head.advance_exact.unwrap_or(head.advance);
             next.origin.0 - (head.origin.0 + advance)
         }
@@ -1195,6 +1316,10 @@ fn mergeable(
         // P2.7.1 B-5: `Ts` moves the ink without moving the pen, so the baseline a merge
         // compares is `origin.1 + rise`. Two runs with different rises are on different lines
         // even when their pens agree.
+        // P2.7.4 Q7: two fragments at different angles are not one line. A merged write puts
+        // the whole replacement in the head fragment, drawn through the head's matrix, so the
+        // tail's text would move if its direction disagreed.
+        && head.frame.same_direction(&next.frame)
         && (head.baseline() - next.baseline()).abs() <= BASELINE_TOLERANCE
         && {
             let gap = measured_gap(head, next, head_span, next_span);
@@ -1587,6 +1712,8 @@ fn describe_group(
     // that span rather than the line.
     let span = group_span(document, page, runs, pairs, group);
     let head_pair = pairs[group.first];
+    // P2.7.4: a box's extent is read along the run's own advance axis, never the page's `x`.
+    let group_frame = runs[group.first].frame;
     let box_width = if head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong)
         && shared_box_is_own_chain(runs, pairs, group)
     {
@@ -1596,12 +1723,20 @@ fn describe_group(
         // is not a neighbouring line's — so the box never enters the quota comparison.
         None
     } else {
-        rect.map(crate::editor::geometry::PdfRect::width)
+        rect.map(|rect| {
+            let (lo, hi) = pdf_rect_along(&rect, group_frame);
+            hi - lo
+        })
     };
     let group_strong = head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong);
     let smallest_containing = head_pair.is_some_and(|pair| pair.smallest_containing);
-    let (width, box_suspicious) =
-        match resolve_quota(span, box_width, smallest_containing, group_strong) {
+    let (width, box_suspicious) = match resolve_quota(
+        span,
+        box_width,
+        smallest_containing,
+        group_strong,
+        group_frame.is_horizontal(),
+    ) {
             Quota::Box(box_width) => (Some(box_width), false),
             Quota::Span { width, suspicious } => (Some(width), suspicious),
             Quota::Unmeasurable => {
@@ -1814,12 +1949,19 @@ fn group_box_suspicious(
     group: &RunGroup,
 ) -> bool {
     let span = group_span(document, page, runs, pairs, group);
-    let box_width = union_rect(group, pairs, rects).map(crate::editor::geometry::PdfRect::width);
+    let frame = runs[group.first].frame;
+    let box_width = union_rect(group, pairs, rects).map(|rect| pdf_rect_along(&rect, frame));
     let head_pair = pairs[group.first];
     let strong = head_pair.is_some_and(|pair| pair.confidence == PairConfidence::Strong);
     let smallest_containing = head_pair.is_some_and(|pair| pair.smallest_containing);
     matches!(
-        resolve_quota(span, box_width, smallest_containing, strong),
+        resolve_quota(
+            span,
+            box_width.map(|(lo, hi)| hi - lo),
+            smallest_containing,
+            strong,
+            frame.is_horizontal(),
+        ),
         Quota::Span {
             suspicious: true,
             ..
@@ -1853,6 +1995,7 @@ fn resolve_quota(
     box_width: Option<f32>,
     smallest_containing: bool,
     strong: bool,
+    horizontal: bool,
 ) -> Quota {
     match span {
         Some(span) => {
@@ -1862,8 +2005,15 @@ fn resolve_quota(
                 suspicious,
             }
         }
+        // P2.7.4 Q2: a box's width is only a width when the text advances horizontally. For a
+        // turned run the box's `x` extent is the glyph *height* - measured at 18.12pt against
+        // an advance of 114.67pt - so trusting it would hand the gate a number six times too
+        // small and refuse every replacement that fits. No span means unmeasurable; the run
+        // refuses rather than guess with a number known to be the wrong quantity.
         None => match box_width {
-            Some(box_width) if strong && smallest_containing => Quota::Box(box_width),
+            Some(box_width) if strong && smallest_containing && horizontal => {
+                Quota::Box(box_width)
+            }
             _ => Quota::Unmeasurable,
         },
     }
@@ -1977,7 +2127,7 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     if !verdict.editable {
         return Err(refuse(match verdict.gate.as_deref() {
             Some("encoding-round-trip") => Gate::EncodingRoundTrip,
-            Some("rotated-text") => Gate::RotatedText,
+            Some("mirrored-text") => Gate::MirroredText,
             Some("nested-xobject") => Gate::NestedXObject,
             _ => Gate::FontEncoding,
         }));

@@ -16,6 +16,7 @@
 use lopdf::{content::Operation, Dictionary, Document, Object, ObjectId};
 use std::collections::HashMap;
 
+use crate::editor::geometry::{Point2, RunFrame};
 use crate::model::AppError;
 
 /// Bounds a page's decompressed content (P2.4 T3e / F3).
@@ -154,21 +155,13 @@ pub struct RawRun {
     /// honest width then, and the run refuses rather than guess.
     pub page_scale: Option<f32>,
 
-    /// Unit vectors of the composed matrix's two axes, in page space: where one unit of text
-    /// advance points, and where the glyph "up" direction points (P2.7.4).
+    /// The run's text direction in page space (P2.7.4).
     ///
-    /// For an untransformed page these are `(1, 0)` and `(0, 1)`, so every formula written in
-    /// terms of them reduces to today's. They exist so a rise, a span or a seam can be carried
-    /// through the transform rather than assumed horizontal.
-    pub advance_axis: (f32, f32),
-    pub up_axis: (f32, f32),
-
-    /// True when the text matrix was not axis-aligned (P2.7 hotfix H0).
-    ///
-    /// [`Self::advance`] is measured along the text axis. For a rotated run that axis is not
-    /// horizontal, so the advance is not a width and the `fits-width` gate would compare it
-    /// against a horizontal box. Such runs refuse until P2.7.4 measures transforms.
-    pub rotated: bool,
+    /// For an untransformed page this is [`RunFrame::PAGE`], so every projection written in
+    /// terms of it reduces to the coordinate the pre-phase code read directly. It exists so a
+    /// rise, a span, a span window or a seam can be measured along the axis the text actually
+    /// advances on rather than assumed horizontal.
+    pub frame: RunFrame,
     /// Set on the **placeholder** run standing for a `Do` this walk refused to descend
     /// (P2.7.3 Q1); `None` for every ordinary run.
     ///
@@ -218,7 +211,13 @@ impl RawRun {
     /// added to `page_origin.1`; the rise must be carried through the matrix like any other
     /// text-space offset. For the identity CTM this equals [`Self::baseline`].
     pub fn page_baseline(&self) -> f32 {
-        self.page_origin.1 + self.rise * self.up_axis.1
+        let origin = Point2::new(self.page_origin.0, self.page_origin.1);
+        self.frame.across(origin) + self.rise
+    }
+
+    /// The run's page-space pen position.
+    pub fn page_point(&self) -> Point2 {
+        Point2::new(self.page_origin.0, self.page_origin.1)
     }
 
     /// The innermost `MCID` this run sits in, if any.
@@ -871,8 +870,7 @@ fn walk_level<'a>(
                 origin,
                 page_origin,
                 page_scale,
-                advance_axis,
-                up_axis,
+                frame: RunFrame::from_vectors(advance_axis, up_axis),
                 font_size: walker.size,
                 advance: spaced_advance(&metrics, &text, walker),
                 advance_exact: advance_exact.map(|width| spaced_width(width, &text, walker)),
@@ -887,7 +885,6 @@ fn walk_level<'a>(
                 ),
                 marked_content: marked_content.clone(),
                 rise: walker.rise(),
-                rotated: walker.is_rotated(),
                 xobject_refusal: None,
             });
         }
@@ -935,8 +932,7 @@ fn placeholder_run(
         origin: (0.0, 0.0),
         page_origin: (0.0, 0.0),
         page_scale: Some(1.0),
-        advance_axis: (1.0, 0.0),
-        up_axis: (0.0, 1.0),
+        frame: RunFrame::PAGE,
         font_size: 0.0,
         advance: 0.0,
         advance_exact: None,
@@ -945,7 +941,6 @@ fn placeholder_run(
         style_class: String::new(),
         marked_content: Vec::new(),
         rise: 0.0,
-        rotated: false,
         xobject_refusal: Some(reason),
     }
 }
@@ -1316,11 +1311,10 @@ impl TextMatrixWalk {
     /// True when the text matrix is not axis-aligned (P2.7 hotfix H0).
     ///
     /// The matrix maps text space to user space, so its first column `(a, b)` is where one
-    /// unit of text advance points. An unrotated, unskewed run has `b == 0` (and `c == 0`);
-    /// a run rotated by 90° has `(0, 1)`. `advance` is measured along the *text* axis, so for
-    /// a rotated run it is not a horizontal width, and `fits-width` would compare it against
-    /// a horizontal box. Until transforms are measured properly (P2.7.4) such runs must
-    /// refuse rather than be measured on the wrong axis.
+    /// unit of text advance points. Kept as the raw predicate even after P2.7.4 made rotated
+    /// text editable: the traversal tests assert the *detection* is right, and the frame is
+    /// what the measurement path now uses. Refusal is no longer keyed on this.
+    #[cfg(test)]
     fn is_rotated(&self) -> bool {
         const EPSILON: f32 = 1e-4;
         // Text space reaches the page through `tm x ctm`, so the axis a glyph advances along
@@ -3165,9 +3159,10 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "ROTATED");
         assert!(
-            runs[0].rotated,
-            "a 90 degree matrix must be flagged rotated"
+            !runs[0].frame.is_horizontal(),
+            "a 90 degree matrix must give the run a turned frame"
         );
+        assert_eq!(runs[0].frame.advance, crate::editor::geometry::Point2::new(0.0, 1.0));
         // The origin still reads correctly: the first column of the matrix is the advance
         // direction, but `e`/`f` are still the pen position.
         assert_eq!(runs[0].origin, (300.0, 100.0));
@@ -3183,7 +3178,7 @@ mod tests {
 
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "ROTATED");
-        assert!(!runs[0].rotated);
+        assert_eq!(runs[0].frame, crate::editor::geometry::RunFrame::PAGE);
     }
 
     /// P2.7 T-7: H0 read rotation from `Tm` only, so a rotation applied by `cm` — which the
@@ -3199,8 +3194,8 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "ROTATED");
         assert!(
-            runs[0].rotated,
-            "a 90 degree `cm` with an identity `Tm` draws vertical text; it must be flagged rotated"
+            !runs[0].frame.is_horizontal(),
+            "a 90 degree `cm` with an identity `Tm` draws vertical text; it must give the run a turned frame"
         );
     }
 
@@ -3213,7 +3208,11 @@ mod tests {
         let runs = locate_runs(&document, page).unwrap();
 
         assert_eq!(runs.len(), 1);
-        assert!(!runs[0].rotated, "a pure translation is not a rotation");
+        assert_eq!(
+            runs[0].frame,
+            crate::editor::geometry::RunFrame::PAGE,
+            "a pure translation is not a rotation"
+        );
     }
 
     /// The CTM is graphics state: `Q` restores what `q` saved. A rotation undone before the
@@ -3227,7 +3226,7 @@ mod tests {
 
         assert_eq!(runs.len(), 1);
         assert!(
-            !runs[0].rotated,
+            runs[0].frame.is_horizontal(),
             "`Q` restores the identity, so this run is axis-aligned"
         );
     }
@@ -3263,7 +3262,7 @@ mod tests {
 
         let runs = locate_runs(&document, page).unwrap();
         assert_eq!(runs.len(), 1);
-        assert!(!runs[0].rotated);
+        assert_eq!(runs[0].frame, crate::editor::geometry::RunFrame::PAGE);
     }
 
     /// P2.7.1 B-5: `Ts` is recorded on each run, and it does **not** move the pen. The two
