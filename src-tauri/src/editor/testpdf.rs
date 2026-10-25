@@ -11,7 +11,18 @@
 //! those gates even where the committed-fixture path is limited.
 
 use lopdf::content::{Content, Operation};
-use lopdf::{dictionary, Dictionary, Document, Object, Stream};
+use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
+
+/// A `Dictionary` from string pairs, for tests that need a font dictionary without a
+/// document around it.
+#[cfg(test)]
+pub fn dictionary_for_test(pairs: &[(&str, &str)]) -> Dictionary {
+    let mut dictionary = Dictionary::new();
+    for (key, value) in pairs {
+        dictionary.set(key.to_string(), Object::Name(value.as_bytes().to_vec()));
+    }
+    dictionary
+}
 
 /// A content stream holding the given operations.
 fn page_body(operations: Vec<Operation>) -> Stream {
@@ -202,6 +213,135 @@ pub fn cid_identity_page() -> Document {
             "Encoding" => "Identity-H",
         },
     )
+}
+
+/// P2.8: a Type0 page that is **editable** — the positive counterpart to
+/// [`cid_identity_page`].
+///
+/// Codes `<0001>`–`<0003>` draw `A`, `B`, `C`, and the run shows `<0001><0002>` ("AB").
+/// The `/ToUnicode` names the character behind each code, so an encoder has something to
+/// reverse; `/W` gives each cid an exact advance, so the width gate is measurable. No program
+/// is embedded, which keeps the fixture to the CMap path — the route that decides *meaning*
+/// and therefore the one every CID edit must be able to take on its own.
+pub fn cid_tounicode_page() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+
+    let cmap = b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\nbegincmap\n\
+/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+3 beginbfchar\n<0001> <0041>\n<0002> <0042>\n<0003> <0043>\nendbfchar\n\
+endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+        .to_vec();
+    let mut cmap_stream = Stream::new(dictionary! {}, cmap);
+    cmap_stream.compress().unwrap();
+    let cmap_id = document.add_object(cmap_stream);
+
+    let descendant_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => "CidFixture",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "CIDToGIDMap" => "Identity",
+        "DW" => 500,
+        "W" => vec![1.into(), vec![600.into(), 600.into(), 600.into()].into()],
+    });
+
+    let font_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => "CidFixture",
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(descendant_id)],
+        "ToUnicode" => cmap_id,
+    });
+
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let content_id = document.add_object(page_body(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 10.into()]),
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new(
+            "Tj",
+            vec![Object::String(
+                vec![0x00, 0x01, 0x00, 0x02],
+                StringFormat::Hexadecimal,
+            )],
+        ),
+        Operation::new("ET", vec![]),
+    ]));
+
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// P2.8 C7: a Type0 page whose `/FontFile2` is **compressed**, and whose `/ToUnicode` names
+/// only the characters of `run_text`.
+///
+/// This is the shape every real document has, and the one that exposed the `program_of` bug:
+/// the stream content is deflate-compressed, so a reader that skips decompression hands
+/// `ttf-parser` bytes it cannot parse and silently concludes the font covers nothing. The
+/// program is built from `program_glyphs`, so a character the CMap omits but the program has
+/// is reachable *only* if route 2 works.
+pub fn compressed_program_cid_page(program_glyphs: &[char]) -> Document {
+    let mut document = cid_tounicode_page();
+    let page_id = document.get_pages().values().next().copied().unwrap();
+    let font =
+        crate::editor::textlocate::font_dictionary_at(&document, page_id, &[], b"F1").unwrap();
+    let descendant_id = font.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
+        .as_reference()
+        .unwrap();
+
+    let mut program = Stream::new(
+        dictionary! {},
+        true_type_program_with_advance(program_glyphs, 1000),
+    );
+    program.compress().unwrap();
+    let program_id = document.add_object(program);
+    let descriptor_id = document.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "CidFixture",
+        "Flags" => 32,
+        "FontFile2" => program_id,
+    });
+
+    let descendant = document
+        .get_object_mut(descendant_id)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    descendant.set("FontDescriptor", descriptor_id);
+
+    document
 }
 
 /// Gate (b): a font whose `/Differences` map cannot round-trip a byte.
@@ -523,7 +663,11 @@ fn xobject_document_with_font(
 /// `xobject-single.pdf`: the page draws `/X1 Do`, and `X1` draws `ALPHA`.
 pub fn xobject_single() -> Document {
     xobject_document(
-        vec![("X1".into(), form_run("ALPHA"), FormResources::Own(Vec::new()))],
+        vec![(
+            "X1".into(),
+            form_run("ALPHA"),
+            FormResources::Own(Vec::new()),
+        )],
         vec![draw_form("X1")],
     )
 }
@@ -540,7 +684,11 @@ pub fn xobject_nested() -> Document {
                 draw_form("X2"),
                 FormResources::Own(vec!["X2".into()]),
             ),
-            ("X2".into(), form_run("ALPHA"), FormResources::Own(Vec::new())),
+            (
+                "X2".into(),
+                form_run("ALPHA"),
+                FormResources::Own(Vec::new()),
+            ),
         ],
         vec![draw_form("X1")],
     )
@@ -556,7 +704,11 @@ pub fn xobject_inherited_resources() -> Document {
     xobject_document(
         vec![
             ("X1".into(), draw_form("X2"), FormResources::Inherit),
-            ("X2".into(), form_run("ALPHA"), FormResources::Own(Vec::new())),
+            (
+                "X2".into(),
+                form_run("ALPHA"),
+                FormResources::Own(Vec::new()),
+            ),
         ],
         vec![draw_form("X1")],
     )
@@ -600,7 +752,11 @@ pub fn xobject_depth_nine() -> Document {
                 draw_form(child),
                 FormResources::Own(vec![child.clone()]),
             ),
-            None => (name.clone(), form_run("ALPHA"), FormResources::Own(Vec::new())),
+            None => (
+                name.clone(),
+                form_run("ALPHA"),
+                FormResources::Own(Vec::new()),
+            ),
         })
         .collect();
     xobject_document(forms, vec![draw_form("X1")])
@@ -1148,7 +1304,13 @@ fn embedded_subset_font(
     program_glyphs: &[char],
     advance_width: u16,
 ) -> lopdf::ObjectId {
-    embedded_subset_font_with(document, program_glyphs, advance_width, false, "ABCDEF+FixtureSubset")
+    embedded_subset_font_with(
+        document,
+        program_glyphs,
+        advance_width,
+        false,
+        "ABCDEF+FixtureSubset",
+    )
 }
 
 /// Like [`embedded_subset_font`], but with a **FlateDecode-compressed** `FontFile2` program and a
@@ -1558,7 +1720,9 @@ pub fn tj_grid_walk() -> Document {
     // `FontMetrics::resolve` reads no metric — the exact A′ shape the drift needs.
     let font_id = embedded_subset_font_with(
         &mut document,
-        &"5 monthUniversitylevelDataScience".chars().collect::<Vec<_>>(),
+        &"5 monthUniversitylevelDataScience"
+            .chars()
+            .collect::<Vec<_>>(),
         600,
         true,
         "ABCDEE+Monaco",
@@ -1711,19 +1875,13 @@ pub fn mcid_boundaries() -> Document {
             Operation::new("Td", vec![72.into(), 700.into()]),
             Operation::new(
                 "BDC",
-                vec![
-                    "P".into(),
-                    Object::Dictionary(dictionary! { "MCID" => 5 }),
-                ],
+                vec!["P".into(), Object::Dictionary(dictionary! { "MCID" => 5 })],
             ),
             Operation::new("Tj", vec![Object::string_literal("ALPHA ")]),
             Operation::new("EMC", vec![]),
             Operation::new(
                 "BDC",
-                vec![
-                    "P".into(),
-                    Object::Dictionary(dictionary! { "MCID" => 6 }),
-                ],
+                vec!["P".into(), Object::Dictionary(dictionary! { "MCID" => 6 })],
             ),
             Operation::new("Tj", vec![Object::string_literal("BETA")]),
             Operation::new("EMC", vec![]),
@@ -1784,7 +1942,17 @@ pub fn rotated_by_graphics_matrix() -> Document {
             ),
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["F1".into(), 24.into()]),
-            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    72.into(),
+                    700.into(),
+                ],
+            ),
             Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
             Operation::new("ET", vec![]),
             Operation::new("Q", vec![]),
@@ -1813,7 +1981,17 @@ pub fn translated_by_graphics_matrix() -> Document {
             ),
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["F1".into(), 24.into()]),
-            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    72.into(),
+                    700.into(),
+                ],
+            ),
             Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
             Operation::new("ET", vec![]),
             Operation::new("Q", vec![]),
@@ -1843,7 +2021,17 @@ pub fn rotation_restored_before_showing() -> Document {
             Operation::new("Q", vec![]),
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["F1".into(), 24.into()]),
-            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    72.into(),
+                    700.into(),
+                ],
+            ),
             Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
             Operation::new("ET", vec![]),
         ]],
@@ -1858,7 +2046,17 @@ pub fn unrotated_text() -> Document {
         vec![vec![
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["F1".into(), 24.into()]),
-            Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), 300.into(), 100.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    300.into(),
+                    100.into(),
+                ],
+            ),
             Operation::new("Tj", vec![Object::string_literal("ROTATED")]),
             Operation::new("ET", vec![]),
         ]],
@@ -1934,7 +2132,11 @@ pub fn actualtext_span() -> Document {
 pub fn actualtext_shared_inline() -> Document {
     let actual: Vec<u8> = vec![0xFE, 0xFF]
         .into_iter()
-        .chain("ALPHA BETA".encode_utf16().flat_map(|unit| unit.to_be_bytes()))
+        .chain(
+            "ALPHA BETA"
+                .encode_utf16()
+                .flat_map(|unit| unit.to_be_bytes()),
+        )
         .collect();
     document_with_pages(
         winansi_helvetica(),

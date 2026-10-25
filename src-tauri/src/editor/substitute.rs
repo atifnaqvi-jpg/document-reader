@@ -130,7 +130,16 @@ fn original_covers(
         }
     }
 
-    let Some(program) = font.and_then(|font| program_of(document, font)) else {
+    // P2.8: a Type0 font keeps its glyphs on the descendant, not on the root dictionary that
+    // `embedded_program` reads, so coverage is the CID codec's answer: `/ToUnicode` first,
+    // then (under `/Identity`) the program's own `cmap`.
+    if let Some(font) = font {
+        if let Some(cid) = crate::editor::cid::CidFont::resolve(document, font) {
+            return cid.covers(text);
+        }
+    }
+
+    let Some(program) = font.and_then(|font| embedded_program(document, font)) else {
         return false;
     };
     let Ok(face) = ttf_parser::Face::parse(&program, 0) else {
@@ -144,7 +153,7 @@ fn original_covers(
 /// A `/FontDescriptor /FontFile2` (TrueType) or `/FontFile3` (OpenType) stream is the only
 /// place an embedded simple font keeps its glyphs. `/FontFile` (Type 1) is not a TrueType
 /// program and `ttf-parser` cannot read it, so it is deliberately not returned.
-fn program_of(document: &Document, font: &lopdf::Dictionary) -> Option<Vec<u8>> {
+pub(crate) fn embedded_program(document: &Document, font: &lopdf::Dictionary) -> Option<Vec<u8>> {
     let descriptor = font
         .get(b"FontDescriptor")
         .ok()
@@ -169,18 +178,24 @@ fn deref_object<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Ob
     }
 }
 
-/// A stream object's bytes, following a reference if needed.
+/// A stream object's bytes, following a reference if needed and **decompressing** them.
 ///
-/// `Stream::content` is already decompressed by lopdf when the filter is known (Flate for
-/// a typical `FontFile2`); an uncompressed program passes through unchanged. A filter
-/// lopdf cannot decode leaves the bytes opaque, so the coverage check degrades to "not
-/// covered" — a refusal, never a panic.
+/// `Stream::content` is the raw stream body: for a typical Flate `FontFile2` that is still
+/// compressed, and `ttf-parser` cannot read it. Reading it raw is not a corner case — it was
+/// the only case for every real PDF, so coverage always fell through to "not covered" and
+/// T11 substituted a font the original could have set (P2.8 §1.1b). An uncompressed program
+/// decompresses to itself. A filter lopdf cannot decode leaves the bytes opaque, so the
+/// coverage check degrades to "not covered" — a refusal, never a panic.
 fn stream_bytes(document: &Document, object: &Object) -> Option<Vec<u8>> {
-    let stream = match object {
-        Object::Reference(id) => document.get_object(*id).ok()?.as_stream().ok()?,
-        other => other.as_stream().ok()?,
+    let mut stream = match object {
+        Object::Reference(id) => document.get_object(*id).ok()?.as_stream().ok()?.clone(),
+        other => other.as_stream().ok()?.clone(),
     };
-    Some(stream.content.clone())
+    // A stream with no filter is already plain; `decompress` would only clone it.
+    if !stream.dict.get(b"Filter").map(|_| true).unwrap_or(false) {
+        return Some(stream.content);
+    }
+    stream.decompress().ok().map(|_| stream.content)
 }
 
 /// Strips a subset prefix from a `/BaseFont` name.
@@ -270,6 +285,9 @@ pub enum FontMetrics {
     /// `/FirstChar`. This is the only source for a *non-embedded* face (the Maastricht
     /// brochure's Times/Arial), and it is the same array a viewer uses to lay the run out.
     SimpleWidths { first_char: u16, widths: Vec<u16> },
+    /// A CID/Type0 font measured from `/W` then `/DW` (P2.8). The widths are per **cid**, so
+    /// measurement encodes the text first — the same codes the write path will install.
+    Cid { font: crate::editor::cid::CidFont },
     /// No usable metric source: the caller will be handed `None` rather than a guess.
     Nominal,
 }
@@ -311,7 +329,10 @@ impl FontMetrics {
                 };
             }
         }
-        if let Some(program) = program_of(document, font) {
+        if let Some(cid) = crate::editor::cid::CidFont::resolve(document, font) {
+            return FontMetrics::Cid { font: cid };
+        }
+        if let Some(program) = embedded_program(document, font) {
             return FontMetrics::TrueType { program };
         }
         // A non-embedded face still publishes its advances in `/Widths`. Reading them is the
@@ -334,6 +355,10 @@ impl FontMetrics {
             FontMetrics::SimpleWidths { first_char, widths } => {
                 simple_widths_advance(*first_char, widths, text, font_size)
             }
+            FontMetrics::Cid { font } => font
+                .encode(text)
+                .ok()
+                .and_then(|codes| font.advance(&codes, font_size)),
             FontMetrics::Nominal => None,
         }
     }
@@ -380,7 +405,12 @@ fn widths_of(document: &Document, font: &lopdf::Dictionary) -> Option<(u16, Vec<
 /// whole measurement `None`: the font dictionary does not describe that glyph, so an advance
 /// for it would be fiction — the same contract [`true_type_advance`] holds for a missing
 /// `cmap` entry.
-fn simple_widths_advance(first_char: u16, widths: &[u16], text: &str, font_size: f32) -> Option<f32> {
+fn simple_widths_advance(
+    first_char: u16,
+    widths: &[u16],
+    text: &str,
+    font_size: f32,
+) -> Option<f32> {
     let mut thousandths: f32 = 0.0;
     for code in text.bytes() {
         let index = (code as u16).checked_sub(first_char)? as usize;
@@ -509,10 +539,7 @@ mod tests {
 
         let error = plan(&document, page_id, &run.font_key, &info, "HELP", false).unwrap_err();
         assert_eq!(error.code(), "SUBSTITUTE_REFUSED");
-        assert!(
-            error.to_string().contains("add a text annotation"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("annotation"), "{error}");
     }
 
     /// O-ST2-2 / P2.4.2 Phase A: the metric source is the font file, not an approximation. A
@@ -576,8 +603,13 @@ mod tests {
             "a non-embedded face with /Widths must resolve to SimpleWidths, not Nominal"
         );
         // The fixture publishes 500 for every code in 32..=126.
-        let width = metrics.advance("Test", 10.0).expect("published widths are usable");
-        assert!((width - 4.0 * 500.0 * 10.0 / 1000.0).abs() < 0.001, "{width}");
+        let width = metrics
+            .advance("Test", 10.0)
+            .expect("published widths are usable");
+        assert!(
+            (width - 4.0 * 500.0 * 10.0 / 1000.0).abs() < 0.001,
+            "{width}"
+        );
         assert!(
             metrics.advance("\u{2192}", 10.0).is_none(),
             "a code outside the published range has no advance"
@@ -608,9 +640,6 @@ mod tests {
         // U+2192 (→) has no WinAnsi code.
         let error = plan(&document, page_id, &run.font_key, &info, "H\u{2192}", true).unwrap_err();
         assert_eq!(error.code(), "GLYPHS_NOT_COVERABLE");
-        assert!(
-            error.to_string().contains("add a text annotation"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("annotation"), "{error}");
     }
 }

@@ -23,16 +23,15 @@ use lopdf::Document;
 
 use crate::editor::runmetrics::{CharSpan, PdfiumCharGrid};
 use crate::editor::textlocate::{
-    self, is_cid_font, is_simple_font, page_id, ContentOperation, FontInfo, RawRun, RunId,
-    XObjectRefusal,
+    self, is_simple_font, page_id, ContentOperation, FontInfo, RawRun, RunId, XObjectRefusal,
 };
 use crate::model::AppError;
 
 /// The Stage-1 admissibility gates (T3), each naming the reason it can refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
-    /// (a) simple font — Type1/TrueType, not CID/Identity-H.
-    SimpleFont,
+    /// (a) a font the write path cannot read back — neither simple nor a readable Type0.
+    FontEncoding,
     /// (b) `encode_text(decode_text(bytes)) == bytes` for the run.
     EncodingRoundTrip,
     /// (c) the font is not subset-flagged (`ABCDEF+`, partial glyphs).
@@ -57,7 +56,7 @@ impl Gate {
     /// asserted on and, later, translated without matching prose.
     pub fn name(self) -> &'static str {
         match self {
-            Gate::SimpleFont => "simple-font",
+            Gate::FontEncoding => "font-encoding",
             Gate::EncodingRoundTrip => "encoding-round-trip",
             Gate::NotSubset => "not-subset",
             Gate::FitsWidth => "fits-width",
@@ -71,13 +70,15 @@ impl Gate {
     /// A short, calm sentence naming the gate and the way out.
     pub fn message(self) -> &'static str {
         match self {
-            Gate::SimpleFont => {
-                "this run uses a CID/Type0 font, which Stage 1 cannot rewrite; \
-                 add a text annotation instead"
+            Gate::FontEncoding => {
+                "this text uses a CID/Type0 font that publishes no /ToUnicode, so it cannot \
+                 be read back reliably; select a narrower range, or use the annotation tools \
+                 to add a note"
             }
             Gate::EncodingRoundTrip => {
                 "this run's font encoding cannot reproduce its own bytes, so an edit \
-                 could corrupt it; add a text annotation instead"
+                 could corrupt it; select a narrower range, or use the annotation tools to \
+                 add a note"
             }
             Gate::SelectionRange => {
                 "these runs are not one unbroken line of the same typeface, so they cannot \
@@ -85,20 +86,23 @@ impl Gate {
             }
             Gate::NotSubset => {
                 "this run's font is an embedded subset with only the glyphs the \
-                 original used; add a text annotation instead"
+                 original used; select a narrower range, or use the annotation tools to \
+                 add a note"
             }
             Gate::FitsWidth => "the replacement is wider than the space available",
             Gate::RunMismatch => {
                 "this text is not addressable in the page's content stream (or it changed \
-                 since it was selected); add a text annotation instead"
+                 since it was selected); select a narrower range, or use the annotation \
+                 tools to add a note"
             }
             Gate::RotatedText => {
                 "this text is rotated or skewed, so its width cannot yet be measured reliably; \
-                 add a text annotation instead"
+                 select a narrower range, or use the annotation tools to add a note"
             }
             Gate::NestedXObject => {
                 "this text sits in a form nested too deeply to edit, or in a form that draws \
-                 itself; add a text annotation instead"
+                 itself; select a narrower range, or use the annotation tools to add a \
+                 note"
             }
         }
     }
@@ -166,6 +170,9 @@ pub struct RunGates {
     pub rotated: bool,
     /// Why this run is a Form XObject refusal placeholder (P2.7.3 X1), if it is one.
     pub nested_xobject: Option<XObjectRefusal>,
+    /// A CID/Type0 font's `/ToUnicode` exists, so its codes can be read back (P2.8).
+    /// Meaningless for a simple font.
+    pub cid_readable: bool,
 }
 
 /// Resolves the font gates for a run.
@@ -187,6 +194,7 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
             round_trips: false,
             rotated: false,
             nested_xobject: run.xobject_refusal,
+            cid_readable: false,
         });
     }
     // P2.7.3 §6: the run's font is resolved at the level the run is addressed in. A form
@@ -194,9 +202,10 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
     let font = textlocate::font_info_at(document, page_id, &run.id.xobject_path, &run.font_key)
         .ok_or_else(|| {
             AppError::TextRunNotEditable(format!(
-                "this run's font ({}) could not be resolved; add a text annotation instead (gate: {})",
+                "this run's font ({}) could not be resolved; select a narrower range, or use the \
+                 annotation tools to add a note (gate: {})",
                 String::from_utf8_lossy(&run.font_key),
-                Gate::SimpleFont.name()
+                Gate::FontEncoding.name()
             ))
         })?;
 
@@ -212,11 +221,19 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
             })
             .unwrap_or(false);
 
+    // P2.8: a Type0 run's bytes are codes, so its own round-trip is decided by the CID
+    // codec rather than by lopdf's one-byte encoding machinery.
+    let cid_readable =
+        crate::editor::cid::resolve_at(document, page_id, &run.id.xobject_path, &run.font_key)
+            .map(|cid| cid.is_readable())
+            .unwrap_or(false);
+
     Ok(RunGates {
         font,
         round_trips,
         rotated: run.rotated,
         nested_xobject: run.xobject_refusal,
+        cid_readable,
     })
 }
 
@@ -242,13 +259,17 @@ pub fn font_admissibility(gates: &RunGates) -> Admissibility {
     if let Some(reason) = gates.nested_xobject {
         return Admissibility::refused_with(Gate::NestedXObject, reason.message());
     }
-    if !is_simple_font(&gates.font) {
-        return Admissibility::refused(Gate::SimpleFont);
+    // (a) P2.8: a simple font is written through its own one-byte encoding; a Type0 is
+    // written as two-byte codes through its `/ToUnicode` and (under Identity) its program.
+    // Anything else cannot be read back at all, which is the only thing this gate refuses.
+    let simple = is_simple_font(&gates.font);
+    if !simple && !gates.cid_readable {
+        return Admissibility::refused(Gate::FontEncoding);
     }
-    if is_cid_font(&gates.font) {
-        return Admissibility::refused(Gate::SimpleFont);
-    }
-    if !gates.round_trips {
+    // A simple font's round-trip is a prerequisite here. A CID run has no one-byte
+    // round-trip to check: its bytes are codes, and the codec answers coverage per
+    // replacement character when the write path encodes it.
+    if simple && !gates.round_trips {
         return Admissibility::refused(Gate::EncodingRoundTrip);
     }
     Admissibility::editable()
@@ -272,7 +293,8 @@ pub fn width_refusal(old_width: f32, new_width: f32) -> Option<AppError> {
     if new_width > old_width + tolerance {
         return Some(AppError::TextRunNotEditable(format!(
             "the replacement needs {new_width:.1}pt, available {old_width:.1}pt; \
-             add a text annotation instead (gate: {})",
+             select a narrower range, or use the annotation tools to add a note \
+             (gate: {})",
             Gate::FitsWidth.name()
         )));
     }
@@ -426,7 +448,8 @@ const BOX_SPAN_SLACK: f32 = 1.25;
 /// in-file metrics, so the only width on offer is a box that may be a whole line. Trusting it
 /// is exactly the 0.4.1 bug, so the safe direction is to refuse and point at the annotation.
 const UNMEASURABLE_WIDTH_MESSAGE: &str = "this run's font carries no width metrics to measure \
-     the replacement against; add a text annotation instead (gate: fits-width)";
+     the replacement against; select a narrower range, or use the annotation tools to add a \
+     note (gate: fits-width)";
 
 /// Whether two `Tf` sizes are the same fragment's (P2.4.2, relative rule).
 ///
@@ -1137,6 +1160,19 @@ fn mergeable(
     next_span: Option<CharSpan>,
 ) -> bool {
     head.style_class == next.style_class
+        // P2.8 §1.1(a): the same face, not merely the same style. `style_match` is coarse on
+        // purpose (a producer's `F4`→`F5` weight swap must not split a line), so it also calls
+        // `ArialMT`, `ABCDEE+Monaco` and `ABCDEE+Wingdings-Regular` all `Helvetica`. A merged
+        // write draws everything through the head's font, so merging across faces would render
+        // one face's text in another's glyphs and delete the rest.
+        && head.face == next.face
+        // P2.8: a merged write puts the whole replacement in the head fragment and clears the
+        // rest, drawing all of it through the head's font. So a fragment whose font cannot draw
+        // arbitrary text is not a write target, whatever other fragments share its style — the
+        // Maastricht line's `F3` Monaco and `F6` Monaco/Identity-H are one style class and two
+        // different codecs, and the Wingdings `F7` icon is a third.
+        && head.composable
+        && next.composable
         // P2.7.3 X1: a placeholder is not text, and two of them are not one run. Nor may a
         // run inside a form merge with one on the page: they have different addresses, so a
         // single write could not clear both.
@@ -1686,7 +1722,8 @@ pub fn describe_runs(
 
 /// The T21 refusal message for an editable run with no rendered box to pair with.
 pub const UNPAIRED_MESSAGE: &str = "no matching rendered box on the page; \
-     add a text annotation instead (gate: run-mismatch)";
+     select a narrower range, or use the annotation tools to add a note \
+     (gate: run-mismatch)";
 fn describe_single(
     document: &Document,
     page: u32,
@@ -1929,7 +1966,7 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
             Some("encoding-round-trip") => Gate::EncodingRoundTrip,
             Some("rotated-text") => Gate::RotatedText,
             Some("nested-xobject") => Gate::NestedXObject,
-            _ => Gate::SimpleFont,
+            _ => Gate::FontEncoding,
         }));
     }
 
@@ -1958,7 +1995,7 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     // declares its own `/Font`, and the page may not name that resource at all — the page
     // lookup would report "no program" and substitute a face for text the original sets.
     let font = textlocate::font_dictionary_at(document, page_id, &level, &run.font_key)
-        .ok_or_else(|| refuse(Gate::SimpleFont))?;
+        .ok_or_else(|| refuse(Gate::FontEncoding))?;
     let plan = crate::editor::substitute::plan_with_font(
         document,
         Some(&font),
@@ -1971,24 +2008,35 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     // be in force. Keep-original uses the run's own encoding; MECH-A uses WinAnsi, which
     // the substitute declares. In both cases an unmappable character is a named refusal,
     // never a silent drop (`string_to_bytes` would drop it).
-    let new_bytes = match &plan {
+    let (new_bytes, cid) = match &plan {
         crate::editor::substitute::Plan::KeepOriginal => {
-            let encoding = font
-                .get_font_encoding(document)
-                .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
-            let bytes = encoding.string_to_bytes(&request.replacement);
-            let round_tripped = encoding
-                .bytes_to_string(&bytes)
-                .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
-            if round_tripped != request.replacement {
-                return Err(refuse(Gate::EncodingRoundTrip));
+            // P2.8: a Type0 run is written as two-byte codes. Encoding it through lopdf's
+            // one-byte machinery would treat each byte of the replacement as a code and drop
+            // whatever does not map — the silent-truncation failure this arm exists to avoid.
+            if let Some(cid) = crate::editor::cid::CidFont::resolve(document, &font) {
+                let bytes = cid
+                    .encode(&request.replacement)
+                    .map_err(|refusal| AppError::TextRunNotEditable(refusal.message()))?;
+                (bytes, Some(cid))
+            } else {
+                let encoding = font
+                    .get_font_encoding(document)
+                    .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
+                let bytes = encoding.string_to_bytes(&request.replacement);
+                let round_tripped = encoding
+                    .bytes_to_string(&bytes)
+                    .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
+                if round_tripped != request.replacement {
+                    return Err(refuse(Gate::EncodingRoundTrip));
+                }
+                (bytes, None)
             }
-            bytes
         }
-        crate::editor::substitute::Plan::Substitute { .. } => {
+        crate::editor::substitute::Plan::Substitute { .. } => (
             crate::editor::afm::winansi_encode(&request.replacement)
-                .ok_or(AppError::GlyphsNotCoverable)?
-        }
+                .ok_or(AppError::GlyphsNotCoverable)?,
+            None,
+        ),
     };
 
     // T13: the width gate compares the FINAL font's metrics. When MECH-A fires, the final
@@ -1996,7 +2044,16 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     // the caller's PDFium measurement is. `old_width` is unchanged either way (O1).
     let (new_width, substitution, note) = match &plan {
         crate::editor::substitute::Plan::KeepOriginal => {
-            ((request.measure)(&request.replacement)?, None, None)
+            // P2.8: a CID run's advance comes from its own `/W` then `/DW`, which is what the
+            // renderer uses — PDFium's box width is the union of a merged selection and is not
+            // comparable to one replacement string.
+            let width = match &cid {
+                Some(cid) => cid
+                    .advance(&new_bytes, request.font_size)
+                    .ok_or(AppError::GlyphsNotCoverable)?,
+                None => (request.measure)(&request.replacement)?,
+            };
+            (width, None, None)
         }
         crate::editor::substitute::Plan::Substitute { base_font, note } => {
             let width = crate::editor::substitute::substitute_width(
@@ -2377,8 +2434,10 @@ mod tests {
             // The approximation doubles as the exact metric here, so a unit test that does not
             // care about the metric source behaves as before (P2.4.2 Phase A).
             advance_exact: Some(approximation),
-            // Tests name the font by its style class, so a "different resource, same class"
-            // case is expressed by passing the same `font` twice (P2.6 T26).
+            composable: true,
+            // Tests name the font by its style class; the face is the same name, so a test
+            // that wants "same style, different face" sets `face` directly.
+            face: font.to_string(),
             style_class: font.to_string(),
             marked_content: Vec::new(),
             rise: 0.0,
@@ -2403,7 +2462,10 @@ mod tests {
         let mut next = test_run("2", 72.0 + head.advance, 12.0, "F1");
         // Same pen baseline, different ink: exactly what `Ts 5` produces.
         next.rise = 5.0;
-        assert_eq!(next.origin.1, head.origin.1, "the fixture must share a pen baseline");
+        assert_eq!(
+            next.origin.1, head.origin.1,
+            "the fixture must share a pen baseline"
+        );
         assert!(!mergeable(&head, &next, false, None, None));
     }
 
@@ -2421,6 +2483,9 @@ mod tests {
     /// P2.6 T26: two *resources* that name the same face are one style, so a producer's
     /// mid-word resource switch does not split the line. The Maastricht brochure does exactly
     /// this (`F4`/`F5`, both Times at 14.064pt).
+    ///
+    /// P2.8: this survives only because both are *composable* — a simple font can draw an
+    /// arbitrary replacement, so either resource can carry the merged write.
     #[test]
     fn merges_across_resources_that_name_the_same_face() {
         let head = test_run("Scien", 72.0, 12.0, "Times-Roman");
@@ -2428,6 +2493,30 @@ mod tests {
         let mut other_resource = next.clone();
         other_resource.font_key = b"F9".to_vec();
         assert!(mergeable(&head, &other_resource, false, None, None));
+    }
+
+    /// P2.8 §1.1(a): same style class, different face. `ArialMT` and `ABCDEE+Monaco` are both
+    /// `Helvetica` to `style_match`, but a merged write through either would delete the other's
+    /// glyphs. They must stay two runs.
+    #[test]
+    fn never_merges_two_faces_that_share_a_style_class() {
+        let head = test_run("Each hour", 72.0, 12.0, "Helvetica");
+        let mut next = test_run(" of lecture", 72.0 + head.advance, 12.0, "Helvetica");
+        next.face = "Monaco".to_string();
+        assert_eq!(head.style_class, next.style_class);
+        assert!(!mergeable(&head, &next, false, None, None));
+    }
+
+    /// P2.8: a fragment whose font cannot draw the replacement is not a merge target, even
+    /// when its style class matches. The Maastricht line's Monaco is split across `F3`
+    /// (`TrueType`, editable) and `F6` (`Type0/Identity-H`, CID codes); a merged write through
+    /// `F3`'s encoding would emit the second fragment's Unicode as unrelated glyphs.
+    #[test]
+    fn never_merges_a_fragment_whose_font_cannot_be_rewritten() {
+        let head = test_run("Each hour", 72.0, 12.0, "Monaco");
+        let mut next = test_run(" of lecture", 72.0 + head.advance, 12.0, "Monaco");
+        next.composable = false;
+        assert!(!mergeable(&head, &next, false, None, None));
     }
 
     /// A real style change still splits: bold is not roman, and a serif is not a sans.
@@ -3198,8 +3287,11 @@ mod tests {
         assert!(outcome.note.is_none());
     }
 
+    /// P2.8: a Type0 run *without* `/ToUnicode` is still refused at gate (a) — its codes
+    /// cannot be read back, so no replacement can be shown to be what the user typed. The
+    /// fixture has no CMap, which is now the only thing this gate refuses.
     #[test]
-    fn refuses_a_cid_font_with_gate_a() {
+    fn refuses_a_cid_font_without_tounicode() {
         let mut document = testpdf::cid_identity_page();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
@@ -3207,7 +3299,25 @@ mod tests {
 
         let error = edit(&mut document, &request(&run, "EDIT", 100.0, &measure)).unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
-        assert!(error.to_string().contains("simple-font"), "{error}");
+        assert!(error.to_string().contains("font-encoding"), "{error}");
+    }
+
+    /// P2.8: the positive case the old gate made impossible — a Type0 run whose font carries a
+    /// `/ToUnicode` is editable, and the replacement is written as two-byte codes.
+    #[test]
+    fn edits_a_cid_font_through_its_tounicode() {
+        let mut document = testpdf::cid_tounicode_page();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(font_admissibility(&resolve_gates(&document, 0, &run).unwrap()).editable);
+
+        let measure = measure_fixed(10.0);
+        let outcome = edit(&mut document, &request(&run, "BC", 100.0, &measure)).unwrap();
+        assert!(outcome.substitution.is_none());
+
+        let after = textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap();
+        assert_eq!(after[0].text, "BC");
+        assert_eq!(after[0].bytes, vec![0x00, 0x02, 0x00, 0x03]);
     }
 
     /// Stage 2 T14: a subset font is no longer refused by gate (c). With no embedded
@@ -3251,7 +3361,10 @@ mod tests {
         let mut document = testpdf::rotated_text();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
-        assert!(run.rotated, "fixture must be rotated for this test to mean anything");
+        assert!(
+            run.rotated,
+            "fixture must be rotated for this test to mean anything"
+        );
 
         let gates = resolve_gates(&document, 0, &run).unwrap();
         let verdict = font_admissibility(&gates);
@@ -3301,10 +3414,16 @@ mod tests {
         let mut document = testpdf::rotated_by_graphics_matrix();
         let run =
             textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
-        assert!(run.rotated, "fixture must be rotated for this test to mean anything");
+        assert!(
+            run.rotated,
+            "fixture must be rotated for this test to mean anything"
+        );
 
         let gates = resolve_gates(&document, 0, &run).unwrap();
-        assert_eq!(font_admissibility(&gates).gate.as_deref(), Some("rotated-text"));
+        assert_eq!(
+            font_admissibility(&gates).gate.as_deref(),
+            Some("rotated-text")
+        );
 
         // The picker path, which is where a user would otherwise be offered the edit.
         let described = describe_runs(
@@ -3574,7 +3693,11 @@ mod tests {
             .filter_map(|operation| operation.operands.get(1))
             .filter_map(|operand| operand.as_name().ok())
             .collect();
-        assert_eq!(names, vec![&b"P0"[..], &b"P0"[..]], "both BDCs name /P0 again");
+        assert_eq!(
+            names,
+            vec![&b"P0"[..], &b"P0"[..]],
+            "both BDCs name /P0 again"
+        );
 
         {
             let properties = textlocate::properties_mut(&mut document, page).unwrap();
@@ -4100,8 +4223,11 @@ mod tests {
             .into_iter()
             .find(|run| run.operator == "Do")
             .unwrap();
-        let error = edit(&mut document, &request(&placeholder, "X", 10.0, &measure_fixed(10.0)))
-            .expect_err("a placeholder is not text");
+        let error = edit(
+            &mut document,
+            &request(&placeholder, "X", 10.0, &measure_fixed(10.0)),
+        )
+        .expect_err("a placeholder is not text");
         assert!(
             matches!(&error, AppError::TextRunNotEditable(message) if message.contains("nested-xobject")),
             "expected a nested-xobject refusal, got {error:?}"

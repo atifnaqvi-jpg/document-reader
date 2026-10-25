@@ -159,7 +159,8 @@ describe("P2.4 refusal: an overflow is refused with both measured widths", () =>
     const newWidth = 152.3;
     const refusal =
       `the replacement needs ${newWidth.toFixed(1)}pt, available ${oldWidth.toFixed(1)}pt; ` +
-      `add a text annotation instead (gate: fits-width)`;
+      `select a narrower range, or use the annotation tools to add a note ` +
+      `(gate: fits-width)`;
     mounted.backend.on("edit_page_text", () => {
       throw { code: "TEXT_RUN_NOT_EDITABLE", message: refusal };
     });
@@ -191,8 +192,8 @@ describe("P2.4 refusal: an overflow is refused with both measured widths", () =>
     // write path would refuse carries its verdict with it, so the picker greys it out and
     // the panel shows the reason -- which for the width gate means both measured widths.
     const refusal =
-      "the replacement needs 240.0pt, available 118.5pt; add a text annotation instead " +
-      "(gate: fits-width)";
+      "the replacement needs 240.0pt, available 118.5pt; select a narrower range, or use " +
+      "the annotation tools to add a note (gate: fits-width)";
     const run = makeRun({
       admissibility: { editable: false, gate: "fits-width", message: refusal },
     });
@@ -356,7 +357,8 @@ describe("P2.4 Stage 2: font substitution is disclosed and toggleable", () => {
         code: "SUBSTITUTE_REFUSED",
         message:
           "this run's font does not contain the glyphs the replacement needs, and " +
-          "substitution is turned off; add a text annotation instead",
+          "substitution is turned off; select a narrower range, or use the annotation " +
+          "tools to add a note",
       };
     });
 
@@ -369,7 +371,7 @@ describe("P2.4 Stage 2: font substitution is disclosed and toggleable", () => {
     await userEvent.click(screen.getByRole("button", { name: "Apply text edit" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/add a text annotation instead/);
+    expect(alert).toHaveTextContent(/use the annotation tools to add a note/);
     // It belongs to the panel, not the pane: the pane does not duplicate it.
     expect(screen.getAllByRole("alert")).toHaveLength(1);
   });

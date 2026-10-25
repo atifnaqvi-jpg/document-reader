@@ -13,8 +13,8 @@
 //! calls back into these helpers so the parse that a run's identity came from is the
 //! same parse that is re-validated immediately before the edit lands.
 
-use std::collections::HashMap;
 use lopdf::{content::Operation, Dictionary, Document, Object, ObjectId};
+use std::collections::HashMap;
 
 use crate::model::AppError;
 
@@ -97,6 +97,24 @@ pub struct RawRun {
     /// (T22) must be a real measurement, never the approximation — a run whose quota is not
     /// measurable refuses rather than trusting a box.
     pub advance_exact: Option<f32>,
+    /// True when the write path could draw an arbitrary replacement in this fragment's font
+    /// (P2.8).
+    ///
+    /// Merging needs this, and not merely a matching `style_class`: a merged write clears every
+    /// non-head fragment and draws the whole replacement through the head's font. Two
+    /// fragments can share a style class and still not be one write target — `F4`/`F5` are both
+    /// Times, both simple, so either can draw the replacement; `F3` (TrueType) and `F6`
+    /// (Type0/Identity-H) are both Monaco and neither can stand in for the other.
+    pub composable: bool,
+    /// The face this fragment is actually drawn in — the `/BaseFont` with its subset prefix
+    /// stripped, or the resource key when the font names none.
+    ///
+    /// `style_class` is deliberately coarse: it exists so a producer's `F4`→`F5` weight swap
+    /// mid-line does not split a sentence. Being that coarse, it also calls `ArialMT`,
+    /// `ABCDEE+Wingdings-Regular` and `ABCDEE+Monaco` all `Helvetica`. Merging on it alone
+    /// would draw one face's text in another's glyphs and delete the rest (§1.1(a)). Two
+    /// fragments are one run only if they are the same face *and* the same style.
+    pub face: String,
     /// The style class of the font in force (AFM-style name from
     /// [`crate::editor::substitute::style_match`], e.g. `Times-Bold`).
     ///
@@ -144,10 +162,12 @@ impl XObjectRefusal {
     pub fn message(self) -> &'static str {
         match self {
             XObjectRefusal::Depth => {
-                "this text sits in forms nested too deeply to edit; add a text annotation instead"
+                "this text sits in forms nested too deeply to edit; select a narrower range, or \
+                 use the annotation tools to add a note"
             }
             XObjectRefusal::Cycle => {
-                "this form draws itself, so its text cannot be walked; add a text annotation instead"
+                "this form draws itself, so its text cannot be walked; select a narrower range, or \
+                 use the annotation tools to add a note"
             }
         }
     }
@@ -269,13 +289,22 @@ impl<'a> StructureIndex<'a> {
         else {
             return Vec::new();
         };
-        let Some(index) = page.get(b"StructParents").ok().and_then(|o| o.as_i64().ok()) else {
+        let Some(index) = page
+            .get(b"StructParents")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+        else {
             return Vec::new();
         };
         let Some(root) = document
             .catalog()
             .ok()
-            .and_then(|catalog| catalog.get(b"StructTreeRoot").ok().and_then(|root| document.dereference(root).ok().map(|(_, root)| root)))
+            .and_then(|catalog| {
+                catalog
+                    .get(b"StructTreeRoot")
+                    .ok()
+                    .and_then(|root| document.dereference(root).ok().map(|(_, root)| root))
+            })
             .and_then(|root| root.as_dict().ok())
         else {
             return Vec::new();
@@ -352,11 +381,36 @@ impl<'a> StructureIndex<'a> {
 fn is_block_role(role: &str) -> bool {
     matches!(
         role,
-        "P" | "H" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
-            | "L" | "LI" | "LBody" | "Lbl"
-            | "Table" | "TR" | "TH" | "TD" | "THead" | "TBody" | "TFoot"
-            | "Figure" | "Caption" | "BlockQuote" | "Note" | "TOC" | "TOCI"
-            | "Sect" | "Div" | "Art" | "Part" | "Index" | "NonStruct"
+        "P" | "H"
+            | "H1"
+            | "H2"
+            | "H3"
+            | "H4"
+            | "H5"
+            | "H6"
+            | "L"
+            | "LI"
+            | "LBody"
+            | "Lbl"
+            | "Table"
+            | "TR"
+            | "TH"
+            | "TD"
+            | "THead"
+            | "TBody"
+            | "TFoot"
+            | "Figure"
+            | "Caption"
+            | "BlockQuote"
+            | "Note"
+            | "TOC"
+            | "TOCI"
+            | "Sect"
+            | "Div"
+            | "Art"
+            | "Part"
+            | "Index"
+            | "NonStruct"
     )
 }
 
@@ -414,7 +468,6 @@ fn number_tree_lookup(document: &Document, node: &Object, key: i64) -> Option<Ob
     }
     None
 }
-
 
 /// Text-showing operators (ISO 32000-1 9.4.3) and where each keeps its string.
 ///
@@ -775,6 +828,8 @@ fn walk_level<'a>(
                 font_size: walker.size,
                 advance: spaced_advance(&metrics, &text, walker),
                 advance_exact: advance_exact.map(|width| spaced_width(width, &text, walker)),
+                composable: crate::editor::cid::CidFont::resolve(document, font).is_none(),
+                face: face_name(font),
                 style_class: crate::editor::substitute::style_match(
                     font.get(b"BaseFont")
                         .ok()
@@ -791,7 +846,24 @@ fn walk_level<'a>(
     }
 }
 
-/// The placeholder standing for a `Do` the walk refused to enter (§4.2).
+/// The face a fragment is drawn in, for the merge rule (P2.8 §3.3).
+///
+/// Subset prefixes are stripped so the prefix, not the face, does not split a run: two
+/// resources naming `ABCDEE+Monaco` and `FGHIJK+Monaco` are the same face. A font that names
+/// no face falls back to an empty string, which then only merges with another unnamed font —
+/// honest, because such a font has no identity to compare.
+fn face_name(font: &Dictionary) -> String {
+    font.get(b"BaseFont")
+        .ok()
+        .and_then(|object| object.as_name().ok())
+        .map(|name| {
+            let name = String::from_utf8_lossy(name);
+            crate::editor::substitute::strip_subset_prefix(&name).to_owned()
+        })
+        .unwrap_or_default()
+}
+
+/// Append a run that stands in for an operator the locator refused to walk (P2.7.3 X1).
 ///
 /// It carries no box and cannot be edited — its `RunId` names a name operand, which fails
 /// every write validation — but it exists so the user is told why the text inside is missing
@@ -816,6 +888,8 @@ fn placeholder_run(
         font_size: 0.0,
         advance: 0.0,
         advance_exact: None,
+        composable: false,
+        face: String::new(),
         style_class: String::new(),
         marked_content: Vec::new(),
         rise: 0.0,
@@ -1262,7 +1336,10 @@ fn decode_text_string(bytes: &[u8]) -> Option<String> {
             .collect();
         return String::from_utf16(&units).ok();
     }
-    bytes.iter().map(|byte| pdf_doc_encoding_char(*byte)).collect()
+    bytes
+        .iter()
+        .map(|byte| pdf_doc_encoding_char(*byte))
+        .collect()
 }
 
 /// The character a byte stands for in PDFDocEncoding (ISO 32000-1 Annex D, table D.2).
@@ -1274,12 +1351,16 @@ fn decode_text_string(bytes: &[u8]) -> Option<String> {
 /// `None` for the three codes the standard leaves undefined (`0x7F`, `0x9F`, `0xAD`): a
 /// string containing one cannot be decoded, so it cannot be preserved either.
 fn pdf_doc_encoding_char(byte: u8) -> Option<char> {
-    const LOW: [char; 8] = ['\u{02d8}', '\u{02c7}', '\u{02c6}', '\u{02d9}', '\u{02dd}', '\u{02db}', '\u{02da}', '\u{02dc}'];
+    const LOW: [char; 8] = [
+        '\u{02d8}', '\u{02c7}', '\u{02c6}', '\u{02d9}', '\u{02dd}', '\u{02db}', '\u{02da}',
+        '\u{02dc}',
+    ];
     const HIGH: [char; 31] = [
-        '\u{2022}', '\u{2020}', '\u{2021}', '\u{2026}', '\u{2014}', '\u{2013}', '\u{0192}', '\u{2044}',
-        '\u{2039}', '\u{203a}', '\u{2212}', '\u{2030}', '\u{201e}', '\u{201c}', '\u{201d}', '\u{2018}',
-        '\u{2019}', '\u{201a}', '\u{2122}', '\u{fb01}', '\u{fb02}', '\u{0141}', '\u{0152}', '\u{0160}',
-        '\u{0178}', '\u{017d}', '\u{0131}', '\u{0142}', '\u{0153}', '\u{0161}', '\u{017e}',
+        '\u{2022}', '\u{2020}', '\u{2021}', '\u{2026}', '\u{2014}', '\u{2013}', '\u{0192}',
+        '\u{2044}', '\u{2039}', '\u{203a}', '\u{2212}', '\u{2030}', '\u{201e}', '\u{201c}',
+        '\u{201d}', '\u{2018}', '\u{2019}', '\u{201a}', '\u{2122}', '\u{fb01}', '\u{fb02}',
+        '\u{0141}', '\u{0152}', '\u{0160}', '\u{0178}', '\u{017d}', '\u{0131}', '\u{0142}',
+        '\u{0153}', '\u{0161}', '\u{017e}',
     ];
     match byte {
         0x18..=0x1f => Some(LOW[(byte - 0x18) as usize]),
@@ -1869,9 +1950,7 @@ fn rewrite_actual_text(
     let Some(bdc_index) = enclosing_bdc(operations, op_index) else {
         return Ok((true, None));
     };
-    let operation = operations
-        .get(bdc_index)
-        .ok_or(AppError::TextRunMismatch)?;
+    let operation = operations.get(bdc_index).ok_or(AppError::TextRunMismatch)?;
 
     // A name operand resolves through `/Properties`. It cannot be mutated in place without
     // knowing whether another sequence shares it, but it must still be *read*: a named bundle
@@ -2600,10 +2679,7 @@ fn enclosing_bdc(operations: &[Operation], op_index: usize) -> Option<usize> {
             _ => {}
         }
     }
-    stack
-        .into_iter()
-        .rev()
-        .find(|index| *index != usize::MAX)
+    stack.into_iter().rev().find(|index| *index != usize::MAX)
 }
 
 /// True when `op_index` is the **only** showing operation between `bdc_index` and its `EMC`.
@@ -2805,13 +2881,15 @@ fn reference_count(document: &Document, id: ObjectId) -> usize {
             Object::Dictionary(dictionary) => {
                 dictionary.iter().map(|(_, value)| count(value, id)).sum()
             }
-            Object::Stream(stream) => {
-                stream.dict.iter().map(|(_, value)| count(value, id)).sum()
-            }
+            Object::Stream(stream) => stream.dict.iter().map(|(_, value)| count(value, id)).sum(),
             _ => 0,
         }
     }
-    document.objects.values().map(|object| count(object, id)).sum()
+    document
+        .objects
+        .values()
+        .map(|object| count(object, id))
+        .sum()
 }
 
 /// Classifies the page's `/Resources` for a write.
@@ -2931,6 +3009,21 @@ pub struct FontSwap {
 
 #[cfg(test)]
 mod tests {
+    /// P2.8 §3.3: the face is the `/BaseFont` without its subset prefix, so a producer that
+    /// re-subsets mid-document does not split a line into per-resource runs.
+    #[test]
+    fn a_face_is_named_without_its_subset_prefix() {
+        let font = crate::editor::testpdf::dictionary_for_test(&[
+            ("Type", "Font"),
+            ("Subtype", "TrueType"),
+            ("BaseFont", "ABCDEE+Monaco"),
+        ]);
+        assert_eq!(face_name(&font), "Monaco");
+
+        let unnamed = crate::editor::testpdf::dictionary_for_test(&[("Type", "Font")]);
+        assert_eq!(face_name(&unnamed), "", "an unnamed face has no identity");
+    }
+
     use super::*;
     use crate::editor::testpdf;
     use lopdf::content::Content;
@@ -2965,7 +3058,10 @@ mod tests {
 
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "ROTATED");
-        assert!(runs[0].rotated, "a 90 degree matrix must be flagged rotated");
+        assert!(
+            runs[0].rotated,
+            "a 90 degree matrix must be flagged rotated"
+        );
         // The origin still reads correctly: the first column of the matrix is the advance
         // direction, but `e`/`f` are still the pen position.
         assert_eq!(runs[0].origin, (300.0, 100.0));
@@ -3024,7 +3120,10 @@ mod tests {
         let runs = locate_runs(&document, page).unwrap();
 
         assert_eq!(runs.len(), 1);
-        assert!(!runs[0].rotated, "`Q` restores the identity, so this run is axis-aligned");
+        assert!(
+            !runs[0].rotated,
+            "`Q` restores the identity, so this run is axis-aligned"
+        );
     }
 
     /// A matrix that scales but does not rotate is also not rotated: `Tz`-style horizontal
@@ -3039,7 +3138,14 @@ mod tests {
                 Operation::new("Tf", vec!["F1".into(), 12.into()]),
                 Operation::new(
                     "Tm",
-                    vec![2.into(), 0.into(), 0.into(), 2.into(), 72.into(), 700.into()],
+                    vec![
+                        2.into(),
+                        0.into(),
+                        0.into(),
+                        2.into(),
+                        72.into(),
+                        700.into(),
+                    ],
                 ),
                 Operation::new("Tj", vec![Object::string_literal("Scaled")]),
                 Operation::new("ET", vec![]),
@@ -3101,7 +3207,10 @@ mod tests {
             .unwrap();
 
         let runs = locate_runs(&document, page).unwrap();
-        let raised = runs.iter().find(|run| run.text == "Raised").expect("Raised");
+        let raised = runs
+            .iter()
+            .find(|run| run.text == "Raised")
+            .expect("Raised");
         let flat = runs.iter().find(|run| run.text == "Flat").expect("Flat");
         assert_eq!(raised.rise, 8.0);
         assert_eq!(flat.rise, 0.0, "BT must reset Ts");
@@ -3475,7 +3584,11 @@ mod tests {
             .iter()
             .map(|step| step.name.as_slice())
             .collect();
-        assert_eq!(names, vec![&b"X1"[..], &b"X2"[..]], "the full path of names");
+        assert_eq!(
+            names,
+            vec![&b"X1"[..], &b"X2"[..]],
+            "the full path of names"
+        );
     }
 
     /// A form that draws itself is legal to write and hangs a naive walker. The refusal must
@@ -3503,7 +3616,10 @@ mod tests {
         assert!(!verdict.editable);
         assert_eq!(verdict.gate.as_deref(), Some("nested-xobject"));
         assert!(
-            verdict.message.as_deref().is_some_and(|m| m.contains("itself")),
+            verdict
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("itself")),
             "the refusal must name the cycle: {:?}",
             verdict.message
         );
@@ -3533,7 +3649,10 @@ mod tests {
         let verdict = crate::editor::textedit::font_admissibility(&gates);
         assert_eq!(verdict.gate.as_deref(), Some("nested-xobject"));
         assert!(
-            verdict.message.as_deref().is_some_and(|m| m.contains("deeply")),
+            verdict
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("deeply")),
             "the refusal must name the depth: {:?}",
             verdict.message
         );
@@ -3549,7 +3668,10 @@ mod tests {
             xobject_path: Vec::new(),
         })
         .unwrap();
-        assert_eq!(json, serde_json::json!({ "opIndex": 3, "operandPath": [0] }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "opIndex": 3, "operandPath": [0] })
+        );
 
         let json = serde_json::to_value(RunId {
             op_index: 3,
@@ -3582,7 +3704,11 @@ mod tests {
             .iter()
             .find(|run| run.text == "ALPHA")
             .expect("the inherited child form is still descended");
-        assert_eq!(run.id.xobject_path.len(), 2, "X1 had no resources; X2 came from the page");
+        assert_eq!(
+            run.id.xobject_path.len(),
+            2,
+            "X1 had no resources; X2 came from the page"
+        );
         // The font came from the page's `/Font` dictionary, not from X2's own.
         assert_eq!(run.font_key, b"F1");
         assert_eq!(run.font_size, 24.0);

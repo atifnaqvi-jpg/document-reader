@@ -202,17 +202,16 @@ pub enum AppError {
     TextRunNotEditable(String),
     /// Stage 2 (T11/T13): the replacement needs glyphs that neither the run's original
     /// font nor any standard-14 substitute can supply, and no embeddable font is bundled.
-    /// The only way to set that text is an annotation.
     #[error(
         "the replacement needs glyphs that neither this run's font nor a standard font can \
-         supply; add a text annotation instead"
+         supply; select a narrower range, or use the annotation tools to add a note"
     )]
     GlyphsNotCoverable,
     /// Stage 2 (O-ST2-4): the user turned substitution off, and the original font cannot
     /// set the replacement. Refused rather than substituting, per the toggle's contract.
     #[error(
         "this run's font does not contain the glyphs the replacement needs, and substitution \
-         is turned off; add a text annotation instead"
+         is turned off; select a narrower range, or use the annotation tools to add a note"
     )]
     SubstituteRefused,
     /// The lopdf run no longer matches the run the user picked (P2.4 T4): the file

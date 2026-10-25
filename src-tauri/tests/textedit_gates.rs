@@ -228,14 +228,14 @@ fn simple_winansi_edits_and_saves_a_new_file() {
 // --- gate (a) ------------------------------------------------------------------
 
 #[test]
-fn cid_identity_is_refused_by_gate_a() {
+fn cid_identity_without_tounicode_is_refused_by_gate_a() {
     let mut document = load(&fixture("cid-identity.pdf"));
     let run = first_run(&document, 0);
 
     let error = edit_with(&mut document, 0, run.id, "CID", "TEXT", 100.0, 10.0)
-        .expect_err("a CID font must be refused");
+        .expect_err("a CID font with no /ToUnicode must be refused");
     assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
-    assert!(error.to_string().contains("simple-font"), "{error}");
+    assert!(error.to_string().contains("font-encoding"), "{error}");
 }
 
 // --- gate (b) ------------------------------------------------------------------
@@ -313,7 +313,7 @@ fn subset_font_is_refused_when_substitution_is_off() {
     .expect_err("with substitution off, a subset must refuse");
     assert_eq!(error.code(), "SUBSTITUTE_REFUSED");
     assert!(
-        error.to_string().contains("add a text annotation"),
+        error.to_string().contains("annotation tools to add a note"),
         "{error}"
     );
 }
@@ -399,7 +399,10 @@ fn wider_after_substitute_refuses_with_substitute_metrics() {
         message.contains("5.0"),
         "must quote the available width: {message}"
     );
-    assert!(message.contains("add a text annotation"), "{message}");
+    assert!(
+        message.contains("annotation tools to add a note"),
+        "{message}"
+    );
 }
 
 // --- MECH-B absence: non-WinAnsi is not coverable -------------------------------
@@ -426,7 +429,7 @@ fn non_winansi_replacement_is_not_coverable() {
     .expect_err("a non-WinAnsi replacement cannot be covered");
     assert_eq!(error.code(), "GLYPHS_NOT_COVERABLE");
     assert!(
-        error.to_string().contains("add a text annotation"),
+        error.to_string().contains("annotation tools to add a note"),
         "{error}"
     );
 }
@@ -662,7 +665,7 @@ fn describe_runs_pairs_addresses_with_geometry_and_precomputes_gates() {
     assert!(!verdicts[0].admissibility.editable);
     assert_eq!(
         verdicts[0].admissibility.gate.as_deref(),
-        Some("simple-font")
+        Some("font-encoding")
     );
 }
 
@@ -942,7 +945,10 @@ fn an_unpaired_run_refuses_naming_the_missing_box() {
         message.contains("no matching rendered box on the page"),
         "the refusal must name the reason: {message}"
     );
-    assert!(message.contains("add a text annotation"), "{message}");
+    assert!(
+        message.contains("annotation tools to add a note"),
+        "{message}"
+    );
 }
 
 /// The picker's rect is in the same PDF-point space as annotations, so the overlay can
@@ -1209,7 +1215,10 @@ fn the_orphans_own_span_is_the_quota_and_a_wider_replacement_refuses() {
         message.contains(&format!("{:.1}pt", tail.width.unwrap())),
         "quotes the run's own span, not the line: {message}"
     );
-    assert!(message.contains("add a text annotation"), "{message}");
+    assert!(
+        message.contains("annotation tools to add a note"),
+        "{message}"
+    );
 }
 
 /// O1: the replacement that the user actually wrote into the tail must fit the tail's own span
@@ -1464,7 +1473,10 @@ fn unmeasurable_chain_break_re_merges_via_char_grid_gaps() {
         message.contains(&format!("{quota:.1}pt")),
         "quotes the run's own span: {message}"
     );
-    assert!(message.contains("add a text annotation"), "{message}");
+    assert!(
+        message.contains("annotation tools to add a note"),
+        "{message}"
+    );
 }
 
 // --- P2.4.4 T24: grid-walk spans from the rendered parent object ---------------
@@ -1593,7 +1605,10 @@ fn t24_real_maastricht_line_one_is_one_editable_run() {
         message.contains(&format!("{quota:.1}pt")),
         "quotes the line's own rendered span: {message}"
     );
-    assert!(message.contains("add a text annotation"), "{message}");
+    assert!(
+        message.contains("annotation tools to add a note"),
+        "{message}"
+    );
 }
 
 /// §3 T24-B: a synthetic 22-element `TJ` in a metrics-less wide-glyph face.
@@ -2076,8 +2091,8 @@ fn untagged_adjacent_runs_still_merge() {
 fn actualtext_is_rewritten_with_the_edit() {
     let path = fixture("actualtext-span.pdf");
     let mut document = load(&path);
-    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
-        .unwrap();
+    let runs =
+        textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap()).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(
         runs[0].marked_content[0].actual_text.as_deref(),
@@ -2175,8 +2190,8 @@ fn shared_actualtext_is_reported_not_rewritten() {
 fn shared_actualtext_is_copied_before_it_is_rewritten() {
     let path = fixture("actualtext-named-property.pdf");
     let mut document = load(&path);
-    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
-        .unwrap();
+    let runs =
+        textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap()).unwrap();
     assert_eq!(runs.len(), 1);
 
     let outcome = edit_with(
@@ -2246,8 +2261,16 @@ fn undecodable_actualtext_is_reported_not_rewritten() {
         "a string with an undefined PDFDocEncoding code decodes to nothing"
     );
 
-    let outcome = edit_with(&mut document, 0, runs[0].id.clone(), "ALPHA", "OMEGA", 70.0, 70.0)
-        .unwrap();
+    let outcome = edit_with(
+        &mut document,
+        0,
+        runs[0].id.clone(),
+        "ALPHA",
+        "OMEGA",
+        70.0,
+        70.0,
+    )
+    .unwrap();
     assert!(
         !outcome.actual_text_preserved,
         "text we could not read must never be overwritten as 'preserved'"
@@ -2265,8 +2288,7 @@ fn undecodable_actualtext_is_reported_not_rewritten() {
         .and_then(|object| object.as_str().ok())
         .expect("the original ActualText survives untouched");
     assert_eq!(
-        actual,
-        b"ALPHA\xAD",
+        actual, b"ALPHA\xAD",
         "an undecodable ActualText is left byte-identical"
     );
 }
@@ -2317,8 +2339,8 @@ fn unbalanced_marked_content_does_not_refuse() {
 fn char_spacing_advances_the_tj_pen() {
     let path = fixture("char-spacing-tj.pdf");
     let document = load(&path);
-    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
-        .unwrap();
+    let runs =
+        textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap()).unwrap();
 
     let first = runs.iter().find(|run| run.text == "AB").expect("AB");
     let second = runs.iter().find(|run| run.text == "CD").expect("CD");
@@ -2357,7 +2379,9 @@ fn sibling_spans_share_one_merge_scope() {
         .collect();
     assert!(!spans.is_empty(), "the fixture must still be tagged");
     assert!(
-        spans.iter().any(|run| run.innermost_mcid() != spans[0].innermost_mcid()),
+        spans
+            .iter()
+            .any(|run| run.innermost_mcid() != spans[0].innermost_mcid()),
         "the sample must actually span more than one MCID, or it proves nothing"
     );
     let scope = spans[0].merge_scope();
@@ -2379,12 +2403,20 @@ fn sibling_spans_share_one_merge_scope() {
 fn named_properties_without_actualtext_is_not_a_warning() {
     let path = fixture("named-property-no-actualtext.pdf");
     let mut document = load(&path);
-    let runs = textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap())
-        .unwrap();
+    let runs =
+        textlocate::locate_runs(&document, textlocate::page_id(&document, 0).unwrap()).unwrap();
     assert_eq!(runs.len(), 1);
 
-    let outcome = edit_with(&mut document, 0, runs[0].id.clone(), "ALPHA", "OMEGA", 70.0, 70.0)
-        .unwrap();
+    let outcome = edit_with(
+        &mut document,
+        0,
+        runs[0].id.clone(),
+        "ALPHA",
+        "OMEGA",
+        70.0,
+        70.0,
+    )
+    .unwrap();
     assert!(
         outcome.actual_text_preserved,
         "no ActualText was declared, so the edit preserved all there was"
@@ -2402,11 +2434,25 @@ fn a_shared_named_property_is_cloned_not_rewritten_in_place() {
     let page_id = textlocate::page_id(&document, 0).unwrap();
     let runs = textlocate::locate_runs(&document, page_id).unwrap();
     assert_eq!(runs.len(), 2, "two baselines, two runs");
-    assert_eq!(runs[0].marked_content[0].actual_text.as_deref(), Some("ALPHA"));
-    assert_eq!(runs[1].marked_content[0].actual_text.as_deref(), Some("ALPHA"));
+    assert_eq!(
+        runs[0].marked_content[0].actual_text.as_deref(),
+        Some("ALPHA")
+    );
+    assert_eq!(
+        runs[1].marked_content[0].actual_text.as_deref(),
+        Some("ALPHA")
+    );
 
-    let outcome = edit_with(&mut document, 0, runs[0].id.clone(), "ALPHA", "OMEGA", 70.0, 70.0)
-        .unwrap();
+    let outcome = edit_with(
+        &mut document,
+        0,
+        runs[0].id.clone(),
+        "ALPHA",
+        "OMEGA",
+        70.0,
+        70.0,
+    )
+    .unwrap();
     assert!(
         outcome.actual_text_preserved,
         "a clone is exactly how B-7 lets us preserve it"
@@ -2425,12 +2471,16 @@ fn a_shared_named_property_is_cloned_not_rewritten_in_place() {
         names[0], names[1],
         "the edited sequence must be repointed at its own clone, not left sharing /P0"
     );
-    assert_eq!(names[1], b"P0", "the untouched sequence keeps its original name");
+    assert_eq!(
+        names[1], b"P0",
+        "the untouched sequence keeps its original name"
+    );
 
     // The original entry is byte-identical: no sequence outside the edit changed meaning.
     let original = page_property_entry(&document, page_id, b"P0");
     assert_eq!(
-        original, b"\xFE\xFF\0A\0L\0P\0H\0A".to_vec(),
+        original,
+        b"\xFE\xFF\0A\0L\0P\0H\0A".to_vec(),
         "the shared /P0 must not be touched by the edit"
     );
     let clone = page_property_entry(&document, page_id, &names[0]);
@@ -2481,7 +2531,13 @@ fn page_fonts(document: &lopdf::Document, page: u32) -> Vec<(String, String)> {
     let mut node = page;
     let resources = loop {
         if let Ok(resources) = node.get(b"Resources") {
-            break document.dereference(resources).unwrap().1.as_dict().unwrap().clone();
+            break document
+                .dereference(resources)
+                .unwrap()
+                .1
+                .as_dict()
+                .unwrap()
+                .clone();
         }
         let Ok(parent) = node.get(b"Parent").and_then(lopdf::Object::as_reference) else {
             break lopdf::Dictionary::new();
@@ -2549,7 +2605,9 @@ fn a_substitute_lands_on_the_page_that_shadows_its_inherited_resources() {
 
     let fonts = page_fonts(&reread, 0);
     assert!(
-        fonts.iter().any(|(name, base)| name == "FS1" && base == "Helvetica"),
+        fonts
+            .iter()
+            .any(|(name, base)| name == "FS1" && base == "Helvetica"),
         "the substitute must be visible to the page it was installed for, got {fonts:?}"
     );
     let runs = textlocate::locate_runs(&reread, textlocate::page_id(&reread, 0).unwrap()).unwrap();
@@ -2580,7 +2638,9 @@ fn a_substitution_on_an_inheriting_page_does_not_reach_its_sibling() {
 
     let edited = page_fonts(&reread, 1);
     assert!(
-        edited.iter().any(|(name, base)| name == "FS1" && base == "Helvetica"),
+        edited
+            .iter()
+            .any(|(name, base)| name == "FS1" && base == "Helvetica"),
         "the edited page resolves its substitute, got {edited:?}"
     );
 
@@ -2597,7 +2657,11 @@ fn a_substitution_on_an_inheriting_page_does_not_reach_its_sibling() {
 }
 
 /// One `/Properties` entry's raw `ActualText` bytes, read back through the page resources.
-fn page_property_entry(document: &lopdf::Document, page_id: lopdf::ObjectId, name: &[u8]) -> Vec<u8> {
+fn page_property_entry(
+    document: &lopdf::Document,
+    page_id: lopdf::ObjectId,
+    name: &[u8],
+) -> Vec<u8> {
     let page = document.get_dictionary(page_id).unwrap();
     let resources = document
         .dereference(page.get(b"Resources").unwrap())
@@ -2625,10 +2689,73 @@ fn page_property_entry(document: &lopdf::Document, page_id: lopdf::ObjectId, nam
 }
 
 fn decode_utf16_be(bytes: &[u8]) -> String {
-    assert_eq!(&bytes[..2], b"\xFE\xFF", "ActualText is written as UTF-16BE");
+    assert_eq!(
+        &bytes[..2],
+        b"\xFE\xFF",
+        "ActualText is written as UTF-16BE"
+    );
     let units: Vec<u16> = bytes[2..]
         .chunks_exact(2)
         .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
         .collect();
     String::from_utf16(&units).unwrap()
+}
+
+/// P2.8 regression guard: the line the user reported, "Each hour of lecture – 2-3 hours of
+/// study" on page 4 (index 3) of the Maastricht brochure.
+///
+/// v0.6.0 refused it with `simple-font`, because the picker merged it across three faces and
+/// the leftmost fragment was the Arial CID bullet. Two things must hold now:
+///
+/// * every text fragment on the line is editable in its own font, including the `F6` CID
+///   dash, so the user can edit the prose the report was about; and
+/// * the body text is one run — merging it per-glyph would put 30+ entries in the picker.
+///   It is the *same face* (`ABCDEE+Monaco`) throughout, so the face rule keeps it together;
+///   only the bullet and the dash are separate, and they are separate fonts.
+#[test]
+fn p2_8_maastricht_lecture_line_is_editable_in_its_own_fonts() {
+    if !pdfium_ready() {
+        return;
+    }
+    let path = fixture("real-maastricht-brochure.pdf");
+    let document = load(&path);
+    let page = 3u32;
+    let runs = textedit::describe_runs(
+        &document,
+        page,
+        &pdfium_runs(&path, page),
+        &char_grid(&path, page),
+    )
+    .unwrap();
+
+    let body = runs
+        .iter()
+        .find(|run| run.text.contains("Each hour of lecture"))
+        .expect("the reported line's body is one run");
+    assert_eq!(body.font_key, "F3");
+    assert!(
+        body.admissibility.editable,
+        "the body is editable: {:?}",
+        body.admissibility
+    );
+
+    let tail = runs
+        .iter()
+        .find(|run| run.text.contains("2-3 hours of study"))
+        .expect("the line's tail is one run");
+    assert!(tail.admissibility.editable, "{:?}", tail.admissibility);
+
+    let dash = runs
+        .iter()
+        .find(|run| run.text == "–")
+        .expect("the CID dash is offered");
+    assert_eq!(
+        dash.font_key, "F6",
+        "the dash is a Type0 fragment, not merged into the body"
+    );
+    assert!(
+        dash.admissibility.editable,
+        "P2.8: a CID dash whose /ToUnicode names it is editable: {:?}",
+        dash.admissibility
+    );
 }
