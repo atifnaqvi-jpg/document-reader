@@ -2900,3 +2900,61 @@ fn an_untransformed_run_keeps_its_origin_exactly() {
         document_reader_lib::editor::geometry::RunFrame::PAGE
     );
 }
+
+/// P2.7.4 acceptance: a rotated replacement that fits is written, saves, and re-reads, and
+/// the **inverse restores the original bytes**. Writing is the half of this phase the design
+/// argues is easy ("the replacement flows along the existing axis"), so it is asserted rather
+/// than assumed: a save that round-trips proves the mutation landed in the operand the
+/// locator addresses, not merely that `edit` returned `Ok`.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn a_rotated_replacement_saves_and_its_inverse_restores_the_bytes() {
+    let mut document = transformed([0.0, 1.0, -1.0, 0.0, 300.0, 100.0]);
+    let path = tempfile::tempdir().unwrap();
+    let original = path.path().join("original.pdf");
+    let edited = path.path().join("edited.pdf");
+    let restored = path.path().join("restored.pdf");
+    document.save(&original).unwrap();
+
+    let reloaded = load(&original);
+    let run =
+        &textlocate::locate_runs(&reloaded, textlocate::page_id(&reloaded, 0).unwrap()).unwrap()[0];
+    assert_eq!(run.text, "ROTATED");
+    assert!(!run.frame.is_horizontal(), "the fixture must be turned");
+
+    // 114.67pt is the run's own advance; a replacement at 50pt fits easily.
+    let outcome = edit_with(
+        &mut document,
+        0,
+        run.id.clone(),
+        "ROTATED",
+        "TURNED",
+        114.672,
+        50.0,
+    )
+    .expect("a fit along the advance axis must be written");
+
+    document.save(&edited).unwrap();
+    let after = load(&edited);
+    let after_runs =
+        textlocate::locate_runs(&after, textlocate::page_id(&after, 0).unwrap()).unwrap();
+    assert_eq!(after_runs[0].text, "TURNED", "the written bytes re-read");
+    assert!(
+        !after_runs[0].frame.is_horizontal(),
+        "the replacement must still advance along the original axis"
+    );
+
+    // The inverse names the bytes that were replaced, and applying it restores them.
+    assert_eq!(outcome.inverse.old_bytes, b"ROTATED");
+    assert_eq!(outcome.inverse.new_bytes, b"TURNED");
+    let mut back = after;
+    textedit::revert(&mut back, &outcome.inverse).expect("the inverse must apply");
+    back.save(&restored).unwrap();
+    let restored = load(&restored);
+    let final_runs =
+        textlocate::locate_runs(&restored, textlocate::page_id(&restored, 0).unwrap()).unwrap();
+    assert_eq!(
+        final_runs[0].text, "ROTATED",
+        "the inverse restored the original"
+    );
+}
