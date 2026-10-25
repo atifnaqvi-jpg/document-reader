@@ -7,6 +7,81 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 0.7.0
+
+Closing **P2.7.4** — text drawn at an angle becomes editable in place. Rotated and skewed
+runs used to be refused outright; they are now measured, so the width gate compares two
+quantities that are actually comparable.
+
+> **Pre-release.** P2.7.6 (font embedding) is still ahead, so text editing is not complete
+> and this is not a stability guarantee.
+>
+> **Version ordering.** Q7 assigns P2.7.4 to 0.7.0, but 0.8.0 (P2.7.5, CID) was published
+> first. This installer is therefore numerically *below* the published 0.8.0 while its tree
+> contains strictly more work. That is recorded, not hidden: an auto-updater comparing
+> semver would not offer it. See "Known ordering issue" below.
+
+### Text at any angle is measured along its own axis
+
+The refusal was not there because rotated text is hard to write. It is not: a replacement
+is drawn through the same text matrix, so its advance runs along the same axis as the
+original's by construction. The refusal existed because the **other side** of the comparison
+was wrong — `advance` was measured along the text axis and then compared against a
+horizontal box width.
+
+For a run rotated 90°, a 114.67pt word was being checked against an 18.12pt budget, which is
+the height of its glyphs. Runs now carry their advance and up axes in page space, and every
+measurement that used to read `x` or `y` projects through those axes instead. On horizontal
+text the axes are `(1,0)`/`(0,1)`, so every previous number is unchanged — that identity is
+pinned by a test, because it is what makes this safe.
+
+Measured: the quota for the rotated fixture is **114.67pt** (its true advance), not 18.12pt.
+An overlong replacement now refuses with both true numbers: *"needs 229.3pt, available
+114.7pt"*. Before, the same edit refused for the wrong reason with a meaningless pair.
+
+### Rotated edits save and round-trip
+
+A rotated replacement is written, the file saved, re-read as `TURNED`, and the inverse edit
+restores `ROTATED`. That acceptance path did not exist in the suite before; it does now, and
+it is mutation-verified.
+
+### Mirroring still refuses, and now says so
+
+Text drawn reflected advances counter to its own glyph order, so a replacement would render
+backwards. Those runs keep a refusal, under their own gate `mirrored-text` rather than being
+lumped in with rotation. The picker and the write path both refuse, so a caller cannot skip
+the check.
+
+### A regression this phase introduced, and how it was caught
+
+The refactor briefly compared a character's far edge where the original compared its near
+edge. Because PDFium's box ends at the text's advance, that dropped **the last glyph of every
+line** — 333pt measured against a true 342pt span on the brochure's first line.
+
+All 428 tests that run without PDFium passed while this was broken. Only the PDFium-gated
+tests caught it. That is now a standing rule rather than a lesson: `cargo test --
+--include-ignored` must pass before a phase is marked complete, recorded in `AGENTS.md`. The
+boundary also has a direct unit test now, so the next refactor of this code does not depend
+on a whole-line assertion happening to notice.
+
+### Known limits
+
+- **Skew:** PDFium's box is axis-aligned in page space, so for skewed text the box's extent
+  projected onto the advance axis is larger than the true advance. That path is only reached
+  when no character span can be located, and the existing slack absorbs it at realistic
+  angles.
+- **Near-parallel merging:** fragments whose angles differ by less than 1.15° merge. That is
+  correct for rounding noise, but a rotated line adjacent to a horizontal one at a nearly
+  identical angle is treated as one line.
+
+### Known ordering issue
+
+`v0.8.0` is published and its tree does **not** contain this work (`RunFrame` is absent
+there). This release is numerically lower while being a superset. It is published as a
+pre-release, and the next phase (P2.7.6 → 0.9.0) will be numerically above both.
+
+---
+
 ## 0.8.0
 
 Closing **P2.7.5** — text set in CID-keyed (Type0) fonts becomes editable in place. This is the
