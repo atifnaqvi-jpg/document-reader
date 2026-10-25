@@ -215,7 +215,7 @@ pub fn cid_identity_page() -> Document {
     )
 }
 
-/// P2.8: a Type0 page that is **editable** — the positive counterpart to
+/// P2.7.5: a Type0 page that is **editable** — the positive counterpart to
 /// [`cid_identity_page`].
 ///
 /// Codes `<0001>`–`<0003>` draw `A`, `B`, `C`, and the run shows `<0001><0002>` ("AB").
@@ -304,7 +304,7 @@ endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
     document
 }
 
-/// P2.8 C7: a Type0 page whose `/FontFile2` is **compressed**, and whose `/ToUnicode` names
+/// P2.7.5 C7: a Type0 page whose `/FontFile2` is **compressed**, and whose `/ToUnicode` names
 /// only the characters of `run_text`.
 ///
 /// This is the shape every real document has, and the one that exposed the `program_of` bug:

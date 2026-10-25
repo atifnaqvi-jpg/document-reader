@@ -98,7 +98,7 @@ pub struct RawRun {
     /// measurable refuses rather than trusting a box.
     pub advance_exact: Option<f32>,
     /// True when the write path could draw an arbitrary replacement in this fragment's font
-    /// (P2.8).
+    /// (P2.7.5).
     ///
     /// Merging needs this, and not merely a matching `style_class`: a merged write clears every
     /// non-head fragment and draws the whole replacement through the head's font. Two
@@ -846,7 +846,7 @@ fn walk_level<'a>(
     }
 }
 
-/// The face a fragment is drawn in, for the merge rule (P2.8 §3.3).
+/// The face a fragment is drawn in, for the merge rule (P2.7.5 §3.3).
 ///
 /// Subset prefixes are stripped so the prefix, not the face, does not split a run: two
 /// resources naming `ABCDEE+Monaco` and `FGHIJK+Monaco` are the same face. A font that names
@@ -3009,7 +3009,7 @@ pub struct FontSwap {
 
 #[cfg(test)]
 mod tests {
-    /// P2.8 §3.3: the face is the `/BaseFont` without its subset prefix, so a producer that
+    /// P2.7.5 §3.3: the face is the `/BaseFont` without its subset prefix, so a producer that
     /// re-subsets mid-document does not split a line into per-resource runs.
     #[test]
     fn a_face_is_named_without_its_subset_prefix() {

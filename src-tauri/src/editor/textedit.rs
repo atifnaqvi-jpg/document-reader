@@ -170,7 +170,7 @@ pub struct RunGates {
     pub rotated: bool,
     /// Why this run is a Form XObject refusal placeholder (P2.7.3 X1), if it is one.
     pub nested_xobject: Option<XObjectRefusal>,
-    /// A CID/Type0 font's `/ToUnicode` exists, so its codes can be read back (P2.8).
+    /// A CID/Type0 font's `/ToUnicode` exists, so its codes can be read back (P2.7.5).
     /// Meaningless for a simple font.
     pub cid_readable: bool,
 }
@@ -221,7 +221,7 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
             })
             .unwrap_or(false);
 
-    // P2.8: a Type0 run's bytes are codes, so its own round-trip is decided by the CID
+    // P2.7.5: a Type0 run's bytes are codes, so its own round-trip is decided by the CID
     // codec rather than by lopdf's one-byte encoding machinery.
     let cid_readable =
         crate::editor::cid::resolve_at(document, page_id, &run.id.xobject_path, &run.font_key)
@@ -259,7 +259,7 @@ pub fn font_admissibility(gates: &RunGates) -> Admissibility {
     if let Some(reason) = gates.nested_xobject {
         return Admissibility::refused_with(Gate::NestedXObject, reason.message());
     }
-    // (a) P2.8: a simple font is written through its own one-byte encoding; a Type0 is
+    // (a) P2.7.5: a simple font is written through its own one-byte encoding; a Type0 is
     // written as two-byte codes through its `/ToUnicode` and (under Identity) its program.
     // Anything else cannot be read back at all, which is the only thing this gate refuses.
     let simple = is_simple_font(&gates.font);
@@ -1160,13 +1160,13 @@ fn mergeable(
     next_span: Option<CharSpan>,
 ) -> bool {
     head.style_class == next.style_class
-        // P2.8 §1.1(a): the same face, not merely the same style. `style_match` is coarse on
+        // P2.7.5 §1.1(a): the same face, not merely the same style. `style_match` is coarse on
         // purpose (a producer's `F4`→`F5` weight swap must not split a line), so it also calls
         // `ArialMT`, `ABCDEE+Monaco` and `ABCDEE+Wingdings-Regular` all `Helvetica`. A merged
         // write draws everything through the head's font, so merging across faces would render
         // one face's text in another's glyphs and delete the rest.
         && head.face == next.face
-        // P2.8: a merged write puts the whole replacement in the head fragment and clears the
+        // P2.7.5: a merged write puts the whole replacement in the head fragment and clears the
         // rest, drawing all of it through the head's font. So a fragment whose font cannot draw
         // arbitrary text is not a write target, whatever other fragments share its style — the
         // Maastricht line's `F3` Monaco and `F6` Monaco/Identity-H are one style class and two
@@ -2010,7 +2010,7 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     // never a silent drop (`string_to_bytes` would drop it).
     let (new_bytes, cid) = match &plan {
         crate::editor::substitute::Plan::KeepOriginal => {
-            // P2.8: a Type0 run is written as two-byte codes. Encoding it through lopdf's
+            // P2.7.5: a Type0 run is written as two-byte codes. Encoding it through lopdf's
             // one-byte machinery would treat each byte of the replacement as a code and drop
             // whatever does not map — the silent-truncation failure this arm exists to avoid.
             if let Some(cid) = crate::editor::cid::CidFont::resolve(document, &font) {
@@ -2044,7 +2044,7 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     // the caller's PDFium measurement is. `old_width` is unchanged either way (O1).
     let (new_width, substitution, note) = match &plan {
         crate::editor::substitute::Plan::KeepOriginal => {
-            // P2.8: a CID run's advance comes from its own `/W` then `/DW`, which is what the
+            // P2.7.5: a CID run's advance comes from its own `/W` then `/DW`, which is what the
             // renderer uses — PDFium's box width is the union of a merged selection and is not
             // comparable to one replacement string.
             let width = match &cid {
@@ -2484,7 +2484,7 @@ mod tests {
     /// mid-word resource switch does not split the line. The Maastricht brochure does exactly
     /// this (`F4`/`F5`, both Times at 14.064pt).
     ///
-    /// P2.8: this survives only because both are *composable* — a simple font can draw an
+    /// P2.7.5: this survives only because both are *composable* — a simple font can draw an
     /// arbitrary replacement, so either resource can carry the merged write.
     #[test]
     fn merges_across_resources_that_name_the_same_face() {
@@ -2495,7 +2495,7 @@ mod tests {
         assert!(mergeable(&head, &other_resource, false, None, None));
     }
 
-    /// P2.8 §1.1(a): same style class, different face. `ArialMT` and `ABCDEE+Monaco` are both
+    /// P2.7.5 §1.1(a): same style class, different face. `ArialMT` and `ABCDEE+Monaco` are both
     /// `Helvetica` to `style_match`, but a merged write through either would delete the other's
     /// glyphs. They must stay two runs.
     #[test]
@@ -2507,7 +2507,7 @@ mod tests {
         assert!(!mergeable(&head, &next, false, None, None));
     }
 
-    /// P2.8: a fragment whose font cannot draw the replacement is not a merge target, even
+    /// P2.7.5: a fragment whose font cannot draw the replacement is not a merge target, even
     /// when its style class matches. The Maastricht line's Monaco is split across `F3`
     /// (`TrueType`, editable) and `F6` (`Type0/Identity-H`, CID codes); a merged write through
     /// `F3`'s encoding would emit the second fragment's Unicode as unrelated glyphs.
@@ -3287,7 +3287,7 @@ mod tests {
         assert!(outcome.note.is_none());
     }
 
-    /// P2.8: a Type0 run *without* `/ToUnicode` is still refused at gate (a) — its codes
+    /// P2.7.5: a Type0 run *without* `/ToUnicode` is still refused at gate (a) — its codes
     /// cannot be read back, so no replacement can be shown to be what the user typed. The
     /// fixture has no CMap, which is now the only thing this gate refuses.
     #[test]
@@ -3302,7 +3302,7 @@ mod tests {
         assert!(error.to_string().contains("font-encoding"), "{error}");
     }
 
-    /// P2.8: the positive case the old gate made impossible — a Type0 run whose font carries a
+    /// P2.7.5: the positive case the old gate made impossible — a Type0 run whose font carries a
     /// `/ToUnicode` is editable, and the replacement is written as two-byte codes.
     #[test]
     fn edits_a_cid_font_through_its_tounicode() {

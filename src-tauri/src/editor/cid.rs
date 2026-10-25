@@ -1,4 +1,4 @@
-//! Reading and writing CID-keyed (Type0) text (P2.8, closes C-4).
+//! Reading and writing CID-keyed (Type0) text (P2.7.5, closes C-4).
 //!
 //! A Type0 run's bytes are **codes**, not character codes: two bytes each under Identity-H,
 //! naming a CID that `/CIDToGIDMap` turns into a glyph id. Editing one means turning the

@@ -130,7 +130,7 @@ fn original_covers(
         }
     }
 
-    // P2.8: a Type0 font keeps its glyphs on the descendant, not on the root dictionary that
+    // P2.7.5: a Type0 font keeps its glyphs on the descendant, not on the root dictionary that
     // `embedded_program` reads, so coverage is the CID codec's answer: `/ToUnicode` first,
     // then (under `/Identity`) the program's own `cmap`.
     if let Some(font) = font {
@@ -183,7 +183,7 @@ fn deref_object<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Ob
 /// `Stream::content` is the raw stream body: for a typical Flate `FontFile2` that is still
 /// compressed, and `ttf-parser` cannot read it. Reading it raw is not a corner case — it was
 /// the only case for every real PDF, so coverage always fell through to "not covered" and
-/// T11 substituted a font the original could have set (P2.8 §1.1b). An uncompressed program
+/// T11 substituted a font the original could have set (P2.7.5 §1.1b). An uncompressed program
 /// decompresses to itself. A filter lopdf cannot decode leaves the bytes opaque, so the
 /// coverage check degrades to "not covered" — a refusal, never a panic.
 fn stream_bytes(document: &Document, object: &Object) -> Option<Vec<u8>> {
@@ -285,7 +285,7 @@ pub enum FontMetrics {
     /// `/FirstChar`. This is the only source for a *non-embedded* face (the Maastricht
     /// brochure's Times/Arial), and it is the same array a viewer uses to lay the run out.
     SimpleWidths { first_char: u16, widths: Vec<u16> },
-    /// A CID/Type0 font measured from `/W` then `/DW` (P2.8). The widths are per **cid**, so
+    /// A CID/Type0 font measured from `/W` then `/DW` (P2.7.5). The widths are per **cid**, so
     /// measurement encodes the text first — the same codes the write path will install.
     Cid { font: crate::editor::cid::CidFont },
     /// No usable metric source: the caller will be handed `None` rather than a guess.

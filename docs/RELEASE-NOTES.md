@@ -7,6 +7,81 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 0.8.0
+
+Closing **P2.7.5** — text set in CID-keyed (Type0) fonts becomes editable in place. This is the
+phase that makes the reported line editable: *"Each hour of lecture – 2-3 hours of study"* on
+page 4 of the Maastricht brochure refused with `simple-font` in 0.6.0 and is editable here.
+
+Measuring that line turned up two defects that had nothing to do with CID, and both were losing
+data or lying about a refusal, so they ship in the same section.
+
+### CID / Type0 text is edited through its own `/ToUnicode`
+
+A Type0 font stores **codes**, not characters: a byte pair is a CID, and the CID means nothing
+without the font's own map back to text. 0.6.0 refused every such run, which is why real
+producers — Word, LibreOffice, anything built on a modern PDF library — produced documents with
+uneditable body text.
+
+- The `/ToUnicode` CMap is read into a character↔CID map. A replacement is written as CIDs
+  through that same map, so what is drawn is what the user typed. The CMap is **read, never
+  rewritten**: it is shared per font, and edits must not affect other text set in it.
+- `/Identity-H` fonts are handled by glyph id when `/ToUnicode` is absent but the encoding is
+  identity.
+- A Type0 font with no readable `/ToUnicode` is still refused — nothing can be shown to be
+  what the user typed — now with gate `font-encoding` rather than a blanket `simple-font`.
+- Advance width comes from the font's `/W` array, then `/DW`. It is never estimated at half an
+  em, because `fits-width` refuses on that measurement and a guess would make it wrong.
+
+### Merging no longer crosses font faces
+
+The picker merged a line into one run when the fragments shared a *style class*, and
+`style_match` maps `ArialMT`, `ABCDEE+Monaco` and a Wingdings face **all** to `Helvetica`. A
+merged write draws the whole replacement through the head fragment's font and clears the
+others, so the Arial bullet and the Wingdings icon in that line were being **silently
+discarded** — a data-loss bug independent of CID.
+
+Fragments now merge only when they agree on `style_class` **and** on the face (`/BaseFont`,
+ignoring the subset prefix) **and** both can draw the replacement. Comparing the font resource
+name instead would be too strict: the brochure sets one Times face under two names (`F4`/`F5`),
+and that legitimately-is-one-run case must still merge.
+
+### A compressed embedded font is decompressed before it is parsed
+
+`/FontFile2` streams are usually Flate-compressed, and the coverage check handed ttf-parser the
+still-compressed bytes, so parsing failed for **every real embedded font**. Coverage then
+always reported "not covered" and the editor substituted a font the original could have set.
+Synthetic fixtures stored their programs uncompressed, which is why only real documents showed
+it. Compressed programs are now decompressed first; a filter that cannot be decoded degrades to
+a refusal, never a panic.
+
+### Refusal copy says what is actually possible
+
+The message offered "add a text annotation instead", but the annotation tools are ink-only, so
+it promised something the app cannot do. It now reads *"select a narrower range, or use the
+annotation tools to add a note"*, and the substitute-font toggle says that CID/Type0 runs keep
+their own font rather than implying the toggle covers them.
+
+### Known gaps
+
+- Rotated and skewed text is refused, not editable (P2.7.4, targeted at 0.7.0).
+- Text inside nested Form XObjects beyond the depth cap is refused (P2.7.3).
+- A CID/Type0 font without a readable `/ToUnicode` is refused with `font-encoding`.
+- Non-WinAnsi text that needs an embedded font is refused with `GLYPHS_NOT_COVERABLE` (P2.7.6).
+- Line-level reflow does not exist: a replacement wider than the run is refused, quoting both
+  measured widths (P2.8, targeted at 1.0.0).
+
+> **Phase numbering.** This work was previously drafted as "P2.8, target v0.7.0". The frozen
+> plan (ruling Q7) is authoritative: CID is **P2.7.5 → 0.8.0**, 0.7.0 belongs to P2.7.4
+> transforms, and **P2.8 is line-level reflow at 1.0.0**. Only the label changed here; the
+> design and scope did not.
+
+### Upgrading
+
+No data migration. Documents edited and saved by earlier versions re-open and edit as before.
+Files saved by this version are ordinary PDFs with no new structures; the only content that
+changes is text the user actually edited.
+
 ## 0.6.0
 
 Closing **P2.7.3** — text inside Form XObjects becomes editable. The theme is still silent

@@ -453,7 +453,7 @@ export function TextEditPanel({
                   checked={allowSubstitution}
                   onChange={(event) => setAllowSubstitution(event.target.checked)}
                 />
-                {/* P2.8: a CID/Type0 run keeps its own font — the toggle cannot reach it,
+                {/* P2.7.5: a CID/Type0 run keeps its own font — the toggle cannot reach it,
                     because a substitute would have to replace the encoding as well as the
                     face. Say so rather than letting the label imply otherwise. */}
                 Substitute a standard font when a simple font cannot set the text

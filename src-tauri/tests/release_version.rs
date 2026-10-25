@@ -200,3 +200,36 @@ fn the_0_6_0_release_notes_cover_every_change_the_plan_claims() {
         );
     }
 }
+
+/// C-4's acceptance: 0.8.0 ships P2.7.5, so the notes must name the CID work and the two
+/// defects measuring it exposed — a user upgrading needs to know that merging used to discard
+/// glyphs and that a substituted font is no longer chosen for no reason.
+///
+/// The numbering assertion is here because the phase was drafted as "P2.8 / 0.7.0" and the
+/// plan reserves both for something else. A notes section that repeats the mis-numbering
+/// would keep the contradiction alive in the one document users actually read.
+#[test]
+fn the_0_8_0_release_notes_cover_every_change_the_plan_claims() {
+    let section = release_section("0.8.0").expect("docs/RELEASE-NOTES.md has no 0.8.0 section");
+    let lower = section.to_lowercase();
+
+    for (topic, needle) in [
+        ("CID / Type0 in-place editing", "type0"),
+        ("the /ToUnicode round-trip", "/tounicode"),
+        ("the face-based merge rule", "face"),
+        ("the compressed-font fix", "compressed"),
+        ("the refusal copy fix", "annotation"),
+        ("the corrected phase number", "p2.7.5"),
+    ] {
+        assert!(
+            lower.contains(needle),
+            "the 0.8.0 notes never mention {topic} (looked for {needle:?})"
+        );
+    }
+
+    assert!(
+        lower.contains("0.6.0") && lower.contains("editable"),
+        "the 0.8.0 notes must connect the refusal in 0.6.0 to the fix, since that is the \
+         reported symptom users will be checking"
+    );
+}

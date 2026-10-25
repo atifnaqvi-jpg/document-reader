@@ -2701,7 +2701,7 @@ fn decode_utf16_be(bytes: &[u8]) -> String {
     String::from_utf16(&units).unwrap()
 }
 
-/// P2.8 regression guard: the line the user reported, "Each hour of lecture – 2-3 hours of
+/// P2.7.5 regression guard: the line the user reported, "Each hour of lecture – 2-3 hours of
 /// study" on page 4 (index 3) of the Maastricht brochure.
 ///
 /// v0.6.0 refused it with `simple-font`, because the picker merged it across three faces and
@@ -2755,7 +2755,7 @@ fn p2_8_maastricht_lecture_line_is_editable_in_its_own_fonts() {
     );
     assert!(
         dash.admissibility.editable,
-        "P2.8: a CID dash whose /ToUnicode names it is editable: {:?}",
+        "P2.7.5: a CID dash whose /ToUnicode names it is editable: {:?}",
         dash.admissibility
     );
 }
