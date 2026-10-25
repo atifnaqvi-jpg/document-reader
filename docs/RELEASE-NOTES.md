@@ -100,9 +100,12 @@ recorded here:
   7,827,785 bytes, PE32 (NSIS). Hand-tested and accepted by the user on 2026-10-25; the
   reported line on page 4 of the Maastricht brochure edits in place.
 - The asset attached to the `v0.8.0` release is **rebuilt** by the tag run from the same
-  application source, so it is source-identical to the accepted build but not byte-identical:
-  the NSIS packaging step embeds build metadata. Its own SHA-256 is listed on the release
-  page. This is a property of the toolchain, not a difference in what was tested.
+  application source, so it is source-identical to the accepted build but not byte-identical.
+  Measured, rather than assumed: the two installers differ in 24 bytes of 20,619,264 in the
+  packed `document-reader.exe` — the linker's build timestamps and the `RSDS` PDB GUID — while
+  `pdfium.dll` and every NSIS file are identical. Nothing in the compiled code differs.
+  Published asset: 7,827,607 bytes, SHA-256
+  `bfb7504af9a8e6e3d5668bf98ba2ccad95d732d7fa9a29aee844188aacde66cc`.
 
 ## 0.6.0
 
