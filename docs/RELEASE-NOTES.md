@@ -7,6 +7,58 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 0.9.0
+
+Closing **P2.7.6** — font embedding (MECH-B), plus the A7 skew fix that was found while
+freezing it.
+
+> **DRAFT — not published.** Written at the design freeze (2026-09-20), before the bundling
+> and embedding work exists, per this file's rule that the section precedes the version bump.
+> The *skew fix* in this section is implemented and gated; **MECH-B is not built yet**, and
+> its paragraph describes the frozen design, not shipped code. Do not publish this section
+> until `--include-ignored` is green on the tagged commit and the installer from that run is
+> hand-confirmed (Q9). Carriers still say 0.8.1.
+>
+> **Pre-release when it ships.** 1.0.0 (P2.8, reflow) is the point text editing is declared
+> complete.
+
+### Fixed: skewed text is now editable, and measured honestly
+
+A7's skew half, found by measurement after 0.8.1 shipped. **This is a behaviour change you
+will see:** a page whose text is sheared (`cm` with a non-zero shear term) or scaled
+anisotropically used to be offered in the picker as editable and then refused on save. It now
+edits.
+
+Two independent defects, both measured:
+
+1. **The write path demanded a uniform scale.** The conversion factor must be the length of
+   the **advance axis**, because that is the direction a width runs along. Requiring the up
+   axis to scale equally refused every sheared and every anisotropically scaled run. Measured:
+   x-shear 20°/45°, y-shear 20°, and scales 2×1 and 1×2 were all refused; all write now.
+2. **A sheared run's quota came from PDFium's axis-aligned character boxes**, which carry
+   `|shear| × glyph height` in their width. The quota therefore **grew with the shear angle** —
+   124.88pt for a 114.67pt line at 20° — so a replacement that overprinted past the run was
+   accepted. Sheared runs now use the font's own metric, which is exact.
+
+Rotation was *not* affected: 0.8.1 measured rotated text correctly, and its numbers are
+unchanged. `mirrored-text` still refuses.
+
+No previously-shipped fixture changes verdict — the fixture set had rotation in both `Tm` and
+`cm` form but no shear, which is why 0.8.1 could ship this. The new guards build their own
+shear fixtures.
+
+### MECH-B font embedding — designed, not yet built
+
+A replacement containing characters outside WinAnsi (`—`, `→`, `’`, Greek) is now set in a
+bundled Liberation face instead of refusing `GLYPHS_NOT_COVERABLE`. **This does not work
+yet**; the acceptance matrix in `docs/P2.7.6-embed-DESIGN.md` §5 is not green. Twelve faces ship
+(4,360,440 bytes), chosen by the distinct-class rule: a face ships only if it owns a style
+class no other shipped face owns. Substitution still requires explicit consent, `/ToUnicode`
+is written so copy and search return the real characters, and a run whose own font covers the
+replacement keeps its own font.
+
+---
+
 ## 0.8.1
 
 Closing **P2.7.4** — text drawn at an angle becomes editable in place. Rotated and skewed
@@ -68,10 +120,17 @@ on a whole-line assertion happening to notice.
 
 ### Known limits
 
-- **Skew:** PDFium's box is axis-aligned in page space, so for skewed text the box's extent
+- **Skew — corrected after release, fixed in 0.9.0.** The paragraph below was published with
+  0.8.1 and is **not accurate for that release**. Measured 2026-09-20 and fixed on top of it:
+  a *sheared* run was refused by the write path outright (every skew and every anisotropic
+  scale), and where it was measured at all its quota came from PDFium's axis-aligned grid box
+  rather than the fallback path described here — 124.88pt for a 114.67pt line at 20°, growing
+  with the shear angle, so an overprinting replacement was *accepted*. Rotated text was
+  correct in 0.8.1; skewed text was not. See §0.9.0 and the A7 fix.
+  ~~PDFium's box is axis-aligned in page space, so for skewed text the box's extent
   projected onto the advance axis is larger than the true advance. That path is only reached
   when no character span can be located, and the existing slack absorbs it at realistic
-  angles.
+  angles.~~
 - **Near-parallel merging:** fragments whose angles differ by less than 1.15° merge. That is
   correct for rounding noise, but a rotated line adjacent to a horizontal one at a nearly
   identical angle is treated as one line.

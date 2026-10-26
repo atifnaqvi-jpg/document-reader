@@ -40,6 +40,32 @@ Both are the same failure: the guard tested the *shape of its own reading*, not 
 property it claimed to protect. A guard that can pass vacuously is worse than no guard,
 because it is recorded as coverage.
 
+### The mutation must be in the guarded file, not in the guard
+
+Measured during the A7 skew fix, twice in the same run, and both times it first looked like
+proof:
+
+- The ignored-count guard reads `ci.yml`. Mutating the **guard's own assertion string**
+  (`"ne 74"` → `"ne 71"` in `tests/ci_workflow.rs`) made the guard *pass* against an unchanged
+  `ci.yml`. Nothing was proved, because nothing the guard reads had changed.
+- Mutating `ci.yml` itself (`-ne 74` → `-ne 71`) failed the guard, correctly. That is the
+  only one of the two that was a mutation at all.
+
+The check is mechanical: **`git diff` must show the change in the file the guard reads.** If
+the only diff is under `tests/`, you have edited the guard and learned nothing. Restore the
+guarded file and confirm the guard passes again — a mutation result is a pair, not a single
+red run.
+
+Two further shapes that can pass for the wrong reason, so test them deliberately:
+
+- **A pin that is an equality is direction-free.** `-ne 74` catches both 71 and 75. A floor
+  (`-lt 435`) only catches values below it, so lowering a floor is caught and *raising* it is
+  not; if the property is "no test was lost", the floor must equal the measured count, not sit
+  under it.
+- **A value that is still satisfied by the defect.** Mutating a required string to one that
+  is also present elsewhere in the file passes, because `contains` found the other occurrence.
+  Count occurrences before choosing the mutation, and prefer a parsed field over a substring.
+
 Applies to any new or modified guard that reads a file rather than calling code. Where a
 guard has a parser helper, add a second test that feeds the helper a crafted sample —
 including the *defect* shape — so a broken parser fails on its own test rather than
