@@ -85,12 +85,12 @@ jobs:
             echo "::error::$ignored tests ignored; 74 PDFium-gated tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
-          # Measured, not computed: 435 passed (Linux, no PDFium) after the A7 skew guards
-          # added two. Raising this to
-          # the measured value, rather than leaving headroom, is what makes a test that stops
-          # being collected fail here instead of passing quietly.
-          if [ "$passed" -lt 435 ]; then
-            echo "::error::only $passed tests ran; 435 is the non-PDFium baseline. A test stopped being collected."
+          # Measured, not computed: 444 passed on Linux without PDFium -- 435 after the A7
+          # skew guards, plus 9 P2.7.6 font-bundle guards. Raising this to the measured value,
+          # rather than leaving headroom, is what makes a test that stops being collected fail
+          # here instead of passing quietly.
+          if [ "$passed" -lt 444 ]; then
+            echo "::error::only $passed tests ran; 444 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

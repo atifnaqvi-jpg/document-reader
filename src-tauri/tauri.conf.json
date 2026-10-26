@@ -43,6 +43,11 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       }
+    },
+    "resources": {
+      "resources/fonts/*.ttf": "fonts/",
+      "resources/fonts/LICENSE-Liberation.txt": "fonts/LICENSE-Liberation.txt",
+      "resources/fonts/FONT-RECORD.md": "fonts/FONT-RECORD.md"
     }
   }
 }

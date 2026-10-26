@@ -733,3 +733,59 @@ button:disabled {
 .encrypted-banner strong {
   margin-right: 0.4rem;
 }
+
+/* P2.7.6 §4: the bundled-font notice, reachable from the menu with no document open. */
+.notices-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+}
+
+.notices-panel {
+  background: var(--panel, #fff);
+  color: inherit;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  max-width: 44rem;
+  max-height: 80vh;
+  width: calc(100vw - 4rem);
+  display: flex;
+  flex-direction: column;
+}
+
+.notices-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+}
+
+.notices-header h2 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.notices-body {
+  padding: 0.5rem 1rem 1rem;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+
+.notices-body h3 {
+  font-size: 0.9rem;
+  margin: 1rem 0 0.35rem;
+}
+
+.notices-body ul {
+  margin: 0.35rem 0;
+  padding-left: 1.2rem;
+}
+
+.notices-body code {
+  font-size: 0.85em;
+}

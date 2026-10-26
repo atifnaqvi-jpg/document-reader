@@ -59,7 +59,7 @@ red run.
 Two further shapes that can pass for the wrong reason, so test them deliberately:
 
 - **A pin that is an equality is direction-free.** `-ne 74` catches both 71 and 75. A floor
-  (`-lt 435`) only catches values below it, so lowering a floor is caught and *raising* it is
+  (`-lt 444`) only catches values below it, so lowering a floor is caught and *raising* it is
   not; if the property is "no test was lost", the floor must equal the measured count, not sit
   under it.
 - **A value that is still satisfied by the defect.** Mutating a required string to one that

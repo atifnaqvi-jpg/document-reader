@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { addBookmark, listBookmarks, removeBookmark, toAppError } from "../api/invoke";
 import type { AppError, Bookmark, LibraryEntry } from "../api/types";
+import { Notices } from "./Notices";
 
 /**
  * The top-bar menu (docs/P1.9-DESIGN.md D5).
@@ -52,6 +53,9 @@ export function Menu({
   getCurrentPage,
 }: Props) {
   const [open, setOpen] = useState(false);
+  // P2.7.6 §4: the notice must be reachable without a document, so it lives in the menu
+  // rather than in a document-scoped pane.
+  const [noticesOpen, setNoticesOpen] = useState(false);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [error, setError] = useState<AppError | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -152,6 +156,16 @@ export function Menu({
             }}
           >
             {busy ? "Opening…" : "Open…"}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              setNoticesOpen(true);
+            }}
+          >
+            About and notices
           </button>
 
           <p className="menu-group">View</p>
@@ -259,6 +273,8 @@ export function Menu({
           ) : null}
         </div>
       ) : null}
+
+      {noticesOpen ? <Notices onClose={() => setNoticesOpen(false)} /> : null}
     </div>
   );
 

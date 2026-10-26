@@ -1,7 +1,10 @@
 {
   "bundle": {
     "resources": {
-      "resources/pdfium.dll": "pdfium.dll"
+      "resources/pdfium.dll": "pdfium.dll",
+      "resources/fonts/*.ttf": "fonts/",
+      "resources/fonts/LICENSE-Liberation.txt": "fonts/LICENSE-Liberation.txt",
+      "resources/fonts/FONT-RECORD.md": "fonts/FONT-RECORD.md"
     }
   }
 }
