@@ -59,7 +59,7 @@ red run.
 Two further shapes that can pass for the wrong reason, so test them deliberately:
 
 - **A pin that is an equality is direction-free.** `-ne 74` catches both 71 and 75. A floor
-  (`-lt 450`) only catches values below it, so lowering a floor is caught and *raising* it is
+  (`-lt 464`) only catches values below it, so lowering a floor is caught and *raising* it is
   not; if the property is "no test was lost", the floor must equal the measured count, not sit
   under it.
 - **A value that is still satisfied by the defect.** Mutating a required string to one that
@@ -102,13 +102,24 @@ Measured during P2.7.6 R4, on the plan-order guard, and it produced what looked 
   with the intended message.
 
 A compiling mutant that is still not caught is a coverage finding; a non-compiling mutant is
-a measurement error, and the two look identical if you only grep for `test result`. The
-runner must distinguish them:
+a measurement error, and the two look identical if you only grep for `test result`. **The check
+is mechanical, not a discipline note** — use `scripts/mutate.sh`, which refuses to conflate
+them:
 
 ```
-cargo test 2>&1 | grep -E "^error(\[|:)|could not compile"   # must be empty
-cargo test 2>&1 | grep -E "^test result"                     # must be non-empty
+# apply the mutant to the file the guard reads, then:
+scripts/mutate.sh --test embed_plan_order
+#   exit 0  CAUGHT        compiled, tests failed     -- what you want
+#   exit 1  SURVIVED      tests passed               -- coverage finding
+#   exit 2  MEASUREMENT   did not compile            -- not a catch, no test ran
+#   exit 3  MEASUREMENT   no `test result:` line     -- not a catch, no test ran
 ```
+
+The harness was itself mutation-tested: a non-compiling mutant exits 2, a clean tree exits 1,
+a real catch exits 0. Its first version matched a bare `^error:` and therefore classified a
+genuine catch as a measurement error, because `error: test failed, to rerun pass ...` is the
+normal footer of a *caught* mutant. Only compilation failures (`^error[`, `could not compile`)
+count. If you change the harness, break it in both directions before trusting it.
 
 Applies to any new or modified guard that reads a file rather than calling code. Where a
 guard has a parser helper, add a second test that feeds the helper a crafted sample —

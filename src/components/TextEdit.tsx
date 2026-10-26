@@ -114,6 +114,10 @@ export const TEXT_EDIT_ERROR_CODES = [
   // user turned substitution off. Both belong on the panel, next to the run they concern.
   "GLYPHS_NOT_COVERABLE",
   "SUBSTITUTE_REFUSED",
+  // P2.7.6: a glyph the bundled faces have, but a subset we failed to build. Distinct from
+  // GLYPHS_NOT_COVERABLE on purpose -- the remedy is "report it", not "choose a font", and
+  // both belong on the panel so the message lands next to the run it concerns.
+  "SUBSET_BUILD_FAILED",
 ];
 
 /**

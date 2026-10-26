@@ -201,12 +201,25 @@ pub enum AppError {
     #[error("{0}")]
     TextRunNotEditable(String),
     /// Stage 2 (T11/T13): the replacement needs glyphs that neither the run's original
-    /// font nor any standard-14 substitute can supply, and no embeddable font is bundled.
+    /// font nor any standard-14 substitute can supply, and the shipped bundle genuinely
+    /// lacks them. Permanent within this build: changing the substitution setting will not
+    /// help, only a different font or a shorter range will.
     #[error(
         "the replacement needs glyphs that neither this run's font nor a standard font can \
-         supply; select a narrower range, or use the annotation tools to add a note"
+         supply; choose a different font, select a narrower range, or use the annotation \
+         tools to add a note"
     )]
     GlyphsNotCoverable,
+    /// MECH-B (P2.7.6): the glyph **is** in a bundled face, but the subset could not be
+    /// built. Deliberately a different code from `GlyphsNotCoverable`: this one is our bug,
+    /// not a limitation of the shipped faces, and telling the user to "choose a different
+    /// font" would send them after a problem they cannot fix.
+    #[error(
+        "the glyphs for this replacement exist in the bundled font, but the font subset \
+         could not be built; this is a defect in this build -- retry once, and report it if \
+         it happens again"
+    )]
+    SubsetBuildFailed,
     /// Stage 2 (O-ST2-4): the user turned substitution off, and the original font cannot
     /// set the replacement. Refused rather than substituting, per the toggle's contract.
     #[error(
@@ -239,6 +252,7 @@ impl AppError {
             AppError::WrongPassword => "WRONG_PASSWORD",
             AppError::TextRunNotEditable(_) => "TEXT_RUN_NOT_EDITABLE",
             AppError::GlyphsNotCoverable => "GLYPHS_NOT_COVERABLE",
+            AppError::SubsetBuildFailed => "SUBSET_BUILD_FAILED",
             AppError::SubstituteRefused => "SUBSTITUTE_REFUSED",
             AppError::TextRunMismatch => "TEXT_RUN_MISMATCH",
             AppError::ContentTooLarge => "CONTENT_TOO_LARGE",

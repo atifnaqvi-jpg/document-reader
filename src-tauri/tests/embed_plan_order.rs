@@ -89,8 +89,13 @@ fn the_two_refusals_stay_distinct() {
         "expected SUBSTITUTE_REFUSED, got {refused}"
     );
 
+    // U+6F22, not U+2192: measured against the shipped faces, **every** Liberation style has
+    // U+2192 (and U+0100), while none has U+6F22. An earlier draft of this test used U+2192 and
+    // called it uncovered; it passed only because MECH-B does not exist yet, and it would have
+    // inverted meaning the moment the embed path landed -- "the uncovered case" would have
+    // become a covered one, still refusing, and the test would have said "expected".
     let uncovered =
-        plan_for(&document, "H\u{2192}", true).expect_err("no shipped face covers U+2192 yet");
+        plan_for(&document, "H\u{6f22}", true).expect_err("no shipped face covers U+6F22");
     assert!(
         uncovered.starts_with("GLYPHS_NOT_COVERABLE"),
         "expected GLYPHS_NOT_COVERABLE, got {uncovered}"
