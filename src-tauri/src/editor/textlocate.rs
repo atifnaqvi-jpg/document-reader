@@ -146,13 +146,17 @@ pub struct RawRun {
     /// refused `run-mismatch`.
     pub page_origin: (f32, f32),
 
-    /// The composed matrix's uniform scale factor, `sqrt(|det(tm x ctm)|)`, and whether that
-    /// scale is uniform (P2.7.4).
+    /// The composed matrix's length scale **along the advance axis**, `|(m0, m1)|` (P2.7.4).
     ///
-    /// [`Self::advance`] is a **text-space** length; a PDFium box is **page space**. They
-    /// differ by exactly this factor, so the width gate must apply it to whichever side it
-    /// converts. `None` when the axes scale differently (anisotropy): there is no single
-    /// honest width then, and the run refuses rather than guess.
+    /// [`Self::advance`] is a **text-space** length and a PDFium span is **page space**, so the
+    /// width gate must convert one side through this factor. It is deliberately the advance
+    /// axis alone: a width is measured along that axis, so that axis's length is the whole
+    /// conversion, whether or not the up axis scales equally.
+    ///
+    /// This used to require a *uniform* scale and report `None` otherwise, which refused every
+    /// sheared and every anisotropically scaled run at write time while the picker still
+    /// offered it as editable (measured, A7 skew half). `None` now means only that the axis
+    /// has collapsed to a point, where there is nothing to scale.
     pub page_scale: Option<f32>,
 
     /// The run's text direction in page space (P2.7.4).
@@ -1288,10 +1292,12 @@ impl TextMatrixWalk {
         let advance = unit(m[0], m[1]);
         let up = unit(m[2], m[3]);
         let advance_scale = (m[0] * m[0] + m[1] * m[1]).sqrt();
-        let up_scale = (m[2] * m[2] + m[3] * m[3]).sqrt();
-        let uniform =
-            (advance_scale - up_scale).abs() <= 1e-3 * advance_scale.max(up_scale).max(1.0);
-        let scale = if uniform && advance_scale > f32::EPSILON {
+        // A width is measured *along the advance axis* and converted page-ward by that axis's
+        // length alone, so this is the factor a length conversion needs. Whether the up axis
+        // scales equally is a different question: it decides whether a box's extent can be
+        // trusted as a *height*, never whether an advance can be converted. Requiring
+        // uniformity here refused every sheared or anisotropically scaled run — A7's skew half.
+        let scale = if advance_scale > f32::EPSILON {
             Some(advance_scale)
         } else {
             None

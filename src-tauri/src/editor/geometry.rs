@@ -130,6 +130,19 @@ impl RunFrame {
         point.x * self.up.x + point.y * self.up.y
     }
 
+    /// True when the advance and up axes are perpendicular, i.e. the text is not sheared.
+    ///
+    /// Load-bearing for measurement: PDFium's character boxes are **axis-aligned in page
+    /// space**, so for a sheared glyph the box is the bounding box of the sheared ink and is
+    /// wider than the advance by `|shear| × glyph height`. Projecting that box onto the
+    /// baseline therefore overstates the run — measured 124.88pt for a 114.67pt line at 20°
+    /// of x-shear. Under a shear the grid cannot supply an advance width; only the font's own
+    /// metric, carried through the advance axis, can.
+    pub fn is_orthogonal(&self) -> bool {
+        const EPSILON: f32 = 1e-3;
+        (self.advance.x * self.up.x + self.advance.y * self.up.y).abs() <= EPSILON
+    }
+
     /// The page-space point `along` units down the advance axis and `across` units up.
     ///
     /// Exact inverse of [`Self::along`]/[`Self::across`] only when the axes are orthogonal.

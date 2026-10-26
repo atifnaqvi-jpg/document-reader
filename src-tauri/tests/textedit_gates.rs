@@ -2958,3 +2958,138 @@ fn a_rotated_replacement_saves_and_its_inverse_restores_the_bytes() {
         "the inverse restored the original"
     );
 }
+
+// --- A7 skew half: sheared and anisotropic text ---------------------------------
+
+/// A sheared run must be **measurable and writable**, with its own advance as the quota.
+///
+/// Measured before the fix (2026-10-26, at `c0fad4f`): 20° of x-shear was offered as editable
+/// with a 124.88pt quota against a 114.67pt advance — PDFium's character boxes are axis-aligned
+/// in page space, so a sheared glyph's box carries `|shear| × glyph height`. A 120pt replacement
+/// was accepted and overprinted past the run. 45° of shear refused with a false reason ("this
+/// run's font carries no width metrics" — Helvetica has metrics).
+///
+/// Both halves are asserted here: the quota must be the advance, and the replacement must
+/// write. The refusal that remains (mirroring) has its own test below.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn a_sheared_run_is_editable_with_its_advance_as_quota() {
+    for (label, cm) in [
+        ("x-shear 20", [1.0_f32, 0.0, 0.36397, 1.0, 0.0, 0.0]),
+        ("x-shear 45", [1.0, 0.0, 1.0, 1.0, 0.0, 0.0]),
+        ("y-shear 20", [1.0, 0.36397, 0.0, 1.0, 0.0, 0.0]),
+    ] {
+        let mut document = transformed(cm);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sheared.pdf");
+        document.save(&path).unwrap();
+        let reloaded = load(&path);
+        let page = textlocate::page_id(&reloaded, 0).unwrap();
+        let raw = &textlocate::locate_runs(&reloaded, page).unwrap()[0];
+        assert!(
+            !raw.frame.is_orthogonal(),
+            "{label}: the fixture must be sheared for this test to mean anything"
+        );
+        let described =
+            textedit::describe_runs(&reloaded, 0, &pdfium_runs(&path, 0), &char_grid(&path, 0))
+                .unwrap();
+        let run = &described[0];
+        assert!(
+            run.admissibility.editable,
+            "{label}: a shear is measurable and must not be refused; got {:?}",
+            run.admissibility
+        );
+
+        // The advance axis is `|(m0,m1)|` — 1.0 for both x-shears, 1.0642 for the y-shear,
+        // whose `cm` turns the baseline. Never the axis-aligned box extent.
+        let advance = raw.advance_exact.expect("Helvetica advance is exact");
+        let expected = advance * raw.page_scale.expect("a shear has a usable advance axis");
+        let width = run.width.expect("an editable run needs a measured width");
+        assert!(
+            (width - expected).abs() < 0.01 * expected,
+            "{label}: quota {width:.2}pt is not the {expected:.2}pt page-space advance \
+             ({advance:.2}pt at axis scale {:.4}); the shear-inflated box is back",
+            raw.page_scale.unwrap()
+        );
+    }
+}
+
+/// A replacement that fits a sheared run is **written and re-reads**. The quota assertion above
+/// could be satisfied by a number nobody uses; this drives the write path, which is where the
+/// old uniform-scale requirement refused every sheared run.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn a_sheared_replacement_saves_and_its_inverse_restores_the_bytes() {
+    let mut document = transformed([1.0, 0.0, 0.36397, 1.0, 0.0, 0.0]);
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("original.pdf");
+    let edited = dir.path().join("edited.pdf");
+    document.save(&original).unwrap();
+
+    let reloaded = load(&original);
+    let page = textlocate::page_id(&reloaded, 0).unwrap();
+    let raw = &textlocate::locate_runs(&reloaded, page).unwrap()[0];
+    let described = textedit::describe_runs(
+        &reloaded,
+        0,
+        &pdfium_runs(&original, 0),
+        &char_grid(&original, 0),
+    )
+    .unwrap();
+    let quota = described[0].width.expect("the sheared run is measurable");
+
+    // `edit_with` supplies the replacement's page-space width directly.
+    let outcome = edit_with(
+        &mut document,
+        0,
+        raw.id.clone(),
+        "ROTATED",
+        "TURNED",
+        quota,
+        quota * 0.5,
+    )
+    .expect("a replacement inside a sheared run's own advance must be written");
+
+    document.save(&edited).unwrap();
+    let after = load(&edited);
+    let after_runs =
+        textlocate::locate_runs(&after, textlocate::page_id(&after, 0).unwrap()).unwrap();
+    assert_eq!(after_runs[0].text, "TURNED", "the written bytes re-read");
+
+    let mut back = after;
+    textedit::revert(&mut back, &outcome.inverse).expect("the inverse must apply");
+    let restored_path = dir.path().join("restored.pdf");
+    back.save(&restored_path).unwrap();
+    let restored = load(&restored_path);
+    let final_runs =
+        textlocate::locate_runs(&restored, textlocate::page_id(&restored, 0).unwrap()).unwrap();
+    assert_eq!(
+        final_runs[0].text, "ROTATED",
+        "the inverse restored the original"
+    );
+}
+
+/// The shear rule must not cost a **rotated** run its grid measurement, and mirroring must
+/// still refuse: that is the one transform whose advance axis has no honest caret.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn rotation_keeps_its_grid_quota_and_mirroring_still_refuses() {
+    let mut rotated = transformed([0.0, 1.0, -1.0, 0.0, 300.0, 100.0]);
+    let runs = verdict_of(&mut rotated, "rotated-quota");
+    assert_eq!(runs.len(), 1);
+    let advance = 114.672;
+    let width = runs[0].width.expect("a rotated run is measurable");
+    assert!(
+        (width - advance).abs() < 0.01 * advance,
+        "a quarter turn must keep its 114.67pt advance as quota, not the 18.12pt glyph height; \
+         got {width:.2}pt"
+    );
+
+    let mut mirrored = transformed([-1.0, 0.0, 0.0, 1.0, 300.0, 100.0]);
+    let runs = verdict_of(&mut mirrored, "mirrored");
+    assert_eq!(
+        runs[0].admissibility.gate.as_deref(),
+        Some("mirrored-text"),
+        "a mirrored run still refuses, and for the mirroring rather than the width"
+    );
+}

@@ -446,12 +446,14 @@ const BOX_SPAN_SLACK: f32 = 1.25;
 /// The refusal for a run whose width cannot be measured at all (P2.4.2 T22).
 ///
 /// It is a **width-gate** refusal — the gate the user is about to be judged by — so it names
-/// `fits-width`, but its reason is the measurement, not the overflow: the font carries no
-/// in-file metrics, so the only width on offer is a box that may be a whole line. Trusting it
-/// is exactly the 0.4.1 bug, so the safe direction is to refuse and point at the annotation.
-const UNMEASURABLE_WIDTH_MESSAGE: &str = "this run's font carries no width metrics to measure \
-     the replacement against; select a narrower range, or use the annotation tools to add a \
-     note (gate: fits-width)";
+/// `fits-width`, but its reason is the measurement, not the overflow: no span could be located
+/// and the box may be a whole line. Trusting it is exactly the 0.4.1 bug, so the safe direction
+/// is to refuse and point at the annotation. It must not claim the *font* lacks metrics: that
+/// was measurably false for a standard-14 face under a shear, and a wrong reason sends the user
+/// to a remedy that cannot help.
+const UNMEASURABLE_WIDTH_MESSAGE: &str = "the width of this run cannot be measured, so a \
+     replacement cannot be checked against it; select a narrower range, or use the annotation \
+     tools to add a note (gate: fits-width)";
 
 /// Whether two `Tf` sizes are the same fragment's (P2.4.2, relative rule).
 ///
@@ -1616,7 +1618,13 @@ fn group_span(
         }
     }
 
-    if grid_measurable && grid_complete {
+    // A sheared frame cannot be measured from the grid: PDFium's boxes are axis-aligned in
+    // page space, so they carry the shear's `|shear| x glyph height` in their width. The span
+    // would be a *page* extent, not an advance, and the quota would grow with the shear angle
+    // — measured 124.88pt for a 114.67pt line at 20 degrees. The in-file metric is exact, and
+    // the advance axis converts it below.
+    let frame_orthogonal = runs[group.first].frame.is_orthogonal();
+    if grid_measurable && grid_complete && frame_orthogonal {
         return Some(grid_span);
     }
     if metric_measurable && metric_complete {
@@ -3851,12 +3859,75 @@ mod tests {
              page scale 3.0; the units bug is back"
         );
 
-        // No uniform scale means no honest conversion: report unmeasurable, never guess.
+        // A collapsed advance axis has nothing to scale, and that is the only `None` left:
+        // reporting unmeasurable rather than guessing a factor.
         run.page_scale = None;
         assert_eq!(
             group_span(&document, 0, std::slice::from_ref(&run), &[None], &group),
             None
         );
+    }
+
+    /// A7's skew half (fixed 2026-10-26): a **sheared** frame was measured from the char grid,
+    /// whose boxes are axis-aligned in page space. The box of a sheared glyph is the bounding
+    /// box of the sheared ink, wider than the advance by `|shear| x glyph height` — measured
+    /// 124.88pt for a 114.67pt line at 20 degrees of x-shear. The quota grew with the shear
+    /// angle, so a replacement that overprinted past the run was accepted.
+    ///
+    /// The font metric is exact and the advance axis converts it. This asserts the number, not
+    /// merely that a span exists.
+    #[test]
+    fn a_sheared_run_uses_its_metric_not_the_axis_aligned_grid_box() {
+        let document = testpdf::unrotated_text();
+        let mut run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        let exact = measured_span(&document, 0, &run).expect("Helvetica has metrics");
+
+        // 20 degrees of x-shear: `cm [1 0 tan(20) 1]`. The advance axis is unchanged, so the
+        // page-space advance is the text-space one.
+        run.frame = RunFrame::from_vectors((1.0, 0.0), (0.36397, 1.0));
+        run.page_scale = Some(1.0);
+        assert!(!run.frame.is_orthogonal(), "the fixture must be sheared");
+
+        let group = RunGroup::new(0, 1);
+        let sheared = group_span(&document, 0, std::slice::from_ref(&run), &[None], &group)
+            .expect("a sheared run is still measurable from its metrics");
+        assert!(
+            (sheared - exact).abs() < 1e-3,
+            "sheared quota {sheared:.2}pt must be the {exact:.2}pt advance, not the inflated \
+             grid extent (124.88pt measured at this angle)"
+        );
+
+        // A shear that also scales the advance axis converts by that axis alone, not by a
+        // uniform factor (which does not exist here).
+        run.frame = RunFrame::from_vectors((2.0, 0.0), (0.36397, 1.0));
+        run.page_scale = Some(2.0);
+        let scaled = group_span(&document, 0, std::slice::from_ref(&run), &[None], &group)
+            .expect("measurable");
+        assert!(
+            (scaled - exact * 2.0).abs() < 1e-3,
+            "the advance axis is 2x, so the quota must be {:.2}pt; got {scaled:.2}pt",
+            exact * 2.0
+        );
+    }
+
+    /// An **orthogonal** frame still reads the grid, which is the oracle for the subsets whose
+    /// in-file metrics are missing. The shear rule must not quietly downgrade every run to the
+    /// metric fallback: that would change every rotated measurement the phase already shipped.
+    #[test]
+    fn an_orthogonal_run_still_prefers_the_grid_span() {
+        let frame = RunFrame::from_vectors((0.0, 1.0), (-1.0, 0.0));
+        assert!(frame.is_orthogonal());
+        assert!(
+            !frame.is_horizontal(),
+            "the fixture must be turned, not upright"
+        );
+
+        let page = RunFrame::PAGE;
+        assert!(page.is_orthogonal());
+        // A shear of a tenth of a degree is still a shear; the tolerance is a rounding guard,
+        // not a licence to treat an oblique frame as orthogonal.
+        assert!(!RunFrame::from_vectors((1.0, 0.0), (0.02, 1.0)).is_orthogonal());
     }
 
     #[test]
