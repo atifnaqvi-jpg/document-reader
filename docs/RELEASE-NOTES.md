@@ -132,6 +132,38 @@ number is spent and the earlier phase needs a new one.
   7,380,992 bytes, both `machine 0x8664`, both PE32+. The version resource reports `0.8.1`.
   (The NSIS stub itself is x86, which is normal and unrelated to the payload.)
 
+### The published installer is not the hand-tested one, and that is measured
+
+The tag run rebuilt from source, and a rebuild is not reproducible here: this project embeds
+a PE timestamp and a PDB identity. The published asset is therefore a **different file with a
+different hash**, and it was not itself the thing the user ran:
+
+| | hand-confirmed (artifact `12618531386`, run `40244727545` on `cb8693e`) | published (`v0.8.1`, run `40353002998` on `1b88c80`) |
+|---|---|---|
+| installer size | 7,824,005 | 7,823,255 |
+| installer SHA-256 | `7a201486…be0a17` | `59ead919…75a9e0` |
+
+Measured, not argued: the two installers were unpacked and their payloads compared.
+
+- `pdfium.dll` — **byte-identical** (`d42c452a…`), 7,380,992 bytes.
+- `document-reader.exe` — same size (20,630,528), **28 differing bytes in 9 runs**, and
+  `.text` and `.rsrc` are **byte-identical** across their full extents.
+- Of those 28 bytes: 16 are the PE timestamp in the header and COFF/debug-directory
+  timestamps; 3 are the PDB `RSDS` GUID; 2 are one debug-directory field; 1 is the PDB age.
+  The remaining 6 are a single `u32` in the Rust debug-string table that changes value from
+  `0x27` to `0x23` — and `0x27`/`0x23` are 39/35, which are the line numbers of the **same**
+  `#[derive(Debug, …)]` attribute in `render.rs` before and after the four-line doc comment
+  added in `c0fad4f`. The only source difference between the two builds is a comment.
+- Conclusion, stated as a limit rather than a reassurance: the published binary's executable
+  code is identical to the hand-tested one, but **the published installer itself has not been
+  run**. Both the SHA-256 above and this paragraph are here so that fact is not discoverable
+  only by comparing release assets.
+
+The remedy, if byte-for-byte traceability is wanted for future phases, is either to make the
+build reproducible (drop the timestamp, fix `SOURCE_DATE_EPOCH`) or to tag the commit the
+installer was actually built from and confirm *that* build — not to describe a rebuild as if
+it were the tested bytes. Not changed in this release.
+
 Between the gated commit `cb8693e` and this tag, `src-tauri/src/` changes only by a doc
 comment (the `DEFAULT_RENDER_CACHE_BYTES` "unmeasured placeholder" note) plus the rewritten
 `tests/memory.rs`. No product behaviour changed after the run that was hand-tested.
