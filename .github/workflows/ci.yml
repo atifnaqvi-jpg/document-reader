@@ -81,15 +81,16 @@ jobs:
           #
           # This is literal for the same reason: any added `#[ignore]` must be acknowledged
           # here in the same commit, so a gated test cannot arrive -- or vanish -- silently.
-          if [ "$ignored" -ne 71 ]; then
-            echo "::error::$ignored tests ignored; 71 PDFium-gated tests are expected. Add the mark deliberately or fix the test."
+          if [ "$ignored" -ne 74 ]; then
+            echo "::error::$ignored tests ignored; 74 PDFium-gated tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
-          # Measured, not computed: 433 passed at 0.8.1 (Linux, no PDFium). Raising this to
+          # Measured, not computed: 435 passed (Linux, no PDFium) after the A7 skew guards
+          # added two. Raising this to
           # the measured value, rather than leaving headroom, is what makes a test that stops
           # being collected fail here instead of passing quietly.
-          if [ "$passed" -lt 433 ]; then
-            echo "::error::only $passed tests ran; 433 is the non-PDFium baseline at 0.8.1. A test stopped being collected."
+          if [ "$passed" -lt 435 ]; then
+            echo "::error::only $passed tests ran; 435 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

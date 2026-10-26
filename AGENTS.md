@@ -11,7 +11,7 @@ dropped the last glyph of every line (333pt measured against a true 342pt span).
 non-PDFium tests passed. Only the `#[ignore]`d, PDFium-gated tests caught it. A plain
 `cargo test` therefore reports green while the document pass is broken on every line.
 
-The 71 `#[ignore]`d tests are the only coverage that opens a real PDF and exercises the
+The 74 `#[ignore]`d tests are the only coverage that opens a real PDF and exercises the
 rendering path. Treating them as optional means regressions on every real document ship
 unvalidated. Both CI workflows already assert this; local verification must match them.
 
@@ -56,7 +56,7 @@ fn ...
 ```
 
 Ubuntu CI has no PDFium, so the test must stay out of the default run there. `#[ignore]` does
-that while keeping the omission *counted*: `ci.yml` asserts exactly 71 ignored on Linux, and
+that while keeping the omission *counted*: `ci.yml` asserts exactly 74 ignored on Linux, and
 the Windows job asserts 0 ignored after `--include-ignored`.
 
 **Adding an ignored test means updating that pin in the same commit.** The count is literal on
