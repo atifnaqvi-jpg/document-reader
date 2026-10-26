@@ -159,6 +159,84 @@ fn the_shipped_version_has_release_notes() {
     );
 }
 
+/// The version in the tree must not be one a published tag already owns.
+///
+/// `the_shipped_version_has_release_notes` only asks whether a section exists. It therefore
+/// passed for weeks while the tree said `0.8.1`, carried commits that `v0.8.1` did not
+/// contain, and matched the *published* 0.8.1 section whose content described a different
+/// tree. That is a guard satisfied by a coincidence: the notes were green because the number
+/// was stale, not because the tree matched the notes.
+///
+/// The property that actually matters is: if `HEAD` is not the commit a published tag points
+/// at, then the carrier version must be ahead of every published tag. A tree one commit past
+/// `v0.9.0` with carriers still at `0.9.0` re-creates the defect, so this is checked against
+/// tags rather than against the single case that was found.
+///
+/// Skipped when git or the tag is unavailable (a source tarball has no tags); it must not fail
+/// for a reason unrelated to the property.
+#[test]
+fn the_tree_version_is_ahead_of_every_published_tag() {
+    let root = repo_root();
+    let tag = std::process::Command::new("git")
+        .args(["describe", "--tags", "--exact-match", "HEAD"])
+        .current_dir(&root)
+        .output();
+
+    let Ok(tag) = tag else {
+        eprintln!("git unavailable; skipping the published-tag comparison");
+        return;
+    };
+    if tag.status.success() {
+        // HEAD *is* a tagged release: the carriers are expected to name it.
+        return;
+    }
+
+    let listed = std::process::Command::new("git")
+        .args(["tag", "--list", "v*"])
+        .current_dir(&root)
+        .output()
+        .expect("git tag --list must run");
+    let mut published: Vec<(u64, u64, u64)> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|t| t.trim().strip_prefix('v'))
+        .filter_map(parse_semver)
+        .collect();
+    if published.is_empty() {
+        eprintln!("no version tags found; skipping");
+        return;
+    }
+    published.sort_unstable();
+    let highest = *published.last().expect("non-empty");
+
+    let current = parse_semver(&cargo_toml_version())
+        .unwrap_or_else(|| panic!("Cargo.toml version is not plain semver: three numbers"));
+
+    assert!(
+        current > highest,
+        "HEAD is untagged but the carriers say {}.{}.{}, which is not ahead of the highest \
+         published tag v{}.{}.{}; an installer built here would claim a version whose \
+         published artifact does not contain these commits, and the release-notes guard would \
+         pass against the published section",
+        current.0,
+        current.1,
+        current.2,
+        highest.0,
+        highest.1,
+        highest.2
+    );
+}
+
+fn parse_semver(text: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = text.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
 /// T-4's acceptance: `Ts`, PDFDocEncoding, copy-on-write and the MCID work all ship in
 /// 0.5.0, so all four must be listed. Point-in-time by design -- a later phase writes its
 /// own section.

@@ -59,12 +59,34 @@ red run.
 Two further shapes that can pass for the wrong reason, so test them deliberately:
 
 - **A pin that is an equality is direction-free.** `-ne 74` catches both 71 and 75. A floor
-  (`-lt 444`) only catches values below it, so lowering a floor is caught and *raising* it is
+  (`-lt 445`) only catches values below it, so lowering a floor is caught and *raising* it is
   not; if the property is "no test was lost", the floor must equal the measured count, not sit
   under it.
 - **A value that is still satisfied by the defect.** Mutating a required string to one that
   is also present elsewhere in the file passes, because `contains` found the other occurrence.
   Count occurrences before choosing the mutation, and prefer a parsed field over a substring.
+
+### A mutation to a value the file already holds is not a mutation
+
+Measured during P2.7.6 step 1, on the font-hash guard, and it produced a green run that looked
+like a passing mutation test:
+
+- The mutation wrote `\x00` at offset 20,000 of `LiberationSans-Regular.ttf`. That byte was
+  **already `0x00`**. The file was unchanged, the hash matched, and the guard passed — so the
+  run proved nothing about whether the guard can detect a swapped face.
+- Rewriting the same offset with `\xff\xff` changed two bytes (`cmp -l` confirmed offsets
+  20001/20002), the SHA-256 changed, and the guard failed at the hash assertion. That is the
+  only one of the two runs that was a mutation.
+
+`printf '\x00' | dd` is the trap: it silently no-ops against an existing zero byte and `dd`
+still reports success. Before trusting any surviving mutant, verify the mutation landed:
+
+```
+cmp -l <original> <mutated> | head      # must be non-empty
+git diff --stat                          # must name the guarded file
+```
+
+Restore and confirm green afterwards; a mutation result is a pair.
 
 Applies to any new or modified guard that reads a file rather than calling code. Where a
 guard has a parser helper, add a second test that feeds the helper a crafted sample —

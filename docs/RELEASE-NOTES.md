@@ -12,15 +12,36 @@ the version in `Cargo.toml` has a section here.
 Closing **P2.7.6** — font embedding (MECH-B), plus the A7 skew fix that was found while
 freezing it.
 
-> **DRAFT — not published.** Written at the design freeze (2026-09-20), before the bundling
-> and embedding work exists, per this file's rule that the section precedes the version bump.
-> The *skew fix* in this section is implemented and gated; **MECH-B is not built yet**, and
-> its paragraph describes the frozen design, not shipped code. Do not publish this section
-> until `--include-ignored` is green on the tagged commit and the installer from that run is
-> hand-confirmed (Q9). Carriers still say 0.8.1.
+> **DRAFT — not published.** Version carriers moved to 0.9.0 on 2026-09-20, so the tree no
+> longer claims a version whose published artifact lacks its commits. **MECH-B is not built
+> yet**: the skew fix below is implemented and gated, the font *payload* is bundled and
+> audited, but the subsetting and write path do not exist. Do not publish until
+> `--include-ignored` is green on the tagged commit and the installer from that run is
+> hand-confirmed (Q9).
 >
 > **Pre-release when it ships.** 1.0.0 (P2.8, reflow) is the point text editing is declared
 > complete.
+
+### What is in this release, and why A7 is not its own version
+
+This section covers **four** things that were all unreleased at `v0.8.1`:
+
+1. the **A7 skew fix** (commit `6685208`),
+2. the **CI floor corrections** that its guards required (`ae5a75f`),
+3. the **frozen P2.7.6 design** with its four rulings (`0f51f80`),
+4. the **bundled font payload** with its audited record and licence notice (`2e7fc6d`).
+
+Measured: `git merge-base --is-ancestor 6685208 v0.8.1` → **not** an ancestor. The A7 fix was
+committed after `v0.8.1` was tagged, so the published 0.8.1 installer does not contain it, even
+though the tree carried the 0.8.1 label for a while. That is why the carriers moved to 0.9.0
+in one commit rather than being left to drift to the next phase's bump.
+
+**Deviation from B-3, recorded deliberately.** B-3 ruled that A7 is a *separate hotfix
+commit* so it stays revertible without touching the programme. It **is** a separate commit
+(`6685208`, revertible on its own) — but it is **not** a separate *release*. Publishing 0.8.2
+would have required a second installer and a second hand-test cycle (Q9) for one fix, and Q7
+assigns no 0.8.2 to any phase. The commit boundary B-3 asked for is intact; only the release
+boundary is folded.
 
 ### Fixed: skewed text is now editable, and measured honestly
 
@@ -47,15 +68,25 @@ No previously-shipped fixture changes verdict — the fixture set had rotation i
 `cm` form but no shear, which is why 0.8.1 could ship this. The new guards build their own
 shear fixtures.
 
-### MECH-B font embedding — designed, not yet built
+### MECH-B font embedding — payload shipped, write path not yet built
 
-A replacement containing characters outside WinAnsi (`—`, `→`, `’`, Greek) is now set in a
-bundled Liberation face instead of refusing `GLYPHS_NOT_COVERABLE`. **This does not work
-yet**; the acceptance matrix in `docs/P2.7.6-embed-DESIGN.md` §5 is not green. Twelve faces ship
-(4,360,440 bytes), chosen by the distinct-class rule: a face ships only if it owns a style
-class no other shipped face owns. Substitution still requires explicit consent, `/ToUnicode`
-is written so copy and search return the real characters, and a run whose own font covers the
-replacement keeps its own font.
+Twelve Liberation faces now ship in the installer (4,360,440 bytes), from Debian
+`fonts-liberation 2.1.5-3`, with a per-face SHA-256 record and a notice reachable from
+*About and notices* with no document open. Faces were chosen by the distinct-class rule: a
+face ships only if it owns a style class no other shipped face owns, which is why the four
+Narrow faces are not included.
+
+**The embedding itself does not work yet.** A replacement containing characters outside
+WinAnsi (`—`, `→`, `’`, Greek) is still refused with `GLYPHS_NOT_COVERABLE`; the acceptance
+matrix in `docs/P2.7.6-embed-DESIGN.md` §5 is not green. When it lands, substitution will
+require explicit consent, `/ToUnicode` will be written so copy and search return the real
+characters, and a run whose own font covers the replacement will keep its own font.
+
+Written font names do **not** use the Liberation name: a subset deletes glyphs, which makes it
+a Modified Version under OFL 1.1, and condition 3 forbids a Modified Version from presenting
+the Reserved Font Name as its primary name. The name is `/<PREFIX>+<Family>-<Style>`. The
+reasoning and the mapping are in `src-tauri/resources/fonts/FONT-RECORD.md`, and a test fails
+if any written token contains the reserved name.
 
 ---
 
