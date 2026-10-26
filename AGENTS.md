@@ -59,7 +59,7 @@ red run.
 Two further shapes that can pass for the wrong reason, so test them deliberately:
 
 - **A pin that is an equality is direction-free.** `-ne 74` catches both 71 and 75. A floor
-  (`-lt 445`) only catches values below it, so lowering a floor is caught and *raising* it is
+  (`-lt 450`) only catches values below it, so lowering a floor is caught and *raising* it is
   not; if the property is "no test was lost", the floor must equal the measured count, not sit
   under it.
 - **A value that is still satisfied by the defect.** Mutating a required string to one that
@@ -87,6 +87,28 @@ git diff --stat                          # must name the guarded file
 ```
 
 Restore and confirm green afterwards; a mutation result is a pair.
+
+### A mutant that does not compile is not a mutant that was caught
+
+Measured during P2.7.6 R4, on the plan-order guard, and it produced what looked like a pass:
+
+- The mutation injected `crate::editor::fontbundle::face_for(...)` into `substitute.rs`. That
+  module does not exist. The build failed with `E0433`, `cargo test | grep "^test result"`
+  printed **nothing**, and the empty output was read as "no failure". It was not a pass: no
+  test ran at all.
+- The second attempt added `Plan::Embed` but left the two `match` consumers non-exhaustive, so
+  the crate still failed to build (`E0004`), with the same silent-looking grep.
+- Only the third attempt — variant plus both match arms — compiled, and then the guard failed
+  with the intended message.
+
+A compiling mutant that is still not caught is a coverage finding; a non-compiling mutant is
+a measurement error, and the two look identical if you only grep for `test result`. The
+runner must distinguish them:
+
+```
+cargo test 2>&1 | grep -E "^error(\[|:)|could not compile"   # must be empty
+cargo test 2>&1 | grep -E "^test result"                     # must be non-empty
+```
 
 Applies to any new or modified guard that reads a file rather than calling code. Where a
 guard has a parser helper, add a second test that feeds the helper a crafted sample —
