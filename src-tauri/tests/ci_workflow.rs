@@ -353,7 +353,8 @@ fn the_render_smoke_step_actually_runs_the_ignored_memory_tests() {
 /// that nobody checks is a comment. This makes raising it an explicit act, in the same commit
 /// as whatever added the tests, exactly like the ignored count.
 ///
-/// Mutation-verified: `-lt 432` -> `-lt 433` fails this test; restoring it passes.
+/// Mutation-verified: `-lt 433` -> `-lt 434` fails this test; restoring it passes. It was
+/// raised here from 432 by the B-1 boundary guard, which adds one test.
 #[test]
 fn the_linux_job_pins_the_measured_passed_floor() {
     let text = ci_workflow();
@@ -364,8 +365,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 432 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 432 (0.8.1). \
+        tests_step.contains(r#"if [ "$passed" -lt 433 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 433 (0.8.1). \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }

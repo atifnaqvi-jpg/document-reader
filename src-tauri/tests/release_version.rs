@@ -354,3 +354,80 @@ fn the_0_8_1_notes_record_why_the_version_is_not_0_7_0() {
         version_cell(&plan_row("P2.7.6"))
     );
 }
+
+/// The programme boundary is P2.8, not P2.7.6: the deferred full-parity inventory is
+/// produced **after reflow ships**, and the plan must say so where the next reader looks —
+/// in the boundary note and in the sequencing note after the phase table.
+///
+/// Why a test: this is a pure documentation claim with no compiler behind it, and the two
+/// plausible readings ("close P2.7.6, then inventory" vs "close 1.0.0, then inventory")
+/// differ by a whole phase. A reader who takes the wrong one starts the inventory early,
+/// which is the scope error ruling B-1 exists to prevent.
+///
+/// The assertion is on the *sentence*, not on the file: `contains("P2.8")` anywhere would
+/// pass on the phase table alone, which has named P2.8 since the plan was frozen. That is
+/// the vacuous-guard shape this programme has already caught seven times, so the notes are
+/// isolated first and only then searched.
+#[test]
+fn the_plan_defers_the_full_parity_inventory_to_after_p2_8() {
+    let plan = read(&repo_root().join("docs/P2.7-TEXT-EDITING-PARITY-PLAN.md"));
+
+    let boundary = plan
+        .lines()
+        .skip_while(|line| !line.contains("**Programme boundary (B-1"))
+        .take_while(|line| line.trim_start().starts_with('>'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let boundary = boundary.to_lowercase();
+    assert!(
+        !boundary.is_empty(),
+        "the plan has no '**Programme boundary (B-1' note; the deferral point is unstated"
+    );
+
+    // The deferral-point *sentence*, not the whole note. The note names P2.8 more than once
+    // ("after P2.8", then "produced once, after P2.8 ships"), so a contains over the block
+    // survives flipping the sentence that actually states the boundary. Mutation-verified:
+    // this exact mutation passed the whole-block version.
+    let deferral = boundary
+        .split("the deferral point is")
+        .nth(1)
+        .map(|tail| tail.split(". ").next().unwrap_or(tail))
+        .unwrap_or("")
+        .trim_start_matches(['*', ' ']);
+    assert!(
+        deferral.starts_with("after p2.8") && deferral.contains("not after p2.7.6"),
+        "the deferral point must read 'after P2.8 ... not after P2.7.6'; sentence: {deferral:?}"
+    );
+
+    for needle in ["0.9.0", "1.0.0", "must not be produced"] {
+        assert!(
+            boundary.contains(needle),
+            "the programme-boundary note never says {needle:?}: {boundary}"
+        );
+    }
+
+    let after_table = plan
+        .lines()
+        .skip_while(|line| !line.contains("**What comes after which"))
+        .take_while(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let after_table = after_table.to_lowercase();
+    assert!(
+        after_table.contains("after p2.8") && after_table.contains("last phase before reflow"),
+        "the sequencing note after the phase table must say P2.7.6 is the last phase before \
+         reflow and the inventory follows P2.8: {after_table}"
+    );
+
+    // Same claim in the section that records the ruling, so the two cannot drift.
+    let questions = read(&repo_root().join("docs/P2.7-REVIEW-OPEN-QUESTIONS.md"));
+    let b1 = questions
+        .lines()
+        .find(|line| line.contains("| **B-1** |"))
+        .unwrap_or_else(|| panic!("P2.7-REVIEW-OPEN-QUESTIONS.md has no B-1 row"));
+    let b1_lower = b1.to_lowercase();
+    assert!(
+        b1_lower.contains("after p2.8") && b1_lower.contains("full-parity inventory"),
+        "the B-1 ruling row must place the full-parity inventory after P2.8: {b1}"
+    );
+}

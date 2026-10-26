@@ -116,17 +116,25 @@ number is spent and the earlier phase needs a new one.
 
 ### Build status
 
-**Built, not published, not yet accepted.** Per Q9 this phase stays `[~]` until the installer
-has been hand-tested.
+**Accepted and published as a pre-release on 2026-10-26.**
 
 - Gate: CI run `40244724597` on `cb8693e` — all three jobs green. Linux `432 passed / 71
   ignored`, Windows `502 passed / 0 ignored`.
 - Installer: run `40244727545` (workflow_dispatch, so artifact only — no tag, no release).
   `Document Reader_0.8.1_x64-setup.exe`, 7,824,005 bytes, SHA-256
   `7a20148667a2eff36231c6e2bedd442866a70d5325892e2d122f21a3c2be0a17`, artifact `12618531386`.
+- **Hand-confirmed 2026-10-26** by the user against that artifact and that SHA-256. This is
+  the Q9 confirmation: the gate was already green, so both closing conditions are met and
+  the plan row moved `[~]` → `[x]`.
+- Published as tag `v0.8.1` (pre-release; `release-windows.yml` sets `prerelease: true`
+  because P2.7.6 and P2.8 are still ahead).
 - Payload measured, not assumed: `document-reader.exe` 20,630,528 bytes and `pdfium.dll`
   7,380,992 bytes, both `machine 0x8664`, both PE32+. The version resource reports `0.8.1`.
   (The NSIS stub itself is x86, which is normal and unrelated to the payload.)
+
+Between the gated commit `cb8693e` and this tag, `src-tauri/src/` changes only by a doc
+comment (the `DEFAULT_RENDER_CACHE_BYTES` "unmeasured placeholder" note) plus the rewritten
+`tests/memory.rs`. No product behaviour changed after the run that was hand-tested.
 
 ---
 
