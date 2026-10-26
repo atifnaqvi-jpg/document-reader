@@ -154,6 +154,11 @@ jobs:
       # `0 passed; 0 failed; 3 ignored` and exited 0 on every run since it was written.
       # The step was named after the coverage it did not have. `--nocapture` stays because
       # the point of this step is to see the allocation numbers in the log.
+      #
+      # The resident-memory test reads 600 pages (~2.5 min locally) so that its leak arm
+      # is distinguishable from allocator noise; measured +0 MiB bounded vs +24 MiB with
+      # eviction disabled. Do not shorten it to make this step faster -- at 120 pages the
+      # unbounded case passed.
       - name: Render smoke tests (real PDFium)
         working-directory: src-tauri
         env:

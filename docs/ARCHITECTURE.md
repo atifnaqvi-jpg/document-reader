@@ -63,7 +63,7 @@ flowchart TB
 | **Reader core (interface)** | The contract above — the only seam between the app and format libraries |
 | **PDF provider** | Lazy page iteration, rasterization to images, embedded text extraction, metadata (title, page count) |
 | **Text/Markdown provider** | Simplest provider: read file, paginate on demand, render as text view |
-| **Render cache** | LRU keyed by `(doc_id, page, scale)`; sized by memory budget (e.g., 200 MB) |
+| **Render cache** | LRU keyed by `(doc_id, page, scale)`; sized by a byte budget. The 200 MB default is an **unmeasured placeholder**, not derived from a measurement |
 | **Settings** | Small local JSON file; no registry, no cloud |
 
 No database. No background services. If a file is opened twice, it's simply opened twice.

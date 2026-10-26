@@ -10,10 +10,17 @@
 //! Two things are asserted, in order of how much they prove:
 //!
 //! 1. The cache's own byte counter never exceeds its budget, across far more pages than
-//!    fit in it. This is exact and holds on every platform.
+//!    fit in it. This is exact on every platform *provided a single rendered page fits
+//!    inside the budget*: `RenderCache::insert` deliberately keeps at least one entry
+//!    resident, so a raster larger than the entire budget is cached and leaves the
+//!    counter above it. The test satisfies that precondition by a wide margin — a page
+//!    at `SCALE` is ~48 KB against a 1 MiB budget.
 //! 2. Resident memory does not grow in proportion to the number of pages read. This is
-//!    best-effort (`/proc/self/statm`, so Linux-only) and would be flaky as a hard bound;
-//!    it is a coarse tripwire for a genuine leak, not a precise measurement.
+//!    best-effort (`/proc/self/statm`, so Linux-only), so it is a tripwire rather than an
+//!    exact bound — but the tripwire is calibrated. Both arms were measured: bounded
+//!    growth is +0 MiB, and with eviction disabled it is +24 MiB over the same 480 pages,
+//!    against a 16 MiB allowance. At the original 120 pages the unbounded arm grew ~5 MiB
+//!    and passed, which is why the page count was raised; see `RSS_PAGES`.
 //!
 //! The full path is exercised — `RenderService` over a real PDF through PDFium — because
 //! a cache tested only through its own `insert`/`get` would not catch a caller bypassing
@@ -111,10 +118,20 @@ fn reading_a_large_document_keeps_the_render_cache_within_its_budget() {
     );
 }
 
-/// Pages read by the resident-memory test. Smaller than `PAGES`, and smaller than the budget,
-/// so the assertion is about memory retained after warm-up rather than about eviction (which
-/// the test above already covers).
-const RSS_PAGES: u32 = 120;
+/// Pages read by the resident-memory test.
+///
+/// This number is what gives the assertion its power, and it was measured rather than
+/// chosen. At 120 pages the signal was the same size as allocator noise (~1-5 MiB): a
+/// page of the fixture rasterizes to ~48 KB, so 96 further pages of unbounded caching
+/// only add ~5 MiB, which sat inside the allowance and passed with eviction disabled.
+/// At 600 pages the two outcomes separate — bounded stays near one budget, unbounded
+/// grows by the 480 measured pages at ~48 KB each (~23 MiB) — so "a leak is present"
+/// and "the allocator is untidy" are no longer the same number.
+const RSS_PAGES: u32 = 600;
+
+/// Slack for an allocator that does not return freed pages promptly. Measured growth on
+/// the bounded arm is 1-5 MiB; unbounded growth at `RSS_PAGES` is ~23 MiB.
+const ALLOCATOR_SLACK: usize = 16 * 1024 * 1024;
 
 #[test]
 #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
@@ -158,15 +175,17 @@ fn resident_memory_does_not_grow_with_the_number_of_pages_read() {
         growth / (1024 * 1024)
     );
 
-    // Deliberately generous: this is a leak tripwire, not a measurement. Reading 400
-    // further pages should not add more than a few pages' worth of memory; a genuine
-    // per-page leak would be ~400 MB and this threshold would catch it by a wide margin,
-    // while an allocator that does not return freed pages promptly still passes.
-    let allowance = CACHE_BUDGET + 64 * 1024 * 1024;
+    // Two parts: what the cache is allowed to hold, plus allocator slack. The slack is
+    // measured, not reasoned about. It used to be 64 MiB, justified by a "~1 MB PNG"
+    // figure from the docstring above; the fixture actually renders ~48 KB pages, which
+    // put the unbounded case inside the allowance. Disabling eviction passed. See the
+    // commit that raised RSS_PAGES for both arms' measurements.
+    let allowance = CACHE_BUDGET + ALLOCATOR_SLACK;
     assert!(
         growth < allowance,
         "resident memory grew by {} MiB over {} pages, which is more than the cache \
-         budget plus slack — a per-page leak is the likely cause",
+         budget plus {ALLOCATOR_SLACK} bytes of allocator slack — a per-page leak is the \
+         likely cause",
         growth / (1024 * 1024),
         RSS_PAGES - RSS_PAGES / 5
     );

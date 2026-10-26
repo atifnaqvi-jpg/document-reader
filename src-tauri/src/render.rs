@@ -21,6 +21,10 @@ use crate::provider::{DocumentHandles, PdfProvider};
 /// roughly an order of magnitude larger than a 72 DPI one, so an entry-count bound
 /// would let the cache hold tens of megabytes or several gigabytes depending only on
 /// the zoom level the user happened to use.
+///
+/// **Unmeasured placeholder.** 200 MB was chosen by judgement, not derived from how
+/// much memory a reader actually revisits. The memory tests calibrate eviction against
+/// a 1 MiB budget (`tests/memory.rs`); nothing measures this value.
 pub const DEFAULT_RENDER_CACHE_BYTES: usize = 200 * 1024 * 1024;
 
 /// Scale is part of the cache key, so it must be quantised: `1.0` and `1.0000001`
