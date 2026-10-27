@@ -21,6 +21,9 @@ Thumbs.db
 .openhands/
 automations/
 
+# Durable mutation evidence (scripts/mutate.sh appends here; local, never committed)
+.mutation-log/
+
 # Local test documents (real-world PDFs used for manual acceptance, not fixtures)
 Maastricht Data Science Program Feb 2022 - Brochure.pdf
 
