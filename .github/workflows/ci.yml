@@ -34,7 +34,7 @@ jobs:
       # toolchain turns `cargo fmt --check` into a statement about the calendar rather than
       # about the code: it can go green→red on a day nobody edited anything, or reformat a
       # release branch mid-flight. Pinning is what makes the gate meaningful.
-      # `rust-version` in src-tauri/Cargo.toml is the MSRV floor (1.77); this is the toolchain
+      # `rust-version` in src-tauri/Cargo.toml is the MSRV floor (1.90); this is the toolchain
       # the gates are defined against, and is allowed to be newer.
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -56,7 +56,7 @@ jobs:
       # Two jobs run `cargo test`; only the Windows one can load PDFium. The gated tests carry
       # `#[ignore]`, which is static, not conditional: on a machine without the library they
       # must stay ignored. Do NOT add `--include-ignored` here. Measured, that flag forces all
-      # 71 to run without a library and turns a green suite into 27 failures.
+      # 76 to run without a library and turns a green suite into 27 failures.
       #
       # The counts are asserted for the same reason the Windows job asserts its own. A test
       # that stops being collected -- a malformed attribute, a module that no longer compiles
@@ -88,12 +88,12 @@ jobs:
             echo "::error::$ignored tests ignored; 76 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
-          # Measured, not computed: 477 passed on Linux without PDFium -- 464 before MECH-B,
-          # plus the embed acceptance matrix and the tag-shape guard. Raising this to the
-          # measured value, rather than leaving headroom, is what makes a test that stops
-          # being collected fail here instead of passing quietly.
-          if [ "$passed" -lt 479 ]; then
-            echo "::error::only $passed tests ran; 477 is the non-PDFium baseline. A test stopped being collected."
+          # Measured, not computed: 482 on Linux without PDFium -- 479 before the MSRV
+          # guards and the font table-range check. Raising this to the measured value rather
+          # than leaving headroom is what makes a test that stops being collected fail here
+          # instead of passing quietly.
+          if [ "$passed" -lt 482 ]; then
+            echo "::error::only $passed tests ran; 482 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
@@ -213,7 +213,7 @@ jobs:
       #
       # `--include-ignored` is what makes this a real run: PDFium-gated tests carry
       # `#[ignore = "requires a real PDFium library..."]`, so a plain `cargo test` would
-      # skip all 71 of them and the only evidence they ran would be that they did not
+      # skip all 76 of them and the only evidence they ran would be that they did not
       # complain. This job exists precisely to fetch the library, so it asks for them.
       #
       # `--no-run`-free parsing is not enough on its own: this assertion previously grepped

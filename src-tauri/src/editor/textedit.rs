@@ -734,7 +734,7 @@ fn pair_run(
             along_lo,
             run.text != rect.text,
         );
-        if best_key.map_or(true, |current| key < current) {
+        if best_key.is_none_or(|current| key < current) {
             best_key = Some(key);
             best = Some(Pair {
                 rect: index,
@@ -766,7 +766,7 @@ fn pair_run(
             .max(ink_across - across_hi)
             .max(0.0);
         let distance = d_along + d_across;
-        if nearest.map_or(true, |(best, _, _)| distance < best) {
+        if nearest.is_none_or(|(best, _, _)| distance < best) {
             nearest = Some((distance, index, along_lo));
         }
     }

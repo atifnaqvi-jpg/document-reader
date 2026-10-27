@@ -393,10 +393,9 @@ impl<'a> SourceTables<'a> {
                 .unwrap();
             let offset = be_u32(data, base + 8)? as usize;
             let length = be_u32(data, base + 12)? as usize;
-            // `is_none_or` is 1.82+; the crate declares 1.77, so spell the two cases out.
             if offset
                 .checked_add(length)
-                .map_or(true, |end| end > data.len())
+                .is_none_or(|end| end > data.len())
             {
                 return Err(format!(
                     "table {} extends past the file",
@@ -1055,4 +1054,56 @@ pub fn cmap_stream(subset: &Subset) -> Stream {
     let mut cmap = Stream::new(Dictionary::new(), to_unicode_cmap(&subset.codes));
     let _ = cmap.compress();
     cmap
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A copy of `face`'s bytes with one table record's `offset`/`length` replaced.
+    ///
+    /// `Face` holds `&'static [u8]` because the bundled files are compiled in, so the mutated
+    /// copy has to be leaked. That is confined to this test.
+    fn face_with_record(face: &Face, tag: &[u8; 4], offset: u32, length: u32) -> &'static [u8] {
+        let mut bytes = face.bytes.to_vec();
+        let count = usize::from(be_u16(&bytes, 4).unwrap());
+        for index in 0..count {
+            let base = 12 + index * 16;
+            if &bytes[base..base + 4] == tag {
+                bytes[base + 8..base + 12].copy_from_slice(&offset.to_be_bytes());
+                bytes[base + 12..base + 16].copy_from_slice(&length.to_be_bytes());
+                return Box::leak(bytes.into_boxed_slice());
+            }
+        }
+        panic!("face has no {tag:?} table");
+    }
+
+    /// A table range that runs past the end of the file is refused by *this* check, and by
+    /// no later one.
+    ///
+    /// The tag is one `parse` never reads (`GSUB`), so nothing downstream can produce the
+    /// same message. Asserting only `is_err()` would pass on `table()` returning `None` later
+    /// with a different error, which is why this matches the specific refusal.
+    ///
+    /// Mutation-verified: deleting the `if` (keeping the record) makes this fail, because
+    /// `parse` then returns `Ok`.
+    ///
+    /// The `None` arm of `checked_add` is *not* covered and cannot be: both operands are
+    /// `u32` widened to `usize`, so on a 64-bit target the sum cannot wrap, and the arm is
+    /// unreachable for every possible input. Measured: offset `u32::MAX - 8` plus length
+    /// `0x20` is 2^32 + 23 -- an ordinary `Some(end)` past the file, not an overflow. A test
+    /// aiming at that arm would pass whatever the code did, so there is not one.
+    #[test]
+    fn a_table_record_past_the_end_of_the_file_is_refused() {
+        let face = face_for_style("Helvetica").expect("Helvetica maps to a bundled face");
+        let corrupt = face_with_record(face, b"GSUB", 0xFFFF_FF00, 0x200);
+        let error = match SourceTables::parse(corrupt) {
+            Ok(_) => panic!("an out-of-range table must not parse"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("extends past the file"),
+            "the refusal must name the range check, not surface later as a missing table: {error}"
+        );
+    }
 }

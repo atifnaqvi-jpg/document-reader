@@ -15,7 +15,7 @@ freezing it.
 > **DRAFT — not published.** Version carriers moved to 0.9.0 on 2026-09-20, so the tree no
 > longer claims a version whose published artifact lacks its commits. **MECH-B is built as of
 > `559e4c7`**: the subsetting and write path exist, 9 subset tests and a 4-row acceptance
-> matrix pass, and the suite is green at 479 passed / 76 ignored on Linux. Two conditions
+> matrix pass, and the suite is green at 482 passed / 76 ignored on Linux. Two conditions
 > remain before publishing, and neither is satisfied by a local green suite:
 >
 > 1. the **PDFium** row-1 check must pass in CI — it fails on a developer machine with
@@ -73,7 +73,7 @@ No previously-shipped fixture changes verdict — the fixture set had rotation i
 `cm` form but no shear, which is why 0.8.1 could ship this. The new guards build their own
 shear fixtures.
 
-### MECH-B font embedding — payload shipped, write path not yet built
+### MECH-B font embedding — the write path is built
 
 Twelve Liberation faces now ship in the installer (4,360,440 bytes), from Debian
 `fonts-liberation 2.1.5-3`, with a per-face SHA-256 record and a notice reachable from
@@ -81,17 +81,40 @@ Twelve Liberation faces now ship in the installer (4,360,440 bytes), from Debian
 face ships only if it owns a style class no other shipped face owns, which is why the four
 Narrow faces are not included.
 
-**The embedding itself does not work yet.** A replacement containing characters outside
-WinAnsi (`—`, `→`, `’`, Greek) is still refused with `GLYPHS_NOT_COVERABLE`; the acceptance
-matrix in `docs/P2.7.6-embed-DESIGN.md` §5 is not green. When it lands, substitution will
-require explicit consent, `/ToUnicode` will be written so copy and search return the real
-characters, and a run whose own font covers the replacement will keep its own font.
+**Embedding is implemented as of `559e4c7`.** A replacement containing characters outside
+WinAnsi (`—`, `→`, `’`, Greek) used to be refused outright; it now embeds a subset of the
+bundled face, writes `/ToUnicode` so copy and search return the real characters, and
+substitutes only with the user's consent. A run whose own font covers the replacement keeps
+its own font. Two things still refuse, deliberately:
+
+* `SUBSTITUTE_REFUSED` — the replacement needs a bundled face and substitution is not allowed;
+* `GLYPHS_NOT_COVERABLE` — no shipped face has the glyph (the bundle is Latin, so `漢` is a
+  permanent gap, not a retry). Distinct from `SUBSET_BUILD_FAILED`, which means the face had
+  the glyph and the subset could not be written.
+
+Type0/CID fonts are **not** embedded; that is **P2.7.7**, tracked with its own design doc.
 
 Written font names do **not** use the Liberation name: a subset deletes glyphs, which makes it
 a Modified Version under OFL 1.1, and condition 3 forbids a Modified Version from presenting
 the Reserved Font Name as its primary name. The name is `/<PREFIX>+<Family>-<Style>`. The
 reasoning and the mapping are in `src-tauri/resources/fonts/FONT-RECORD.md`, and a test fails
 if any written token contains the reserved name.
+
+### Toolchain: what the build was verified against
+
+The declared minimum is **rust 1.90** (`rust-version` in `src-tauri/Cargo.toml`), and the
+release build was **verified** on **rust 1.91**, the pinned toolchain in `rust-toolchain.toml`
+and in both workflows.
+
+1.90 is not a preference. It is the highest floor the locked dependency graph declares —
+`tauri 2.12.0`, `tauri-runtime-wry`, `muda` and nine other packages require it — so it is the
+lowest version that can build this tree at all. The previous declaration said 1.77, which had
+been wrong for a while: `cargo metadata --locked` on 1.77 fails before compiling anything
+(`digest 0.11.3` uses the `edition2024` cargo feature), and 123 locked packages require a
+newer compiler. Nothing caught it because every gate runs on 1.91, where an understated floor
+is invisible. `tests/release_version.rs` now enforces both halves: the declared floor must
+cover the highest requirement in the locked graph, and this section must name the floor and
+the toolchain the build was verified on.
 
 ---
 

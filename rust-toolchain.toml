@@ -2,7 +2,10 @@
 # same thing as CI's. Without this, rustfmt floats with whatever `stable` is and the format
 # gate can change verdict without anyone editing code.
 #
-# This is not the MSRV: `rust-version` in src-tauri/Cargo.toml (1.77) is the floor we support.
+# This is not the MSRV: `rust-version` in src-tauri/Cargo.toml (1.90) is the floor we support.
+# It is the highest floor the locked dependency graph declares, so the two only stay in sync
+# by coincidence -- `the_declared_msrv_can_build_the_locked_graph` fails if the graph moves
+# past the declared floor.
 # Keep this value in sync with `.github/workflows/ci.yml`.
 [toolchain]
 channel = "1.91.0"

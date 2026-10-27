@@ -177,7 +177,7 @@ fn ...
 ```
 
 Ubuntu CI has no PDFium, so the test must stay out of the default run there. `#[ignore]` does
-that while keeping the omission *counted*: `ci.yml` asserts exactly 74 ignored on Linux, and
+that while keeping the omission *counted*: `ci.yml` asserts exactly 76 ignored on Linux, and
 the Windows job asserts 0 ignored after `--include-ignored`.
 
 **Adding an ignored test means updating that pin in the same commit.** The count is literal on

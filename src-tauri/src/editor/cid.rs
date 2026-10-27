@@ -242,7 +242,7 @@ impl CidFont {
     pub fn decode(&self, bytes: &[u8]) -> Option<String> {
         let cmap = self.cmap.as_ref()?;
         // An odd trailing byte is not a code; the run is unreadable rather than invented.
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return None;
         }
         let mut out = String::new();

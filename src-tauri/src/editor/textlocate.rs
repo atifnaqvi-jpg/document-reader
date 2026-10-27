@@ -1419,7 +1419,7 @@ impl<'a> MarkedContentStack<'a> {
 fn decode_text_string(bytes: &[u8]) -> Option<String> {
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
         let body = &bytes[2..];
-        if body.len() % 2 != 0 {
+        if !body.len().is_multiple_of(2) {
             // A trailing odd byte means the string is not valid UTF-16. Dropping it would
             // read a different string than the one on the page.
             return None;

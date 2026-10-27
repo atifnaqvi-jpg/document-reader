@@ -573,3 +573,195 @@ fn only_a_bare_v_triple_names_a_published_release() {
         );
     }
 }
+
+/// The `(major, minor)` pair of a version, accepting `1.77` and `1.77.1` alike.
+///
+/// Dependency manifests write both forms -- `"1.89"` is common -- so requiring three
+/// components, as the carrier check does, silently skips most of the graph. Measured: that
+/// mistake reported 98 of 411 declared versions, and the `seen` floor is what caught it.
+///
+/// Components must be plain digits. `u64::from_str` accepts a leading space and `+`, which
+/// is the same looseness that made the old tag predicate treat `"v+1.2.3"` as a release;
+/// no reason to reintroduce it here.
+fn parse_major_minor(text: &str) -> Option<(u64, u64)> {
+    let parts: Vec<&str> = text.trim().split('.').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    if !parts
+        .iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
+}
+
+/// `rust-version` from `[package]`, as `(major, minor)`.
+fn declared_rust_version() -> (u64, u64) {
+    let text = read(&repo_root().join("src-tauri/Cargo.toml"));
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = line.strip_prefix("rust-version") {
+                let value = rest.trim_start_matches([' ', '=', ':']).trim_matches('"');
+                return parse_major_minor(value)
+                    .unwrap_or_else(|| panic!("Cargo.toml rust-version {value:?} is not semver"));
+            }
+        }
+    }
+    panic!("Cargo.toml has no `rust-version` under `[package]`")
+}
+
+/// The declared MSRV must be a version this dependency graph can actually build on.
+///
+/// `rust-version` is a promise to anyone building from source. It is also unenforced: cargo
+/// only applies it when it *resolves* a dependency ("package X requires rustc 1.90, but the
+/// active toolchain is 1.77"), and `--locked` skips resolution entirely. So a lockfile can
+/// drift under a floor that nothing checks, and no test notices because every gate here runs
+/// on 1.91.
+///
+/// Measured, and the reason this test exists: the tree declared 1.77 while `tauri 2.12.0`
+/// and eleven other packages declare 1.90. `cargo metadata --locked` on 1.77 also fails
+/// outright -- `digest 0.11.3` uses the `edition2024` cargo feature -- so the floor was not
+/// merely optimistic, it was unreachable. A comment in `embed.rs` had already cited 1.77 as
+/// the reason to avoid `Option::is_none_or`, which is the real cost: a stale floor silently
+/// forbids language features the graph already requires.
+///
+/// The property is a ceiling, not an exact version: the pin may be newer than the graph
+/// requires, never older. Bumping a dependency past the declared floor re-creates the defect
+/// and fails here, which is the point.
+#[test]
+fn the_declared_msrv_can_build_the_locked_graph() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--locked", "--offline"])
+        .current_dir(&manifest)
+        .output()
+        .expect("cargo metadata must run; the guard cannot verify the graph without it");
+    assert!(
+        output.status.success(),
+        "cargo metadata --locked failed; the guard would otherwise pass on an empty graph: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("cargo metadata must emit valid JSON");
+
+    let declared = declared_rust_version();
+    assert!(
+        declared <= (1, 91),
+        "this test hard-codes the pin (1.91) as its own upper bound; update both together"
+    );
+
+    let mut offenders: Vec<(u64, u64, String, String)> = Vec::new();
+    let mut seen = 0usize;
+    for package in metadata["packages"]
+        .as_array()
+        .expect("`packages` must be an array")
+    {
+        let Some(rust_version) = package["rust_version"].as_str() else {
+            continue;
+        };
+        let Some(required) = parse_major_minor(rust_version) else {
+            continue;
+        };
+        seen += 1;
+        if required > declared {
+            offenders.push((
+                required.0,
+                required.1,
+                package["name"].as_str().unwrap_or("?").to_string(),
+                package["version"].as_str().unwrap_or("?").to_string(),
+            ));
+        }
+    }
+    assert!(
+        seen > 100,
+        "only {seen} packages declare a rust-version; a near-empty graph passes this guard \
+         vacuously"
+    );
+
+    offenders.sort_unstable_by(|a, b| b.cmp(a));
+    assert!(
+        offenders.is_empty(),
+        "Cargo.toml declares rust-version {}.{}, but {} locked packages require a newer \
+         compiler. The first is {} {} (needs {}.{}). Either raise `rust-version` to the \
+         highest requirement -- and say so in RELEASE-NOTES -- or pin the dependency back. \
+         A floor nobody can build on is not a floor.",
+        declared.0,
+        declared.1,
+        offenders.len(),
+        offenders[0].2,
+        offenders[0].3,
+        offenders[0].0,
+        offenders[0].1
+    );
+}
+
+/// The toolchain the gates are pinned to, as declared in `rust-toolchain.toml`.
+fn pinned_toolchain() -> (u64, u64) {
+    let text = read(&repo_root().join("rust-toolchain.toml"));
+    let channel = text
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or(""))
+        .find_map(|line| line.trim().strip_prefix("channel"))
+        .map(|rest| rest.trim_start_matches([' ', '=', ':']).trim_matches('"'))
+        .expect("rust-toolchain.toml has no `channel`");
+    let parsed = parse_semver(channel)
+        .unwrap_or_else(|| panic!("rust-toolchain.toml channel {channel:?} is not a version"));
+    (parsed.0, parsed.1)
+}
+
+/// The declared MSRV must be *witnessed*, not merely written down.
+///
+/// The test above proves the floor is high enough for the graph. It cannot prove the code
+/// compiles on it: every gate runs on the pin (1.91), so a floor 14 minor versions below the
+/// toolchain that verifies it is an untested claim. That is the same shape this programme
+/// keeps finding -- a green gate describing a build nobody ran.
+///
+/// The witness is `docs/RELEASE-NOTES.md`, which must name the floor and the toolchain the
+/// build was actually verified against. Requiring both numbers means the note cannot be
+/// written from the manifest alone: the person writing it has to name a toolchain, and the
+/// pin is where that toolchain has to come from. This test does not build on 1.77 -- that
+/// would need a toolchain download in CI -- it requires that a human recorded the result.
+///
+/// Mutation-verified: changing either number so it disagrees with the tree fails the test.
+#[test]
+fn the_release_notes_name_the_toolchain_the_build_was_verified_on() {
+    let version = cargo_toml_version();
+    let section = release_section(&version)
+        .unwrap_or_else(|| panic!("docs/RELEASE-NOTES.md has no `## {version}` section"));
+    let lower = section.to_lowercase();
+
+    let (pin_major, pin_minor) = pinned_toolchain();
+    let (msrv_major, msrv_minor) = declared_rust_version();
+
+    // Each number must sit on the *same line* as the claim it belongs to. A whole-section
+    // `contains` for "verified" is satisfied three times here — including by the sentence
+    // that describes this test — so deleting the actual claim would leave the word behind
+    // and the guard would stay green. Measured: that is the rehearsal shape again.
+    let lines: Vec<&str> = lower.lines().collect();
+    let claim = |number: &str, claim_words: &[&str]| {
+        lines
+            .iter()
+            .find(|line| line.contains(number) && claim_words.iter().any(|w| line.contains(w)))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no single line in the {version} notes both names {number:?} and states \
+                     what it was verified as. The number and the claim must be adjacent, or \
+                     neither can be read as a claim about the other"
+                )
+            });
+    };
+    claim(
+        &format!("rust {msrv_major}.{msrv_minor}"),
+        &["minimum", "rust-version"],
+    );
+    claim(&format!("rust {pin_major}.{pin_minor}"), &["verified"]);
+}
