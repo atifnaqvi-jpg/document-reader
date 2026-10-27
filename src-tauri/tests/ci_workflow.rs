@@ -312,8 +312,8 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
     );
     assert!(
-        tests_step.contains("ignored") && tests_step.contains("ne 74"),
-        "the Linux job must assert exactly the 74 known-ignored tests"
+        tests_step.contains("ignored") && tests_step.contains("ne 76"),
+        "the Linux job must assert exactly the 76 known machine-dependent tests"
     );
 }
 
@@ -365,8 +365,69 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 464 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 464. \
+        tests_step.contains(r#"if [ "$passed" -lt 479 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 479. \
          A floor below the current count cannot detect a test that stopped being collected."
+    );
+}
+
+/// Before MECH-B, no CI job ever asked the *shipping* reader to draw an embedded subset.
+/// Poppler covered the developer machine; PDFium is what users run. This step is the only
+/// evidence that the font-embed path produces something a real viewer can render, so it has
+/// to be incapable of passing without running the test.
+///
+/// Both halves are load-bearing, and both have failed elsewhere in this file's history:
+/// `--include-ignored` because the test is `#[ignore]`d, and the `... ok` assertion because a
+/// filter that matches nothing exits 0. Mutation-verified: removing `--include-ignored`
+/// fails this test, and so does replacing the `... ok` check with a bare exit-code check.
+#[test]
+fn the_row_one_pdfium_step_cannot_pass_without_running() {
+    let text = ci_workflow();
+    let step = text
+        .split("- name: Row-1 embedded subset renders through PDFium")
+        .nth(1)
+        .expect("the Windows job must run the row-1 PDFium render check");
+    let step = step.split("- name:").next().unwrap_or(step);
+
+    // Inspect the `run:` command, not the whole step. The step body mentions the test name
+    // and `--include-ignored` in comments and in its own assertion, so a whole-step
+    // `contains` passes even when the command drops the flag -- measured: that mutant
+    // survived the first version of this guard.
+    //
+    // The command is a YAML block scalar (`run: |`), so it is the `run:` line plus every
+    // following line indented deeper than it. Stopping at the `run:` line alone matched
+    // nothing and failed this guard against a correct workflow.
+    let mut lines = step
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with("run:"));
+    let run_header = lines
+        .next()
+        .expect("the row-1 step must have a run command");
+    let indent = run_header.len() - run_header.trim_start().len();
+    let command = std::iter::once(run_header)
+        .chain(lines.take_while(|line| {
+            line.trim().is_empty() || line.len() - line.trim_start().len() > indent
+        }))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        command.contains("row1_the_embedded_subset_renders_through_pdfium"),
+        "the step must name the test, not run the whole target and hope"
+    );
+    assert!(
+        command.contains("--include-ignored"),
+        "the test is `#[ignore]`d; without this flag it is skipped and the step proves nothing"
+    );
+    assert!(
+        step.contains("PDFIUM_LIBRARY_PATH"),
+        "PDFium is loaded from this variable; unset, the test fails with PdfiumUnavailable"
+    );
+    assert!(
+        step.contains(r#"\.\.\. ok""#),
+        "a filter that matches no test exits 0, so the step must require libtest's pass line"
+    );
+    assert!(
+        step.contains("PdfiumUnavailable"),
+        "a missing library must be diagnosed by name, not inferred from a nonzero exit"
     );
 }

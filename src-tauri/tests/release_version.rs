@@ -196,10 +196,14 @@ fn the_tree_version_is_ahead_of_every_published_tag() {
         .current_dir(&root)
         .output()
         .expect("git tag --list must run");
+    // Explicit shape, not "whatever strip_prefix('v') leaves". The list also carries
+    // `version-0.4.4`, which survived only because `ersion-0.4.4` happened to fail semver
+    // parsing. Incidental protection changes meaning when circumstances change: a tag named
+    // `v1.0.0-rc1` or `version-9.9.9` must be *declared* not-a-release here, not excluded by
+    // a parse accident downstream.
     let mut published: Vec<(u64, u64, u64)> = String::from_utf8_lossy(&listed.stdout)
         .lines()
-        .filter_map(|t| t.trim().strip_prefix('v'))
-        .filter_map(parse_semver)
+        .filter_map(published_semver_tag)
         .collect();
     if published.is_empty() {
         eprintln!("no version tags found; skipping");
@@ -235,6 +239,28 @@ fn parse_semver(text: &str) -> Option<(u64, u64, u64)> {
         return None;
     }
     Some((major, minor, patch))
+}
+
+/// A tag names a published release only when it is exactly `v` followed by three plain
+/// numeric components.
+///
+/// The strictness is the point. The repository also carries `version-0.4.4`, which the old
+/// `strip_prefix('v')` + parse chain excluded by accident: `ersion-0.4.4` is not semver, so
+/// it fell out at the parse step rather than being declared not-a-release. That works until
+/// someone adds a tag whose remainder happens to parse, at which point a non-release becomes
+/// a comparison floor. Requiring the shape up front makes the exclusion intentional.
+fn published_semver_tag(tag: &str) -> Option<(u64, u64, u64)> {
+    let digits = tag.trim().strip_prefix('v')?;
+    if digits.matches('.').count() != 2 {
+        return None;
+    }
+    if !digits
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    parse_semver(digits)
 }
 
 /// T-4's acceptance: `Ts`, PDFDocEncoding, copy-on-write and the MCID work all ship in
@@ -508,4 +534,42 @@ fn the_plan_defers_the_full_parity_inventory_to_after_p2_8() {
         b1_lower.contains("after p2.8") && b1_lower.contains("full-parity inventory"),
         "the B-1 ruling row must place the full-parity inventory after P2.8: {b1}"
     );
+}
+
+/// The tag predicate is fed the shapes that actually occur, including the one that was
+/// previously excluded by accident.
+///
+/// `version-0.4.4` is the real tag in this repository. It must be rejected because it is not
+/// a release tag, not because `ersion-0.4.4` fails to parse -- those are different reasons
+/// and only one of them survives the next tag someone adds.
+#[test]
+fn only_a_bare_v_triple_names_a_published_release() {
+    assert_eq!(published_semver_tag("v0.8.1"), Some((0, 8, 1)));
+    assert_eq!(published_semver_tag("v0.6.0"), Some((0, 6, 0)));
+    assert_eq!(published_semver_tag("  v1.2.3  "), Some((1, 2, 3)));
+
+    for rejected in [
+        "version-0.4.4",  // the real tag in this repo: not a release, by shape
+        "v1.0.0-rc1",     // pre-release: not a published release for this guard
+        "v1.0",           // two components
+        "v1.0.0.0",       // four components
+        "v1..0",          // empty component
+        "v",              // no components
+        "1.2.3",          // no prefix
+        "V1.2.3",         // wrong case
+        "release-v1.2.3", // prefix elsewhere
+        // The two that actually distinguish this predicate from the old chain. Rust's
+        // integer parser accepts a leading space and a leading `+`, so `strip_prefix('v')`
+        // followed by `parse()` treated both of these as published releases. They are the
+        // cases that make this test a test; without them every entry above is rejected by
+        // the old code too, for a different reason, and the mutant survives.
+        "v 1.2.3",
+        "v+1.2.3",
+    ] {
+        assert_eq!(
+            published_semver_tag(rejected),
+            None,
+            "{rejected:?} must be declared not-a-release by shape, not excluded downstream"
+        );
+    }
 }

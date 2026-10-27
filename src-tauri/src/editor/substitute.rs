@@ -35,7 +35,10 @@ use crate::editor::textlocate::FontInfo;
 pub enum Plan {
     KeepOriginal,
     /// MECH-A: a standard-14 reference. Costs no bytes and every viewer has the face.
-    Substitute { base_font: String, note: String },
+    Substitute {
+        base_font: String,
+        note: String,
+    },
     /// MECH-B: a subset of a bundled face, written as a new simple `/TrueType` resource.
     ///
     /// Ordered after [`Plan::Substitute`] on purpose (design §2.1): a WinAnsi replacement is
@@ -144,7 +147,6 @@ pub fn plan_with_font(
     }
     let subset = crate::editor::embed::subset(face, replacement)
         .map_err(crate::model::AppError::SubsetBuildFailed)?;
-
 
     Ok(Plan::Embed {
         // The prefixed name, exactly as written to `/BaseFont`: the note is what a user would
@@ -324,10 +326,7 @@ pub fn has_to_unicode(document: &Document, font: &Dictionary) -> bool {
 ///
 /// One-byte and two-byte codes are both `<hex>` tokens, and [`crate::editor::cid::CodeMap`]
 /// parses any width; a simple font only ever asks about codes below 256.
-fn to_unicode_map(
-    document: &Document,
-    font: &Dictionary,
-) -> Option<crate::editor::cid::CodeMap> {
+fn to_unicode_map(document: &Document, font: &Dictionary) -> Option<crate::editor::cid::CodeMap> {
     let stream = font
         .get(b"ToUnicode")
         .ok()
@@ -789,7 +788,10 @@ mod tests {
             panic!("a WinAnsi code exists for neither character, so MECH-A cannot fire");
         };
         assert!(
-            subset.codes.iter().any(|(_, character)| *character == '\u{2192}'),
+            subset
+                .codes
+                .iter()
+                .any(|(_, character)| *character == '\u{2192}'),
             "the arrow must have a code of its own, not be dropped or folded"
         );
     }

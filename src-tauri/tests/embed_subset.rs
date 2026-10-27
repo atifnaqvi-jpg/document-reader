@@ -31,7 +31,9 @@ fn a_subset_reparses_as_a_true_type_face() {
     );
     assert_eq!(
         parsed.units_per_em(),
-        ttf_parser::Face::parse(face.bytes, 0).unwrap().units_per_em(),
+        ttf_parser::Face::parse(face.bytes, 0)
+            .unwrap()
+            .units_per_em(),
         "the subset must keep the source's em, or every advance changes scale"
     );
 }
@@ -151,7 +153,11 @@ fn the_written_name_is_deterministic_and_prefixed() {
     assert_eq!(first.base_font, again.base_font);
 
     let (prefix, family) = first.base_font.split_once('+').expect("prefix+family");
-    assert_eq!(prefix.len(), 6, "a subset prefix is six letters: {prefix:?}");
+    assert_eq!(
+        prefix.len(),
+        6,
+        "a subset prefix is six letters: {prefix:?}"
+    );
     assert!(
         prefix.chars().all(|c| c.is_ascii_uppercase()),
         "the prefix must be uppercase ASCII: {prefix:?}"
@@ -170,9 +176,8 @@ fn the_written_name_is_deterministic_and_prefixed() {
 #[test]
 fn every_bundled_face_can_be_subset() {
     for (class, face) in embed::faces() {
-        let subset = embed::subset(face, "H\u{0100}").unwrap_or_else(|error| {
-            panic!("{class} ({}) could not be subset: {error}", face.file)
-        });
+        let subset = embed::subset(face, "H\u{0100}")
+            .unwrap_or_else(|error| panic!("{class} ({}) could not be subset: {error}", face.file));
         let parsed = ttf_parser::Face::parse(&subset.program, 0)
             .unwrap_or_else(|error| panic!("{class} subset did not parse: {error}"));
         assert!(

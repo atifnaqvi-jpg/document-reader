@@ -221,12 +221,8 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
                 if let Some(text) =
                     crate::editor::substitute::decode_simple(document, &font, &run.bytes)
                 {
-                    return crate::editor::substitute::encode_simple(
-                        document,
-                        &font,
-                        &text,
-                    )
-                    .is_some_and(|bytes| bytes == run.bytes);
+                    return crate::editor::substitute::encode_simple(document, &font, &text)
+                        .is_some_and(|bytes| bytes == run.bytes);
                 }
                 font.get_font_encoding(document)
                     .map(|encoding| {
@@ -2217,9 +2213,12 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
                 // format defines and the one we write (MECH-B). A font without one keeps the
                 // pre-P2.7.6 path unchanged, including its refusal behaviour.
                 let bytes = if crate::editor::substitute::has_to_unicode(document, &font) {
-                    let bytes =
-                        crate::editor::substitute::encode_simple(document, &font, &request.replacement)
-                            .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?;
+                    let bytes = crate::editor::substitute::encode_simple(
+                        document,
+                        &font,
+                        &request.replacement,
+                    )
+                    .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?;
                     let decoded = crate::editor::substitute::decode_simple(document, &font, &bytes)
                         .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?;
                     if decoded != request.replacement {
@@ -2251,13 +2250,11 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         // `subset` already refused a character it could not map, so a `None` here would be a
         // mismatch between two functions in the same commit, not a user-facing case.
         crate::editor::substitute::Plan::Embed { subset, .. } => (
-            subset
-                .encode(&request.replacement)
-                .ok_or_else(|| {
-                    AppError::SubsetBuildFailed(
-                        "the subset carries no code for a character it was built from".into(),
-                    )
-                })?,
+            subset.encode(&request.replacement).ok_or_else(|| {
+                AppError::SubsetBuildFailed(
+                    "the subset carries no code for a character it was built from".into(),
+                )
+            })?,
             None,
         ),
     };

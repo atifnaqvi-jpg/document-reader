@@ -113,6 +113,7 @@ scripts/mutate.sh --test embed_plan_order
 #   exit 1  SURVIVED      tests passed               -- coverage finding
 #   exit 2  MEASUREMENT   did not compile            -- not a catch, no test ran
 #   exit 3  MEASUREMENT   no `test result:` line     -- not a catch, no test ran
+#   exit 4  MEASUREMENT   crate did not compile      -- stale binary, mutant not in it
 ```
 
 The harness was itself mutation-tested: a non-compiling mutant exits 2, a clean tree exits 1,
@@ -121,10 +122,49 @@ genuine catch as a measurement error, because `error: test failed, to rerun pass
 normal footer of a *caught* mutant. Only compilation failures (`^error[`, `could not compile`)
 count. If you change the harness, break it in both directions before trusting it.
 
+Exit 4 was added after a run finished in `0.01s`: cargo had decided nothing changed, so the
+tests executed a binary that never contained the mutant and the suite came back green. The
+check is `Compiling document-reader` must appear in the log — that is cargo's own report of
+what it did, and it is the only reliable signal. An mtime comparison was tried first and is
+**not** sufficient: if the mutated source is older than the binary (a preserved timestamp,
+clock skew, a file written before the last build) the binary looks current while the mutant
+is absent. Reproduced by backdating a mutant, which exits 4 rather than a false CAUGHT.
+
+A clean tree therefore cannot be tested through the harness without `MUTATE_ALLOW_CACHED=1`,
+which skips the rebuild requirement. That variable exists for self-testing only; a mutation
+run that needs it is a mutation run that proved nothing.
+
 Applies to any new or modified guard that reads a file rather than calling code. Where a
 guard has a parser helper, add a second test that feeds the helper a crafted sample —
 including the *defect* shape — so a broken parser fails on its own test rather than
 silently returning "nothing found".
+
+### Absence of evidence read as evidence
+
+Three observed shapes in this programme, all of which look identical from the outside: green.
+
+- **A non-compiling mutant.** `cargo test` printed no `test result:` line because no test
+  ran, and the empty output was read as "no failure" (P2.7.6 R4, `E0433` then `E0004`).
+- **A crate that never recompiled.** The summary line was real, but it came from a stale
+  build: the mutant was never in the binary. One run finished in `0.01s` — a duration that
+  is itself the tell, because nothing can link that fast. `scripts/mutate.sh` now refuses
+  this shape by requiring a rebuild (exit 4).
+- **A fixture that cannot distinguish correct from broken.** The guard is correct and the
+  mutant is real, but both the correct and the broken path return the same answer, so the
+  test passes either way. The Type0 guard test did this: an in-place CMap patch silently
+  failed, leaving a font whose one-byte and two-byte decoders both produced the same text,
+  and the mutant survived a test that looked like coverage.
+
+The first two are **measurement errors** — the tooling can catch them, and now does. The
+third is a **coverage hole** — no harness can catch it, because from the tool's point of
+view a passing test is a passing test.
+
+The defence is to make the two paths *disagree visibly*. `testpdf::cid_trap_cmap_page()`
+maps `<0000>` to `A` alongside `<0002>` to `B`, so a byte-split reader turns the code `0002`
+into `AA` where the correct reader produces `B`. Before writing a guard test, ask what the
+broken implementation would return; if it would return the same thing, the test is a
+rehearsal. Assert the *precondition* too (`has_to_unicode(...)`), so a fixture that fails to
+parse fails loudly rather than passing by accident.
 
 ## PDFium in tests
 

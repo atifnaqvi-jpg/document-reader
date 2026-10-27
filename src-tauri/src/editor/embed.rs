@@ -61,8 +61,14 @@ macro_rules! face {
 /// so the family decision is made once for both mechanisms and a document cannot be set in
 /// Times by one path and Serif by the other.
 static FACES: [(&str, Face); 12] = [
-    ("Helvetica", face!("LiberationSans-Regular.ttf", "Sans-Regular")),
-    ("Helvetica-Bold", face!("LiberationSans-Bold.ttf", "Sans-Bold")),
+    (
+        "Helvetica",
+        face!("LiberationSans-Regular.ttf", "Sans-Regular"),
+    ),
+    (
+        "Helvetica-Bold",
+        face!("LiberationSans-Bold.ttf", "Sans-Bold"),
+    ),
     (
         "Helvetica-Oblique",
         face!("LiberationSans-Italic.ttf", "Sans-Italic"),
@@ -75,7 +81,10 @@ static FACES: [(&str, Face); 12] = [
         "Times-Roman",
         face!("LiberationSerif-Regular.ttf", "Serif-Regular"),
     ),
-    ("Times-Bold", face!("LiberationSerif-Bold.ttf", "Serif-Bold")),
+    (
+        "Times-Bold",
+        face!("LiberationSerif-Bold.ttf", "Serif-Bold"),
+    ),
     (
         "Times-Italic",
         face!("LiberationSerif-Italic.ttf", "Serif-Italic"),
@@ -84,8 +93,14 @@ static FACES: [(&str, Face); 12] = [
         "Times-BoldItalic",
         face!("LiberationSerif-BoldItalic.ttf", "Serif-BoldItalic"),
     ),
-    ("Courier", face!("LiberationMono-Regular.ttf", "Mono-Regular")),
-    ("Courier-Bold", face!("LiberationMono-Bold.ttf", "Mono-Bold")),
+    (
+        "Courier",
+        face!("LiberationMono-Regular.ttf", "Mono-Regular"),
+    ),
+    (
+        "Courier-Bold",
+        face!("LiberationMono-Bold.ttf", "Mono-Bold"),
+    ),
     (
         "Courier-Oblique",
         face!("LiberationMono-Italic.ttf", "Mono-Italic"),
@@ -120,8 +135,11 @@ pub fn covers(face: &Face, text: &str) -> bool {
     let Ok(parsed) = ttf_parser::Face::parse(face.bytes, 0) else {
         return false;
     };
-    text.chars()
-        .all(|ch| parsed.glyph_index(ch).is_some_and(|id| id != ttf_parser::GlyphId(0)))
+    text.chars().all(|ch| {
+        parsed
+            .glyph_index(ch)
+            .is_some_and(|id| id != ttf_parser::GlyphId(0))
+    })
 }
 
 /// A face cut down to the glyphs one replacement needs.
@@ -167,7 +185,12 @@ impl Subset {
     /// assigned a code (which [`subset`] already refused, so this is a programming error).
     pub fn encode(&self, text: &str) -> Option<Vec<u8>> {
         text.chars()
-            .map(|ch| self.codes.iter().find(|(_, c)| *c == ch).map(|(code, _)| *code))
+            .map(|ch| {
+                self.codes
+                    .iter()
+                    .find(|(_, c)| *c == ch)
+                    .map(|(code, _)| *code)
+            })
             .collect()
     }
 }
@@ -200,7 +223,10 @@ pub fn subset(face: &Face, text: &str) -> Result<Subset, String> {
         .map_err(|e| format!("bundled face {} did not parse: {e}", face.file))?;
     let units_per_em = parsed.units_per_em();
     if units_per_em == 0 {
-        return Err(format!("bundled face {} declares no units-per-em", face.file));
+        return Err(format!(
+            "bundled face {} declares no units-per-em",
+            face.file
+        ));
     }
     let source = SourceTables::parse(face.bytes)?;
 
@@ -211,7 +237,7 @@ pub fn subset(face: &Face, text: &str) -> Result<Subset, String> {
         let id = parsed
             .glyph_index(*ch)
             .ok_or_else(|| format!("{} has no glyph for U+{:04X}", face.file, *ch as u32))?;
-        let id = u16::from(id.0);
+        let id = id.0;
         if !glyphs.contains(&id) {
             glyphs.push(id);
         }
@@ -260,8 +286,12 @@ pub fn subset(face: &Face, text: &str) -> Result<Subset, String> {
 
     let mut hmtx = Vec::new();
     for old in &glyphs {
-        let advance = parsed.glyph_hor_advance(ttf_parser::GlyphId(*old)).unwrap_or(0);
-        let bearing = parsed.glyph_hor_side_bearing(ttf_parser::GlyphId(*old)).unwrap_or(0);
+        let advance = parsed
+            .glyph_hor_advance(ttf_parser::GlyphId(*old))
+            .unwrap_or(0);
+        let bearing = parsed
+            .glyph_hor_side_bearing(ttf_parser::GlyphId(*old))
+            .unwrap_or(0);
         hmtx.extend_from_slice(&advance.to_be_bytes());
         hmtx.extend_from_slice(&bearing.to_be_bytes());
     }
@@ -269,7 +299,9 @@ pub fn subset(face: &Face, text: &str) -> Result<Subset, String> {
     // `/Widths` is indexed by **code**, so it is built from `wanted`, not from the glyph list.
     let mut widths = Vec::new();
     for (_, old) in &wanted {
-        let advance = parsed.glyph_hor_advance(ttf_parser::GlyphId(*old)).unwrap_or(0);
+        let advance = parsed
+            .glyph_hor_advance(ttf_parser::GlyphId(*old))
+            .unwrap_or(0);
         widths.push(scale_to_1000(advance, units_per_em));
     }
 
@@ -319,7 +351,8 @@ pub fn subset(face: &Face, text: &str) -> Result<Subset, String> {
 /// characters is enough for that: this is a name, not a security boundary.
 fn subset_prefix(face: &Face, codes: &[(u8, char)], glyphs: &[u16]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in face.written_family
+    for byte in face
+        .written_family
         .bytes()
         .chain(codes.iter().flat_map(|(_, ch)| (*ch as u32).to_le_bytes()))
         .chain(glyphs.iter().flat_map(|id| id.to_le_bytes()))
@@ -360,9 +393,10 @@ impl<'a> SourceTables<'a> {
                 .unwrap();
             let offset = be_u32(data, base + 8)? as usize;
             let length = be_u32(data, base + 12)? as usize;
+            // `is_none_or` is 1.82+; the crate declares 1.77, so spell the two cases out.
             if offset
                 .checked_add(length)
-                .is_none_or(|end| end > data.len())
+                .map_or(true, |end| end > data.len())
             {
                 return Err(format!(
                     "table {} extends past the file",
@@ -580,7 +614,10 @@ fn assemble(input: Assemble<'_>) -> Result<Vec<u8>, String> {
     let cmap = unicode_cmap(chars_to_glyph);
     let name = name_table(parsed)?;
     let post = post_v3();
-    let os2 = source.table(b"OS/2").map(<[u8]>::to_vec).unwrap_or_default();
+    let os2 = source
+        .table(b"OS/2")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
 
     let mut tables: Vec<([u8; 4], Vec<u8>)> = vec![
         (*b"OS/2", os2),
@@ -628,7 +665,11 @@ fn assemble(input: Assemble<'_>) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn head_table(source: &SourceTables<'_>, bbox: &BBox, index_to_loc: i16) -> Result<Vec<u8>, String> {
+fn head_table(
+    source: &SourceTables<'_>,
+    bbox: &BBox,
+    index_to_loc: i16,
+) -> Result<Vec<u8>, String> {
     let mut head = source
         .table(b"head")
         .ok_or("no head table")?
@@ -928,11 +969,18 @@ pub fn glyph_name(ch: char) -> String {
 /// `/Subtype /TrueType`, a real `/FontDescriptor` with `/FontFile2`, `/Widths` from the
 /// subset's `hmtx`, `/Encoding /Differences` for the chosen codes, and `/ToUnicode`. Every
 /// substitute is self-describing; none of it depends on a face the viewer must already have.
-pub fn font_dictionary(subset: &Subset, descriptor_id: lopdf::ObjectId, cmap_id: lopdf::ObjectId) -> Dictionary {
+pub fn font_dictionary(
+    subset: &Subset,
+    descriptor_id: lopdf::ObjectId,
+    cmap_id: lopdf::ObjectId,
+) -> Dictionary {
     let mut font = Dictionary::new();
     font.set("Type", Object::Name(b"Font".to_vec()));
     font.set("Subtype", Object::Name(b"TrueType".to_vec()));
-    font.set("BaseFont", Object::Name(subset.base_font.as_bytes().to_vec()));
+    font.set(
+        "BaseFont",
+        Object::Name(subset.base_font.as_bytes().to_vec()),
+    );
     font.set("FirstChar", Object::Integer(i64::from(subset.first_char)));
     font.set(
         "LastChar",
@@ -975,7 +1023,13 @@ pub fn descriptor_dictionary(subset: &Subset, program_id: lopdf::ObjectId) -> Di
     descriptor.set("Flags", Object::Integer(32));
     descriptor.set(
         "FontBBox",
-        Object::Array(subset.bbox.iter().map(|value| Object::Integer(i64::from(*value))).collect()),
+        Object::Array(
+            subset
+                .bbox
+                .iter()
+                .map(|value| Object::Integer(i64::from(*value)))
+                .collect(),
+        ),
     );
     descriptor.set("ItalicAngle", Object::Integer(0));
     descriptor.set("Ascent", Object::Integer(i64::from(subset.ascent)));
@@ -989,7 +1043,9 @@ pub fn descriptor_dictionary(subset: &Subset, program_id: lopdf::ObjectId) -> Di
 /// The `/FontFile2` stream for a subset, Flate-compressed.
 pub fn program_stream(subset: &Subset) -> Stream {
     let mut program = Stream::new(Dictionary::new(), subset.program.clone());
-    program.dict.set("Length1", Object::Integer(subset.program.len() as i64));
+    program
+        .dict
+        .set("Length1", Object::Integer(subset.program.len() as i64));
     let _ = program.compress();
     program
 }
@@ -1000,4 +1056,3 @@ pub fn cmap_stream(subset: &Subset) -> Stream {
     let _ = cmap.compress();
     cmap
 }
-

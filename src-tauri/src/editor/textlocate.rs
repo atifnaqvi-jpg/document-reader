@@ -1729,8 +1729,8 @@ pub fn apply_text(
     // `/ToUnicode` first: an embedded subset (MECH-B) carries `uniXXXX` `/Differences` names,
     // which lopdf's glyph list does not know, and its fallback to StandardEncoding would decode
     // the inverse's own bytes as the wrong text and refuse a valid undo.
-    let current_text = decode_run_bytes(document, font, &old_bytes)
-        .ok_or(AppError::TextRunMismatch)?;
+    let current_text =
+        decode_run_bytes(document, font, &old_bytes).ok_or(AppError::TextRunMismatch)?;
     if current_text != expected {
         return Err(AppError::TextRunMismatch);
     }
@@ -2938,8 +2938,7 @@ fn install_embedded_resource(
 ) -> Result<(Vec<u8>, ObjectId), AppError> {
     let program_id = document.add_object(crate::editor::embed::program_stream(subset));
     let descriptor_id = document.add_object(crate::editor::embed::descriptor_dictionary(
-        subset,
-        program_id,
+        subset, program_id,
     ));
     let cmap_id = document.add_object(crate::editor::embed::cmap_stream(subset));
     let font_id = document.add_object(crate::editor::embed::font_dictionary(
@@ -2969,7 +2968,12 @@ fn install_embedded_resource(
     if fonts.has(&name) {
         // The same input twice produces the same prefix and the same bytes, so this is the
         // same face: reuse the entry rather than shadowing it with an identical copy.
-        if fonts.get(&name).ok().and_then(|object| object.as_reference().ok()) == Some(font_id) {
+        if fonts
+            .get(&name)
+            .ok()
+            .and_then(|object| object.as_reference().ok())
+            == Some(font_id)
+        {
             return Ok((name, font_id));
         }
     }
@@ -3036,7 +3040,9 @@ pub(crate) fn prune_unused_embedded_fonts(
             .get(b"BaseFont")
             .and_then(Object::as_name)
             .ok()
-            .is_some_and(|base| base.len() > 7 && base[6] == b'+' && base[..6].iter().all(u8::is_ascii_uppercase))
+            .is_some_and(|base| {
+                base.len() > 7 && base[6] == b'+' && base[..6].iter().all(u8::is_ascii_uppercase)
+            })
             && font.has(b"FontDescriptor");
         if !ours {
             continue;
@@ -3048,10 +3054,19 @@ pub(crate) fn prune_unused_embedded_fonts(
         let cmap_id = font.get(b"ToUnicode").and_then(Object::as_reference).ok();
         let program_id = descriptor_id
             .and_then(|id| document.get_dictionary(id).ok())
-            .and_then(|descriptor| descriptor.get(b"FontFile2").and_then(Object::as_reference).ok());
+            .and_then(|descriptor| {
+                descriptor
+                    .get(b"FontFile2")
+                    .and_then(Object::as_reference)
+                    .ok()
+            });
 
         if let Some(resources) = level_resources_mut(document, page_id, level) {
-            if let Some(map) = resources.get_mut(b"Font").ok().and_then(|o| o.as_dict_mut().ok()) {
+            if let Some(map) = resources
+                .get_mut(b"Font")
+                .ok()
+                .and_then(|o| o.as_dict_mut().ok())
+            {
                 map.remove(&name);
             }
         }

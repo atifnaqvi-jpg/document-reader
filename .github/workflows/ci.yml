@@ -81,16 +81,19 @@ jobs:
           #
           # This is literal for the same reason: any added `#[ignore]` must be acknowledged
           # here in the same commit, so a gated test cannot arrive -- or vanish -- silently.
-          if [ "$ignored" -ne 74 ]; then
-            echo "::error::$ignored tests ignored; 74 PDFium-gated tests are expected. Add the mark deliberately or fix the test."
+          #
+          # Measured on the MECH-B commit, not incremented: 76. embed_acceptance gained the
+          # row-1 PDFium render check and the poppler render check, both machine-dependent.
+          if [ "$ignored" -ne 76 ]; then
+            echo "::error::$ignored tests ignored; 76 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
-          # Measured, not computed: 464 passed on Linux without PDFium -- 435 after the A7
-          # skew guards, plus 9 font-bundle and 1 version-ahead guards. Raising this to the measured value,
-          # rather than leaving headroom, is what makes a test that stops being collected fail
-          # here instead of passing quietly.
-          if [ "$passed" -lt 464 ]; then
-            echo "::error::only $passed tests ran; 464 is the non-PDFium baseline. A test stopped being collected."
+          # Measured, not computed: 477 passed on Linux without PDFium -- 464 before MECH-B,
+          # plus the embed acceptance matrix and the tag-shape guard. Raising this to the
+          # measured value, rather than leaving headroom, is what makes a test that stops
+          # being collected fail here instead of passing quietly.
+          if [ "$passed" -lt 479 ]; then
+            echo "::error::only $passed tests ran; 477 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
@@ -165,6 +168,43 @@ jobs:
         env:
           PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
         run: cargo test --test memory -- --include-ignored --nocapture
+
+      # MECH-B's rendering half, and the only place the *shipping* reader is asked whether the
+      # embedded subset is a font it can actually draw. Poppler stands in on developer
+      # machines, but poppler is a substitute: passing there is weaker evidence and must not
+      # be the final word on a font-embed path.
+      #
+      # Fails closed on purpose. `PdfiumUnavailable` is an error in the test rather than a
+      # skip, so a fetch that did not set PDFIUM_LIBRARY_PATH produces a named failure here
+      # instead of a green suite that proved nothing. That is the absence-of-evidence shape
+      # this programme keeps meeting: a test that did not run looks exactly like a test that
+      # passed.
+      #
+      # The assertion after the run is the same guard used below for the whole suite: the
+      # test must appear as `ok`, not merely be absent from the failures.
+      - name: Row-1 embedded subset renders through PDFium
+        working-directory: src-tauri
+        env:
+          PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
+        shell: pwsh
+        run: |
+          $output = cargo test --test embed_acceptance row1_the_embedded_subset_renders_through_pdfium -- --include-ignored --exact 2>&1 | Out-String
+          $output | Write-Output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # `--exact` still runs one test, but a name typo would select nothing and exit 0.
+          # Require the line libtest prints for a test it actually ran and passed.
+          if ($output -notmatch "test row1_the_embedded_subset_renders_through_pdfium \.\.\. ok") {
+            Write-Error "the row-1 PDFium test did not report 'ok'; it was skipped, filtered out, or renamed. A font-embed path validated by nothing is not validated."
+            exit 1
+          }
+          # PDFium absent surfaces as a named failure, but check the text explicitly so the
+          # diagnosis is in the log rather than inferred from a nonzero exit.
+          if ($output -match "PdfiumUnavailable") {
+            Write-Error "PDFium was unavailable; PDFIUM_LIBRARY_PATH did not reach the test. Fetching failed, or the DLL is not where the workflow expects it."
+            exit 1
+          }
+          Write-Output "row-1 embed verified through PDFium."
 
       # A silently-skipped test suite is worse than none: it looks green while testing
       # nothing. Fail loudly if the guards turned out to be tripping.

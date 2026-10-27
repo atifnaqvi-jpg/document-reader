@@ -13,11 +13,16 @@ Closing **P2.7.6** — font embedding (MECH-B), plus the A7 skew fix that was fo
 freezing it.
 
 > **DRAFT — not published.** Version carriers moved to 0.9.0 on 2026-09-20, so the tree no
-> longer claims a version whose published artifact lacks its commits. **MECH-B is not built
-> yet**: the skew fix below is implemented and gated, the font *payload* is bundled and
-> audited, but the subsetting and write path do not exist. Do not publish until
-> `--include-ignored` is green on the tagged commit and the installer from that run is
-> hand-confirmed (Q9).
+> longer claims a version whose published artifact lacks its commits. **MECH-B is built as of
+> `559e4c7`**: the subsetting and write path exist, 9 subset tests and a 4-row acceptance
+> matrix pass, and the suite is green at 479 passed / 76 ignored on Linux. Two conditions
+> remain before publishing, and neither is satisfied by a local green suite:
+>
+> 1. the **PDFium** row-1 check must pass in CI — it fails on a developer machine with
+>    `PdfiumUnavailable`, and poppler is a substitute, not the shipping reader;
+> 2. the installer from that tagged run must be hand-confirmed (Q9).
+>
+> Do not publish until both hold.
 >
 > **Pre-release when it ships.** 1.0.0 (P2.8, reflow) is the point text editing is declared
 > complete.

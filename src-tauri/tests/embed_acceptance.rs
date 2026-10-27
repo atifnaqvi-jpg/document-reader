@@ -193,7 +193,10 @@ fn row1_covered_non_winansi_embeds_a_subset_and_round_trips() {
     let outcome = edit(&mut document, run.id, "HI", replacement, true)
         .expect("U+0100 is covered by every bundled face");
     let after = page_content(&document, 0);
-    assert_ne!(after, before, "the edit must reach the stream, not only the plan");
+    assert_ne!(
+        after, before,
+        "the edit must reach the stream, not only the plan"
+    );
     // The bytes in the stream are the subset's codes, not characters and not WinAnsi.
     assert!(
         after.windows(2).any(|pair| pair == [1, 2]),
@@ -271,12 +274,21 @@ fn row1_covered_non_winansi_embeds_a_subset_and_round_trips() {
         .iter()
         .find(|candidate| candidate.text.contains('\u{0100}'))
         .expect("the edited run must be readable again, with U+0100 intact");
-    assert_eq!(edited.text, replacement, "the picker must decode our own codes back");
+    assert_eq!(
+        edited.text, replacement,
+        "the picker must decode our own codes back"
+    );
 
     // A second edit through the embedded font: decode, replace, re-encode, round-trip.
     let mut again = reread;
-    let second = edit(&mut again, edited.id.clone(), replacement, "H\u{0100}!", true)
-        .expect("text set in our own embedded subset must remain editable");
+    let second = edit(
+        &mut again,
+        edited.id.clone(),
+        replacement,
+        "H\u{0100}!",
+        true,
+    )
+    .expect("text set in our own embedded subset must remain editable");
 
     // A different replacement is a different subset, so its name is expected to differ: what
     // must not happen is the previous subset lingering in `/Font` after no `Tf` names it.
@@ -297,7 +309,9 @@ fn row1_covered_non_winansi_embeds_a_subset_and_round_trips() {
         .objects
         .values()
         .filter_map(|object| object.as_dict().ok())
-        .filter(|dict| dict.get(b"Subtype").and_then(lopdf::Object::as_name).ok() == Some(b"TrueType"))
+        .filter(|dict| {
+            dict.get(b"Subtype").and_then(lopdf::Object::as_name).ok() == Some(b"TrueType")
+        })
         .filter_map(|dict| {
             dict.get(b"BaseFont")
                 .and_then(lopdf::Object::as_name)
@@ -335,11 +349,7 @@ fn row1_the_embedded_subset_renders_through_pdfium() {
 
     let rendered =
         PdfProvider::render_page_at(&target, 0, 1.0).expect("PDFium must render the page");
-    assert_eq!(
-        &rendered.bytes[..8],
-        b"\x89PNG\r\n\x1a\n",
-        "expected a PNG"
-    );
+    assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n", "expected a PNG");
 
     // The text layer through PDFium, which reads the /ToUnicode CMap rather than our code.
     let text = PdfProvider::extract_page_text(&target, 0).expect("PDFium must extract text");
@@ -356,6 +366,13 @@ fn row1_the_embedded_subset_renders_through_pdfium() {
 /// `pdftotext` reads the text layer through `/ToUnicode` and `pdftoppm` draws the page, so the
 /// two failure modes §2.3 names each have a check: a subset with the wrong `cmap` renders
 /// blank, and a missing `/ToUnicode` extracts as the raw code.
+///
+/// `cfg(unix)` because poppler's CLI tools are a Unix install here; Windows CI runs the
+/// PDFium test above instead. That is a static platform gate, not a runtime skip: a skip arm
+/// would let a green suite hide that nothing ran, which is the shape `ci_workflow.rs`
+/// forbids. On Windows this test is absent from the binary, and `--include-ignored` cannot
+/// turn it into a failure.
+#[cfg(unix)]
 #[ignore = "requires poppler; `cargo test -- --include-ignored` where pdftotext/pdftoppm exist"]
 #[test]
 fn row1_the_embedded_subset_renders_through_poppler() {
@@ -435,15 +452,16 @@ fn embedded_font(
             continue;
         }
         let descriptor = document
-            .get_dictionary(
-                dict.get(b"FontDescriptor")
+            .get_dictionary(dict.get(b"FontDescriptor").unwrap().as_reference().unwrap())
+            .unwrap();
+        let program = document
+            .get_object(
+                descriptor
+                    .get(b"FontFile2")
                     .unwrap()
                     .as_reference()
                     .unwrap(),
             )
-            .unwrap();
-        let program = document
-            .get_object(descriptor.get(b"FontFile2").unwrap().as_reference().unwrap())
             .unwrap()
             .as_stream()
             .unwrap()
