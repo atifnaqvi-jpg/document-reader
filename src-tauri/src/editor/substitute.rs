@@ -16,30 +16,47 @@
 //!   (`serif`→Times, `mono`/`courier`→Courier, else Helvetica) and weight/slant from
 //!   `Bold`/`Italic` tokens. The subset prefix (`ABCDEF+`) is stripped **first**, or a
 //!   prefixed name would never match a family token.
-//! * **Refusals name the way out** (T3/R4). A replacement with a glyph neither the
-//!   original nor any standard-14 font can supply refuses `GLYPHS_NOT_COVERABLE`; a user
-//!   who turned substitution off refuses `SUBSTITUTE_REFUSED`. Both suggest the annotation
-//!   tool, like every Stage-1 refusal.
+//! * **Refusals name the way out** (T3/R4). Four refusals, four remedies, and the remedy is
+//!   in the code's name because the next person reads the code, not this comment:
+//!   `SUBSTITUTE_REFUSED` (say yes), `GLYPHS_NOT_COVERABLE` (choose a different font),
+//!   `SUBSET_BUILD_FAILED` (report it; our bug), and `TYPE0_EMBED_UNIMPLEMENTED` (this build
+//!   cannot write a CID subset yet — not a fact about the document or the bundle).
 //!
 //! Coverage reads the embedded program with `ttf-parser` — the one new dependency, and the
-//! only place a font program is parsed. It never writes a font.
+//! only place a font program is parsed. It never writes a font; [`crate::editor::embed`] does.
 
-use lopdf::{Document, Object, ObjectId};
+use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::editor::afm;
 use crate::editor::textlocate::FontInfo;
 
-/// The resolved plan for one edit's font: keep the original or substitute.
+/// The resolved plan for one edit's font.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     KeepOriginal,
+    /// MECH-A: a standard-14 reference. Costs no bytes and every viewer has the face.
     Substitute { base_font: String, note: String },
+    /// MECH-B: a subset of a bundled face, written as a new simple `/TrueType` resource.
+    ///
+    /// Ordered after [`Plan::Substitute`] on purpose (design §2.1): a WinAnsi replacement is
+    /// set by a reference every viewer already has, and reaching for a subset first would
+    /// bloat every ordinary edit.
+    Embed {
+        base_font: String,
+        subset: crate::editor::embed::Subset,
+        note: String,
+    },
 }
 
 /// The refusal code for a replacement that no available font can set.
 pub const GLYPHS_NOT_COVERABLE: &str = "GLYPHS_NOT_COVERABLE";
 /// The refusal code for a user who disabled substitution.
 pub const SUBSTITUTE_REFUSED: &str = "SUBSTITUTE_REFUSED";
+/// MECH-B (P2.7.6): the run is `Type0`, and writing an embedded CID subset is not implemented
+/// in this build. Deliberately separate from the other three: it is a capability gap in this
+/// binary, not a property of the document, and a later version will remove the code rather
+/// than change what it means.
+pub const TYPE0_EMBED_UNIMPLEMENTED: &str = "TYPE0_EMBED_UNIMPLEMENTED";
 
 /// Decides whether a run's font may be kept, or must be substituted, for `replacement`.
 ///
@@ -91,18 +108,53 @@ pub fn plan_with_font(
         return Err(crate::model::AppError::SubstituteRefused);
     }
 
-    let base_font = style_match(info.base_font.as_deref());
-    if !afm::covers(&base_font, replacement) {
-        return Err(crate::model::AppError::GlyphsNotCoverable);
-    }
-
     let original = info
         .base_font
         .clone()
         .unwrap_or_else(|| String::from("this run's font"));
-    Ok(Plan::Substitute {
-        note: format!("edited with {base_font} substituting {original}"),
-        base_font,
+
+    // MECH-A first: a standard-14 reference is the cheap path and stays cheap (R4).
+    let base_font = style_match(info.base_font.as_deref());
+    if afm::covers(&base_font, replacement) {
+        return Ok(Plan::Substitute {
+            note: format!("edited with {base_font} substituting {original}"),
+            base_font,
+        });
+    }
+
+    // MECH-B. Each step names a different fact with a different remedy, ordered from the most
+    // permanent fact to the most transient:
+    //
+    // 1. no bundled face covering a character is permanent within the bundle, and stays true
+    //    even after the Type0 writer lands, so it is checked first;
+    // 2. a Type0 run would need a CID writer this build does not have -- our gap, temporary;
+    // 3. a face that has the glyph but fails to subset is our defect.
+    let Some(face) = crate::editor::embed::face_for_style(&base_font) else {
+        return Err(crate::model::AppError::GlyphsNotCoverable);
+    };
+    if !crate::editor::embed::covers(face, replacement) {
+        return Err(crate::model::AppError::GlyphsNotCoverable);
+    }
+    if info
+        .subtype
+        .as_deref()
+        .is_some_and(|subtype| subtype.eq_ignore_ascii_case("type0"))
+    {
+        return Err(crate::model::AppError::Type0EmbedUnimplemented);
+    }
+    let subset = crate::editor::embed::subset(face, replacement)
+        .map_err(crate::model::AppError::SubsetBuildFailed)?;
+
+
+    Ok(Plan::Embed {
+        // The prefixed name, exactly as written to `/BaseFont`: the note is what a user would
+        // quote in a bug report, and "Sans-Regular" is not in the file.
+        note: format!(
+            "edited with an embedded subset of {} substituting {original}",
+            subset.base_font
+        ),
+        base_font: subset.base_font.clone(),
+        subset,
     })
 }
 
@@ -198,6 +250,95 @@ fn stream_bytes(document: &Document, object: &Object) -> Option<Vec<u8>> {
     stream.decompress().ok().map(|_| stream.content)
 }
 
+/// Decodes one-byte `bytes` through a simple font's **own `/ToUnicode`** when it has one.
+///
+/// lopdf resolves a font's `/Encoding /Differences` by looking each glyph name up in its own
+/// Adobe glyph list. That list has no `uniXXXX` convention, so a `/Differences` written by
+/// [`crate::editor::embed`] makes `get_font_encoding` fail — and it then falls back to
+/// StandardEncoding, silently. Reading our own embedded subsets through that fallback would
+/// decode code `0x01` as `A` rather than U+0100, which breaks undo (the inverse is validated
+/// against decoded text) and re-editing.
+///
+/// `/ToUnicode` is the authority here, and not only for our writer: the PDF format makes it
+/// the semantic mapping of a code, so preferring it is the general rule rather than a
+/// workaround for one producer. Returns `None` when the font has no `/ToUnicode`, or when the
+/// bytes contain a code it does not name — refusing to guess is the direction every other gate
+/// in this module takes.
+pub fn decode_simple(document: &Document, font: &Dictionary, bytes: &[u8]) -> Option<String> {
+    // The guard belongs here, in the one-byte reader, not in each caller: a Type0 CMap maps
+    // two-byte codes, and splitting them can produce a plausible string from the wrong bytes
+    // (a `<00> <0041>` entry turns code `0002` into `AA`). Two-byte decoding belongs to
+    // `cid::CidFont`.
+    if is_type0(font) {
+        return None;
+    }
+    if let Some(map) = to_unicode_map(document, font) {
+        let mut out = String::new();
+        for byte in bytes {
+            out.push(map.character(u16::from(*byte))?);
+        }
+        return Some(out);
+    }
+    // No `/ToUnicode`: fall back to the font's `/Encoding`, which is what every pre-P2.7.6
+    // simple font relies on and what lopdf reads correctly for a name-based `/Differences`.
+    font.get_font_encoding(document)
+        .ok()?
+        .bytes_to_string(bytes)
+        .ok()
+}
+
+/// Encodes `text` through a simple font's `/ToUnicode`, the inverse of [`decode_simple`].
+///
+/// A character the font's CMap does not name is `None`, never a dropped character: writing
+/// fewer bytes than the user asked for while reporting success is the silent-corruption class
+/// this whole path exists to avoid. Without a `/ToUnicode` this defers to lopdf's encoding,
+/// whose `string_to_bytes` may drop characters, so the caller still has to round-trip.
+pub fn encode_simple(document: &Document, font: &Dictionary, text: &str) -> Option<Vec<u8>> {
+    let Some(map) = to_unicode_map(document, font) else {
+        let encoding = font.get_font_encoding(document).ok()?;
+        return Some(encoding.string_to_bytes(text));
+    };
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let code = map.code(ch)?;
+        out.push(u8::try_from(code).ok()?);
+    }
+    Some(out)
+}
+
+/// True for a composite (CID) font, whose codes are more than one byte.
+pub fn is_type0(font: &Dictionary) -> bool {
+    font.get(b"Subtype")
+        .and_then(Object::as_name)
+        .is_ok_and(|subtype| subtype.eq_ignore_ascii_case(b"Type0"))
+}
+/// True when the font carries a readable `/ToUnicode`.
+///
+/// The condition is "we have a CMap", not "we are the ones who wrote it": a producer's CMap is
+/// just as authoritative, and a font whose CMap fails to parse falls back to `/Encoding`.
+pub fn has_to_unicode(document: &Document, font: &Dictionary) -> bool {
+    to_unicode_map(document, font).is_some()
+}
+
+/// Parses a font's `/ToUnicode` stream with the CMap reader P2.7.5 already has.
+///
+/// One-byte and two-byte codes are both `<hex>` tokens, and [`crate::editor::cid::CodeMap`]
+/// parses any width; a simple font only ever asks about codes below 256.
+fn to_unicode_map(
+    document: &Document,
+    font: &Dictionary,
+) -> Option<crate::editor::cid::CodeMap> {
+    let stream = font
+        .get(b"ToUnicode")
+        .ok()
+        .and_then(|object| deref_object(document, object))
+        .and_then(|object| object.as_stream().ok())?;
+    let content = match stream.decompressed_content() {
+        Ok(content) => content,
+        Err(_) => stream.content.clone(),
+    };
+    crate::editor::cid::CodeMap::parse(&content)
+}
 /// Strips a subset prefix from a `/BaseFont` name.
 ///
 /// The convention is six uppercase letters, then `+` (e.g. `ABCDEF+TimesNewRoman`). The
@@ -628,18 +769,45 @@ mod tests {
         assert!(metrics.advance("x", 10.0).is_none());
     }
 
-    /// MECH-B's absence: a glyph outside WinAnsi refuses with `GLYPHS_NOT_COVERABLE`.
+    /// MECH-B: a non-WinAnsi glyph the bundle covers is **embedded**, not refused.
+    ///
+    /// This test used to assert `GLYPHS_NOT_COVERABLE` for U+2192, which was true only while
+    /// MECH-B did not exist. Arrows are in every bundled face, so the refusal would now be
+    /// wrong; what the old test really protected was "no silent drop", and that is checked
+    /// here instead: the character must be in the subset's own code map.
     #[test]
-    fn a_non_winansi_glyph_is_not_coverable() {
+    fn a_non_winansi_glyph_the_bundle_covers_is_embedded() {
         let glyphs: Vec<char> = "HI".chars().collect();
         let document = testpdf::embedded_subset_page("HI", &glyphs);
         let page_id = textlocate::page_id(&document, 0).unwrap();
         let run = &textlocate::locate_runs(&document, page_id).unwrap()[0];
         let info = textlocate::font_info(&document, page_id, &run.font_key).unwrap();
 
-        // U+2192 (→) has no WinAnsi code.
-        let error = plan(&document, page_id, &run.font_key, &info, "H\u{2192}", true).unwrap_err();
-        assert_eq!(error.code(), "GLYPHS_NOT_COVERABLE");
-        assert!(error.to_string().contains("annotation"), "{error}");
+        let plan = plan(&document, page_id, &run.font_key, &info, "H\u{2192}", true)
+            .expect("U+2192 is covered by the bundled faces");
+        let Plan::Embed { subset, .. } = plan else {
+            panic!("a WinAnsi code exists for neither character, so MECH-A cannot fire");
+        };
+        assert!(
+            subset.codes.iter().any(|(_, character)| *character == '\u{2192}'),
+            "the arrow must have a code of its own, not be dropped or folded"
+        );
+    }
+
+    /// MECH-B refuses a glyph no bundled face has — the permanent gap, with its own code.
+    ///
+    /// U+1F600 is in no bundled face, and U+FE0F is a variation selector, which a simple font
+    /// cannot address at all.
+    #[test]
+    fn a_glyph_no_bundled_face_has_is_not_coverable() {
+        let glyphs: Vec<char> = "HI".chars().collect();
+        let document = testpdf::embedded_subset_page("HI", &glyphs);
+        let page_id = textlocate::page_id(&document, 0).unwrap();
+        let run = &textlocate::locate_runs(&document, page_id).unwrap()[0];
+        let info = textlocate::font_info(&document, page_id, &run.font_key).unwrap();
+
+        let error = plan(&document, page_id, &run.font_key, &info, "H\u{1F600}", true)
+            .expect_err("no bundled face has an emoji");
+        assert_eq!(error.code(), "GLYPHS_NOT_COVERABLE", "{error}");
     }
 }

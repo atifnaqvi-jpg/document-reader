@@ -815,9 +815,14 @@ fn walk_level<'a>(
         let Some(font) = font else {
             continue;
         };
-        let Ok(encoding) = font.get_font_encoding(document) else {
-            continue;
-        };
+        // `/ToUnicode` first (P2.7.6): an embedded subset writes `uniXXXX` `/Differences`
+        // names, which lopdf cannot resolve, and its silent fallback to StandardEncoding would
+        // make the picker show the wrong characters for text this build itself wrote. `None`
+        // means the font is unreadable and its runs are skipped, as before.
+        // A Type0 run's codes are two bytes, so it decodes through lopdf's Identity-H reader
+        // (which follows `/ToUnicode`); a simple font decodes through its own `/ToUnicode`
+        // first, because `uniXXXX` `/Differences` names are outside lopdf's glyph list.
+        let decode = |bytes: &[u8]| decode_run_bytes(document, font, bytes);
         // P2.4.2 Phase A: the run's advance comes from the font's own metrics when it has any,
         // so the merge gap is exact rather than a per-character guess.
         let metrics = crate::editor::substitute::FontMetrics::resolve_with(
@@ -833,7 +838,7 @@ fn walk_level<'a>(
         // Where each operand showed: an ordinary `Tj` shows at the current matrix origin, but
         // fragments inside one `TJ` array advance along the line as their kerning numbers and
         // glyph widths dictate (T17).
-        let per_path = tj_fragment_origins(operation, walker, &metrics, &encoding);
+        let per_path = tj_fragment_origins(operation, walker, &metrics, &decode);
         // T29: an `MCID` changes only at `BDC`/`EMC`, which cannot occur inside a `TJ` array,
         // so the snapshot is taken once per operation.
         let marked_content = marked.snapshot();
@@ -842,7 +847,7 @@ fn walk_level<'a>(
             let Some(bytes) = string_at(operation, &path) else {
                 continue;
             };
-            let Ok(text) = encoding.bytes_to_string(bytes) else {
+            let Some(text) = decode(bytes) else {
                 continue;
             };
             if text.is_empty() {
@@ -972,7 +977,7 @@ fn tj_fragment_origins(
     operation: &Operation,
     state: &TextMatrixWalk,
     metrics: &crate::editor::substitute::FontMetrics,
-    encoding: &lopdf::Encoding,
+    decode: &dyn Fn(&[u8]) -> Option<String>,
 ) -> Vec<(Vec<usize>, (f32, f32))> {
     if operation.operator != "TJ" {
         return Vec::new();
@@ -988,8 +993,7 @@ fn tj_fragment_origins(
             match item {
                 Object::String(bytes, _) => {
                     origins.push((vec![index, inner], (pen_x, state.origin().1)));
-                    let width = encoding
-                        .bytes_to_string(bytes)
+                    let width = decode(bytes)
                         .map(|text| spaced_advance(metrics, &text, state))
                         .unwrap_or(0.0);
                     pen_x += width;
@@ -1651,6 +1655,29 @@ pub fn is_cid_font(info: &FontInfo) -> bool {
     subtype_is_type0 || name_is_cid
 }
 
+/// Decodes a run's bytes the way the run itself is read.
+///
+/// Every site that turns bytes back into text must agree with the picker, or an edit refuses
+/// with `TEXT_RUN_MISMATCH` on bytes nobody changed. Two code widths live here: a simple font
+/// is one byte per code and prefers its own `/ToUnicode` (MECH-B writes `uniXXXX`
+/// `/Differences` names lopdf cannot resolve); a Type0 font is two bytes per code and is read
+/// by lopdf's Identity-H machinery, which follows `/ToUnicode`.
+pub(crate) fn decode_run_bytes(
+    document: &Document,
+    font: &Dictionary,
+    bytes: &[u8],
+) -> Option<String> {
+    if !crate::editor::substitute::is_type0(font) {
+        if let Some(decoded) = crate::editor::substitute::decode_simple(document, font, bytes) {
+            return Some(decoded);
+        }
+    }
+    font.get_font_encoding(document)
+        .ok()?
+        .bytes_to_string(bytes)
+        .ok()
+}
+
 /// True for the simple font subtypes Stage 1 can rewrite: Type1, TrueType, MMType1.
 pub fn is_simple_font(info: &FontInfo) -> bool {
     match info.subtype.as_deref() {
@@ -1699,12 +1726,11 @@ pub fn apply_text(
         .get(&font_key)
         .copied()
         .ok_or(AppError::TextRunMismatch)?;
-    let encoding = font
-        .get_font_encoding(document)
-        .map_err(|_| AppError::TextRunMismatch)?;
-    let current_text = encoding
-        .bytes_to_string(&old_bytes)
-        .map_err(|_| AppError::TextRunMismatch)?;
+    // `/ToUnicode` first: an embedded subset (MECH-B) carries `uniXXXX` `/Differences` names,
+    // which lopdf's glyph list does not know, and its fallback to StandardEncoding would decode
+    // the inverse's own bytes as the wrong text and refuse a valid undo.
+    let current_text = decode_run_bytes(document, font, &old_bytes)
+        .ok_or(AppError::TextRunMismatch)?;
     if current_text != expected {
         return Err(AppError::TextRunMismatch);
     }
@@ -1758,6 +1784,16 @@ pub struct MergedWrite<'a> {
     /// The standard-14 `/BaseFont` to switch the run to (MECH-A), or `None` to keep the run's
     /// own font. One substitution per merged run, exactly as Stage 2 does for a single run.
     pub substitute: Option<&'a str>,
+    /// MECH-B: the subset to install as a new font resource and switch the run to.
+    ///
+    /// Not an `Option` beside [`MergedWrite::substitute`]: those two spell "which face does
+    /// this run end up in", and two optional fields let a caller name both, or neither while
+    /// meaning one. The enum makes the choice total.
+    pub embed: Option<&'a crate::editor::embed::Subset>,
+    /// Which face the run must end up in. `Keep` covers an ordinary edit and a run whose own
+    /// font already sets the replacement; the two mechanisms are exclusive here, not by
+    /// convention.
+    pub face: FaceWrite,
     /// The text the user asked for, when there is one. Only `/ActualText` consumes it (P2.7.1):
     /// the property must state the *semantic* text, which the operand bytes are not.
     pub replacement: Option<&'a str>,
@@ -1816,12 +1852,7 @@ pub fn apply_merged(
         // T4, per fragment: the bytes at this address must still read as what the user was
         // shown. A merged run is re-validated fragment by fragment, so a document that
         // changed under the picker refuses instead of writing the wrong operand.
-        let encoding = font
-            .get_font_encoding(document)
-            .map_err(|_| AppError::TextRunMismatch)?;
-        let current = encoding
-            .bytes_to_string(&old)
-            .map_err(|_| AppError::TextRunMismatch)?;
+        let current = decode_run_bytes(document, font, &old).ok_or(AppError::TextRunMismatch)?;
         if current != fragment.expected {
             return Err(AppError::TextRunMismatch);
         }
@@ -1842,33 +1873,28 @@ pub fn apply_merged(
     // is switched (a document may repeat `Tf F1 12` between fragments); each swap is recorded
     // so undo restores the original name exactly where it was read.
     let mut swaps: Vec<FontSwap> = Vec::new();
-    if let Some(base_font) = write.substitute {
-        ensure_substitute_resource(document, page_id, level, base_font)?;
-        let mut seen: Vec<usize> = Vec::new();
-        for fragment in &write.fragments {
-            let (tf_index, old_name) =
-                font_in_force_with_index(&content.operations, fragment.id.op_index)
-                    .ok_or(AppError::TextRunMismatch)?;
-            if seen.contains(&tf_index) {
-                continue;
-            }
-            seen.push(tf_index);
-            let operation = content
-                .operations
-                .get_mut(tf_index)
-                .ok_or(AppError::TextRunMismatch)?;
-            let slot = operation
-                .operands
-                .first_mut()
-                .ok_or(AppError::TextRunMismatch)?;
-            *slot = Object::Name(SUBSTITUTE_NAME.to_vec());
-            swaps.push(FontSwap {
-                op_index: tf_index,
-                operand_path: vec![0],
-                old_name,
-                new_name: SUBSTITUTE_NAME.to_vec(),
-                also: Vec::new(),
-            });
+    match write.face {
+        FaceWrite::Keep => {}
+        FaceWrite::Substitute => {
+            let Some(base_font) = write.substitute else {
+                return Err(AppError::Other(
+                    "a substituted run was written without the face to substitute".into(),
+                ));
+            };
+            ensure_substitute_resource(document, page_id, level, base_font)?;
+            swap_fonts(&mut content, &write.fragments, SUBSTITUTE_NAME, &mut swaps)?;
+        }
+        FaceWrite::Embed => {
+            let Some(subset) = write.embed else {
+                return Err(AppError::Other(
+                    "an embedded run was written without the subset to install".into(),
+                ));
+            };
+            // A subset costs bytes, so it gets its own resource name rather than sharing `FS1`
+            // with MECH-A: two different subsets are two different faces, and reusing one name
+            // would make the second edit silently repaint the first.
+            let (name, _id) = install_embedded_resource(document, page_id, level, subset)?;
+            swap_fonts(&mut content, &write.fragments, &name, &mut swaps)?;
         }
     }
 
@@ -1891,6 +1917,7 @@ pub fn apply_merged(
     )?;
 
     write_level(document, page_id, level, &content)?;
+    prune_unused_embedded_fonts(document, page_id, level, &content.operations);
 
     let also: Vec<ContentOperation> = write
         .fragments
@@ -2799,6 +2826,45 @@ fn span_is_this_operation(operations: &[Operation], bdc_index: usize, op_index: 
     true
 }
 
+/// Points every governing `Tf` a merged run reads through at `name`, recording each swap.
+///
+/// A document may repeat `Tf F1 12` between fragments, so the same `Tf` index can govern two
+/// of them; it is swapped once and recorded once.
+fn swap_fonts(
+    content: &mut lopdf::content::Content<Vec<Operation>>,
+    fragments: &[FragmentWrite],
+    name: &[u8],
+    swaps: &mut Vec<FontSwap>,
+) -> Result<(), AppError> {
+    let mut seen: Vec<usize> = Vec::new();
+    for fragment in fragments {
+        let (tf_index, old_name) =
+            font_in_force_with_index(&content.operations, fragment.id.op_index)
+                .ok_or(AppError::TextRunMismatch)?;
+        if seen.contains(&tf_index) {
+            continue;
+        }
+        seen.push(tf_index);
+        let operation = content
+            .operations
+            .get_mut(tf_index)
+            .ok_or(AppError::TextRunMismatch)?;
+        let slot = operation
+            .operands
+            .first_mut()
+            .ok_or(AppError::TextRunMismatch)?;
+        *slot = Object::Name(name.to_vec());
+        swaps.push(FontSwap {
+            op_index: tf_index,
+            operand_path: vec![0],
+            old_name,
+            new_name: name.to_vec(),
+            also: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
 /// Installs a standard-14 substitute font as a resource on `page_id` and rewrites the
 /// run's governing `Tf` to name it, returning the [`FontSwap`] for undo (P2.4 Stage 2
 /// T10/T15).
@@ -2852,6 +2918,152 @@ pub fn apply_font_swap(
         new_name: SUBSTITUTE_NAME.to_vec(),
         also: Vec::new(),
     })
+}
+
+/// Installs a MECH-B subset as its own font resource at this level, returning its resource
+/// name and object id.
+///
+/// The name is derived from the written `/BaseFont` (`F` + the six-letter prefix) rather than
+/// being constant. Two subsets in one document are different faces; a constant name would make
+/// the second edit repaint text the first edit set, which is the MECH-A trade-off applied to a
+/// case where it is not acceptable.
+///
+/// Every object goes in as an indirect reference: `/FontDescriptor` and `/ToUnicode` are named
+/// by the font dictionary, and a viewer follows references, not inline copies.
+fn install_embedded_resource(
+    document: &mut Document,
+    page_id: ObjectId,
+    level: &[XObjectStep],
+    subset: &crate::editor::embed::Subset,
+) -> Result<(Vec<u8>, ObjectId), AppError> {
+    let program_id = document.add_object(crate::editor::embed::program_stream(subset));
+    let descriptor_id = document.add_object(crate::editor::embed::descriptor_dictionary(
+        subset,
+        program_id,
+    ));
+    let cmap_id = document.add_object(crate::editor::embed::cmap_stream(subset));
+    let font_id = document.add_object(crate::editor::embed::font_dictionary(
+        subset,
+        descriptor_id,
+        cmap_id,
+    ));
+
+    let prefix = subset
+        .base_font
+        .split('+')
+        .next()
+        .filter(|prefix| prefix.len() == 6)
+        .ok_or_else(|| AppError::Other("a subset name must carry a six-letter prefix".into()))?;
+    let name = format!("F{prefix}").into_bytes();
+
+    let resources = writable_resources_at(document, page_id, level)?;
+    if !resources.has(b"Font") {
+        resources.set(b"Font", Object::Dictionary(Dictionary::new()));
+    }
+    let fonts = resources
+        .get_mut(b"Font")
+        .and_then(Object::as_dict_mut)
+        .map_err(|_| {
+            AppError::Other("page /Font map is an indirect form this edit does not rewrite".into())
+        })?;
+    if fonts.has(&name) {
+        // The same input twice produces the same prefix and the same bytes, so this is the
+        // same face: reuse the entry rather than shadowing it with an identical copy.
+        if fonts.get(&name).ok().and_then(|object| object.as_reference().ok()) == Some(font_id) {
+            return Ok((name, font_id));
+        }
+    }
+    fonts.set(name.clone(), Object::Reference(font_id));
+    Ok((name, font_id))
+}
+
+/// Which face a write leaves the run in.
+///
+/// Three states, not two booleans: the writer must be able to tell "keep the run's font" from
+/// "the caller forgot to say", and MECH-A from MECH-B.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceWrite {
+    Keep,
+    Substitute,
+    Embed,
+}
+
+/// Drops every embedded subset this level no longer draws with.
+///
+/// A subset costs four objects and a few kilobytes; without this, each re-edit of the same run
+/// leaves the previous subset in `/Font` forever, and edit-then-undo leaves one per cycle. The
+/// test is "no `Tf` in this level names it", which is exactly the condition under which the
+/// objects cannot affect rendering.
+///
+/// Only faces this module wrote are dropped: a font is ours when its `/BaseFont` carries a
+/// six-letter subset prefix **and** it has a `/FontFile2`. A producer's own subset in the same
+/// `/Font` map is left alone — it may be referenced from another content stream, and deleting
+/// an object that is still in use is the one unrecoverable mistake here.
+pub(crate) fn prune_unused_embedded_fonts(
+    document: &mut Document,
+    page_id: ObjectId,
+    level: &[XObjectStep],
+    operations: &[Operation],
+) {
+    let mut used: Vec<Vec<u8>> = Vec::new();
+    for operation in operations {
+        if operation.operator == "Tf" {
+            if let Some(name) = operation.operands.first().and_then(|o| o.as_name().ok()) {
+                if !used.iter().any(|candidate| candidate == name) {
+                    used.push(name.to_vec());
+                }
+            }
+        }
+    }
+
+    let Some(fonts) = level_resources_mut(document, page_id, level)
+        .and_then(|resources| resources.get_mut(b"Font").ok())
+        .and_then(|object| object.as_dict_mut().ok())
+    else {
+        return;
+    };
+    let stale: Vec<(Vec<u8>, ObjectId)> = fonts
+        .iter()
+        .filter(|(name, _)| !used.iter().any(|candidate| candidate == *name))
+        .filter_map(|(name, value)| Some((name.clone(), value.as_reference().ok()?)))
+        .collect();
+
+    for (name, font_id) in stale {
+        let Ok(font) = document.get_dictionary(font_id) else {
+            continue;
+        };
+        let ours = font
+            .get(b"BaseFont")
+            .and_then(Object::as_name)
+            .ok()
+            .is_some_and(|base| base.len() > 7 && base[6] == b'+' && base[..6].iter().all(u8::is_ascii_uppercase))
+            && font.has(b"FontDescriptor");
+        if !ours {
+            continue;
+        }
+        let descriptor_id = font
+            .get(b"FontDescriptor")
+            .and_then(Object::as_reference)
+            .ok();
+        let cmap_id = font.get(b"ToUnicode").and_then(Object::as_reference).ok();
+        let program_id = descriptor_id
+            .and_then(|id| document.get_dictionary(id).ok())
+            .and_then(|descriptor| descriptor.get(b"FontFile2").and_then(Object::as_reference).ok());
+
+        if let Some(resources) = level_resources_mut(document, page_id, level) {
+            if let Some(map) = resources.get_mut(b"Font").ok().and_then(|o| o.as_dict_mut().ok()) {
+                map.remove(&name);
+            }
+        }
+        for id in [Some(font_id), descriptor_id, cmap_id, program_id]
+            .into_iter()
+            .flatten()
+        {
+            if !object_is_referenced(document, id) {
+                document.objects.remove(&id);
+            }
+        }
+    }
 }
 
 /// The resource name every MECH-A substitute is installed under.
@@ -3117,6 +3329,48 @@ mod tests {
     use super::*;
     use crate::editor::testpdf;
     use lopdf::content::Content;
+
+    /// A Type0 font's `/ToUnicode` maps two-byte codes, and splitting them can produce a
+    /// *plausible* string from the wrong bytes.
+    ///
+    /// The trap fixture maps code `0x0000` to `A` as well as `0002` to `B`, so a byte-split
+    /// reader turns the two-byte code `0002` into `AA`. Without that entry both readers agree,
+    /// and the test would pass against the broken one too — which is exactly what happened
+    /// before this fixture existed.
+    #[test]
+    fn a_two_byte_code_is_never_decoded_one_byte_at_a_time() {
+        let document = testpdf::cid_trap_cmap_page();
+        let page = page_id(&document, 0).unwrap();
+        let font = font_dictionary_at(&document, page, &[], b"F1").unwrap();
+
+        assert!(
+            crate::editor::substitute::has_to_unicode(&document, &font),
+            "the trap CMap must parse, or this test proves nothing"
+        );
+        assert!(
+            crate::editor::substitute::decode_simple(&document, &font, &[0x00, 0x02]).is_none(),
+            "the one-byte reader must refuse a Type0 CMap outright, not split its codes"
+        );
+        assert_eq!(
+            decode_run_bytes(&document, &font, &[0x00, 0x02]),
+            Some(String::from("B")),
+            "the Type0 reader produces one character per two-byte code"
+        );
+    }
+
+    /// A simple font keeps the one-byte reader, and a font with no `/ToUnicode` keeps lopdf's
+    /// `/Encoding`: the fallback is what every pre-P2.7.6 document relies on.
+    #[test]
+    fn a_simple_font_still_decodes_through_its_encoding() {
+        let document = testpdf::simple_winansi();
+        let page = page_id(&document, 0).unwrap();
+        let font = font_dictionary_at(&document, page, &[], b"F1").unwrap();
+
+        assert_eq!(
+            decode_run_bytes(&document, &font, b"HI"),
+            Some(String::from("HI"))
+        );
+    }
 
     #[test]
     fn locates_runs_in_content_order_with_decoded_text() {

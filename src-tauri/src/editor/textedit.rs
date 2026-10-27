@@ -211,9 +211,23 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
             ))
         })?;
 
+    // Gate (b) for a simple font. `/ToUnicode` is tried first, because a font we embedded
+    // (MECH-B) states its codes there and lopdf cannot resolve its `uniXXXX` `/Differences`
+    // names -- `get_font_encoding` would silently fall back to StandardEncoding and the gate
+    // would test a mapping the file does not use.
     let round_trips =
         textlocate::font_dictionary_at(document, page_id, &run.id.xobject_path, &run.font_key)
             .map(|font| {
+                if let Some(text) =
+                    crate::editor::substitute::decode_simple(document, &font, &run.bytes)
+                {
+                    return crate::editor::substitute::encode_simple(
+                        document,
+                        &font,
+                        &text,
+                    )
+                    .is_some_and(|bytes| bytes == run.bytes);
+                }
                 font.get_font_encoding(document)
                     .map(|encoding| {
                         let text = encoding.bytes_to_string(&run.bytes).unwrap_or_default();
@@ -2195,16 +2209,36 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
                     .map_err(|refusal| AppError::TextRunNotEditable(refusal.message()))?;
                 (bytes, Some(cid))
             } else {
-                let encoding = font
-                    .get_font_encoding(document)
-                    .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
-                let bytes = encoding.string_to_bytes(&request.replacement);
-                let round_tripped = encoding
-                    .bytes_to_string(&bytes)
-                    .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
-                if round_tripped != request.replacement {
-                    return Err(refuse(Gate::EncodingRoundTrip));
-                }
+                // A run we wrote an embedded subset for carries `uniXXXX` `/Differences`
+                // names, so the mapping to write through is its `/ToUnicode`, not lopdf's
+                // glyph-name resolution. Building the bytes from the same CMap we wrote is
+                // also what makes the round-trip below checkable at all.
+                // `/ToUnicode` wins when the font has one, because it is the mapping the
+                // format defines and the one we write (MECH-B). A font without one keeps the
+                // pre-P2.7.6 path unchanged, including its refusal behaviour.
+                let bytes = if crate::editor::substitute::has_to_unicode(document, &font) {
+                    let bytes =
+                        crate::editor::substitute::encode_simple(document, &font, &request.replacement)
+                            .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?;
+                    let decoded = crate::editor::substitute::decode_simple(document, &font, &bytes)
+                        .ok_or_else(|| refuse(Gate::EncodingRoundTrip))?;
+                    if decoded != request.replacement {
+                        return Err(refuse(Gate::EncodingRoundTrip));
+                    }
+                    bytes
+                } else {
+                    let encoding = font
+                        .get_font_encoding(document)
+                        .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
+                    let bytes = encoding.string_to_bytes(&request.replacement);
+                    let round_tripped = encoding
+                        .bytes_to_string(&bytes)
+                        .map_err(|_| refuse(Gate::EncodingRoundTrip))?;
+                    if round_tripped != request.replacement {
+                        return Err(refuse(Gate::EncodingRoundTrip));
+                    }
+                    bytes
+                };
                 (bytes, None)
             }
         }
@@ -2213,11 +2247,25 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
                 .ok_or(AppError::GlyphsNotCoverable)?,
             None,
         ),
+        // MECH-B: the bytes are the subset's chosen codes, not characters and not WinAnsi.
+        // `subset` already refused a character it could not map, so a `None` here would be a
+        // mismatch between two functions in the same commit, not a user-facing case.
+        crate::editor::substitute::Plan::Embed { subset, .. } => (
+            subset
+                .encode(&request.replacement)
+                .ok_or_else(|| {
+                    AppError::SubsetBuildFailed(
+                        "the subset carries no code for a character it was built from".into(),
+                    )
+                })?,
+            None,
+        ),
     };
 
     // T13: the width gate compares the FINAL font's metrics. When MECH-A fires, the final
-    // font is the standard-14 substitute and its AFM widths are authoritative; otherwise
-    // the caller's PDFium measurement is. `old_width` is unchanged either way (O1).
+    // font is the standard-14 substitute and its AFM widths are authoritative; when MECH-B
+    // fires it is the subset's own `hmtx`; otherwise the caller's PDFium measurement is.
+    // `old_width` is unchanged either way (O1).
     let (new_width, substitution, note) = match &plan {
         crate::editor::substitute::Plan::KeepOriginal => {
             // P2.7.5: a CID run's advance comes from its own `/W` then `/DW`, which is what the
@@ -2239,6 +2287,22 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
             )
             .ok_or(AppError::GlyphsNotCoverable)?;
             (width, Some(base_font.clone()), Some(note.clone()))
+        }
+        // T13: the width gate compares the FINAL font's metrics, and here that is the subset's
+        // own `hmtx`. Reading the source face instead would be the same numbers today and a
+        // different claim the moment a subset adjusts an advance.
+        crate::editor::substitute::Plan::Embed { subset, note, .. } => {
+            let width = subset
+                .advance(&request.replacement, request.font_size)
+                .ok_or_else(|| {
+                    AppError::SubsetBuildFailed(
+                        "the subset could not measure the replacement it was built for".into(),
+                    )
+                })?;
+            // The written `/BaseFont`, so the disclosure names the face the run now uses. The
+            // writer dispatches on `FaceWrite`, not on this field being `Some`, so carrying the
+            // name here no longer means "install `/FS1`".
+            (width, Some(subset.base_font.clone()), Some(note.clone()))
         }
     };
     // P2.7.4: `new_width` above is a **text-space** length (font metrics at `font_size`), and
@@ -2279,9 +2343,21 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
     for fragment in range_writes {
         writes.push(fragment);
     }
+    let embedded = match &plan {
+        crate::editor::substitute::Plan::Embed { subset, .. } => Some(subset),
+        _ => None,
+    };
     let merged = textlocate::MergedWrite {
         fragments: writes,
         substitute: substitution.as_deref(),
+        embed: embedded,
+        face: if embedded.is_some() {
+            textlocate::FaceWrite::Embed
+        } else if substitution.is_some() {
+            textlocate::FaceWrite::Substitute
+        } else {
+            textlocate::FaceWrite::Keep
+        },
         replacement: Some(&request.replacement),
         level: level.clone(),
     };
@@ -2477,6 +2553,7 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
     }
 
     textlocate::write_level(document, page_id, level, &content)?;
+    textlocate::prune_unused_embedded_fonts(document, page_id, level, &content.operations);
 
     // The `/Properties` clone is now unreferenced; drop it so an undo leaves the file as it was
     // rather than accumulating one orphan per edit-then-undo cycle.

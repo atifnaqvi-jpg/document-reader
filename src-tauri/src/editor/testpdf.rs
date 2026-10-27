@@ -224,17 +224,37 @@ pub fn cid_identity_page() -> Document {
 /// is embedded, which keeps the fixture to the CMap path — the route that decides *meaning*
 /// and therefore the one every CID edit must be able to take on its own.
 pub fn cid_tounicode_page() -> Document {
-    let mut document = Document::with_version("1.4");
-    let pages_id = document.new_object_id();
-
-    let cmap = b"/CIDInit /ProcSet findresource begin\n\
+    cid_page(
+        b"/CIDInit /ProcSet findresource begin\n\
 12 dict begin\nbegincmap\n\
 /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
 1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
 3 beginbfchar\n<0001> <0041>\n<0002> <0042>\n<0003> <0043>\nendbfchar\n\
-endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
-        .to_vec();
-    let mut cmap_stream = Stream::new(dictionary! {}, cmap);
+endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n",
+    )
+}
+
+/// A Type0 page whose CMap also maps the code `0x0000`, which no real producer writes.
+///
+/// Splitting a two-byte code into bytes therefore yields a *plausible* string: code `0002`
+/// (`B`) reads as `AA`. A test that only checks "the Type0 path returns the right text" passes
+/// against a broken byte-split reader; this fixture makes the two paths disagree visibly.
+pub fn cid_trap_cmap_page() -> Document {
+    cid_page(
+        b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\nbegincmap\n\
+/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+3 beginbfchar\n<0000> <0041>\n<0002> <0042>\n<0003> <0043>\nendbfchar\n\
+endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n",
+    )
+}
+
+fn cid_page(cmap: &[u8]) -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+
+    let mut cmap_stream = Stream::new(dictionary! {}, cmap.to_vec());
     cmap_stream.compress().unwrap();
     let cmap_id = document.add_object(cmap_stream);
 

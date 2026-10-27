@@ -214,12 +214,27 @@ pub enum AppError {
     /// built. Deliberately a different code from `GlyphsNotCoverable`: this one is our bug,
     /// not a limitation of the shipped faces, and telling the user to "choose a different
     /// font" would send them after a problem they cannot fix.
+    ///
+    /// The parenthetical detail is the builder's own reason. It is included because this code
+    /// means "our bug": a report that cannot say *what* failed costs a second round trip, and
+    /// the user-facing sentence above it already states the remedy.
     #[error(
         "the glyphs for this replacement exist in the bundled font, but the font subset \
          could not be built; this is a defect in this build -- retry once, and report it if \
-         it happens again"
+         it happens again ({0})"
     )]
-    SubsetBuildFailed,
+    SubsetBuildFailed(String),
+    /// MECH-B (P2.7.6): the run is `Type0`, and this build has no CID-subset writer. A
+    /// capability gap, not a property of the document: a later version removes this code
+    /// rather than changing what it means. Deliberately not folded into
+    /// `SUBSET_BUILD_FAILED` -- retrying cannot help, and "this build cannot" is a different
+    /// sentence from "we tried and failed".
+    #[error(
+        "this run uses a CID (Type0) font, and embedding a font for this run is not \
+         implemented in this build; retry after updating, or use the annotation tools to add \
+         a note"
+    )]
+    Type0EmbedUnimplemented,
     /// Stage 2 (O-ST2-4): the user turned substitution off, and the original font cannot
     /// set the replacement. Refused rather than substituting, per the toggle's contract.
     #[error(
@@ -252,7 +267,8 @@ impl AppError {
             AppError::WrongPassword => "WRONG_PASSWORD",
             AppError::TextRunNotEditable(_) => "TEXT_RUN_NOT_EDITABLE",
             AppError::GlyphsNotCoverable => "GLYPHS_NOT_COVERABLE",
-            AppError::SubsetBuildFailed => "SUBSET_BUILD_FAILED",
+            AppError::SubsetBuildFailed(_) => "SUBSET_BUILD_FAILED",
+            AppError::Type0EmbedUnimplemented => "TYPE0_EMBED_UNIMPLEMENTED",
             AppError::SubstituteRefused => "SUBSTITUTE_REFUSED",
             AppError::TextRunMismatch => "TEXT_RUN_MISMATCH",
             AppError::ContentTooLarge => "CONTENT_TOO_LARGE",

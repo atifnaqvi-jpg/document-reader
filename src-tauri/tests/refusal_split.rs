@@ -45,14 +45,15 @@ fn plan_code(document: &Document, replacement: &str, allow: bool) -> String {
 /// A genuine coverage gap returns the permanent code, and specifically not the build-failure
 /// one.
 ///
-/// U+2192 is absent from Liberation's shipped Latin faces and from every standard-14 face, so
-/// no subset of a bundled face could set it. If this ever returns `SUBSET_BUILD_FAILED`, the
-/// subset path has started claiming work it cannot do, and the user is being told to report a
-/// defect instead of choosing another font.
+/// This test used U+2192 (→) and described it as absent from Liberation. It is not: the
+/// bundled faces carry arrows, so MECH-B now embeds one and the premise is false. U+1F600 is
+/// the honest example — no bundled face has it. If this ever returns `SUBSET_BUILD_FAILED`,
+/// the subset path has started claiming work it cannot do, and the user is being told to
+/// report a defect instead of choosing another font.
 #[test]
 fn a_glyph_no_shipped_face_has_returns_the_permanent_coverage_code() {
     let document = fixture("non-winansi-replacement.pdf");
-    let code = plan_code(&document, "H\u{2192}", true);
+    let code = plan_code(&document, "H\u{1F600}", true);
     assert_eq!(
         code, "GLYPHS_NOT_COVERABLE",
         "a coverage gap is permanent within the bundle; it must not be reported as a subset \
@@ -85,7 +86,7 @@ fn a_cjk_glyph_is_a_coverage_gap_not_a_build_failure() {
 #[test]
 fn the_two_codes_name_different_remedies() {
     let coverage = AppError::GlyphsNotCoverable;
-    let build = AppError::SubsetBuildFailed;
+    let build = AppError::SubsetBuildFailed("a synthetic detail".into());
 
     assert_ne!(coverage.code(), build.code());
     assert_eq!(coverage.code(), "GLYPHS_NOT_COVERABLE");

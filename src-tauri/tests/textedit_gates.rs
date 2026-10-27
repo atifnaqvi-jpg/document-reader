@@ -394,19 +394,21 @@ fn wider_after_substitute_refuses_with_substitute_metrics() {
     );
 }
 
-// --- MECH-B absence: non-WinAnsi is not coverable -------------------------------
+// --- MECH-B: non-WinAnsi text is embedded, not refused --------------------------
 
-/// §6 / MECH-B: a replacement needing a glyph outside WinAnsi (an em-dash, a typographic
-/// arrow) can be supplied by neither the subset nor any standard-14 substitute, so it
-/// refuses `GLYPHS_NOT_COVERABLE` — the documented case for MECH-B.
+/// §6 / MECH-B: a replacement needing a glyph outside WinAnsi is now set by an embedded subset.
+///
+/// This test previously asserted `GLYPHS_NOT_COVERABLE` for an em dash and an arrow, which was
+/// the documented behaviour while no subset writer existed. Both characters are in the bundled
+/// faces, so refusing them would now be a regression: the edit must land and name the face it
+/// wrote.
 #[test]
-fn non_winansi_replacement_is_not_coverable() {
+fn non_winansi_replacement_is_embedded() {
     let mut document = load(&fixture("non-winansi-replacement.pdf"));
     let run = first_run(&document, 0);
     assert_eq!(run.text, "HI");
 
-    // U+2014 EM DASH and U+2192 RIGHTWARDS ARROW have no WinAnsi code.
-    let error = edit_with(
+    let outcome = edit_with(
         &mut document,
         0,
         run.id,
@@ -415,7 +417,33 @@ fn non_winansi_replacement_is_not_coverable() {
         100.0,
         5.0,
     )
-    .expect_err("a non-WinAnsi replacement cannot be covered");
+    .expect("an em dash and an arrow are both in the bundled faces");
+
+    let written = outcome
+        .substitution
+        .as_deref()
+        .expect("the run's own subset cannot set either character, so MECH-B fires");
+    assert!(
+        written.contains('+'),
+        "the disclosure must name the written subset, not the family: {written:?}"
+    );
+    assert!(
+        outcome
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains(written)),
+        "the note must name the face in the file: {:?}",
+        outcome.note
+    );
+}
+
+/// A glyph no bundled face carries still refuses with the permanent code.
+#[test]
+fn cjk_replacement_is_not_coverable() {
+    let mut document = load(&fixture("non-winansi-replacement.pdf"));
+    let run = first_run(&document, 0);
+    let error = edit_with(&mut document, 0, run.id, "HI", "H\u{6f22}", 100.0, 5.0)
+        .expect_err("the bundle ships Latin faces only");
     assert_eq!(error.code(), "GLYPHS_NOT_COVERABLE");
     assert!(
         error.to_string().contains("annotation tools to add a note"),

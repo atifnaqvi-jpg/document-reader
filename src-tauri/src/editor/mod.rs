@@ -4,6 +4,7 @@
 pub mod afm;
 pub mod annotate;
 pub mod cid;
+pub mod embed;
 pub mod events;
 pub mod export;
 pub mod gc;
