@@ -166,6 +166,20 @@ broken implementation would return; if it would return the same thing, the test 
 rehearsal. Assert the *precondition* too (`has_to_unicode(...)`), so a fixture that fails to
 parse fails loudly rather than passing by accident.
 
+Two classes of guard, two kinds of evidence:
+- compiled-in: the Compiling line is required; a mutant that was not
+  built cannot have run.
+- runtime-read: Compiling is neither required nor evidence. Declare the
+  path with MUTATE_RUNTIME_READ and let the harness check mtime, not
+  the build log. A verdict that cannot distinguish stale from fresh
+  must say so in the log, every time.
+A verification tool that cannot report its own blind spots is itself
+unverified.
+
+57 guards are in the runtime-read class (48 of them reading repo config, docs or source
+rather than fixtures). Before the class existed, each was either an exit-4 false alarm on a
+correct run or a silently accepted verdict.
+
 ## PDFium in tests
 
 Any test calling `PdfProvider::*` must carry `#[ignore]` and be run with the library present:
