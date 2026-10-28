@@ -152,6 +152,47 @@ fn attach_condition(text: &str) -> String {
     panic!("the attach step has no `if:` guard, so a workflow_dispatch run would try to publish");
 }
 
+/// The `if:` of the `build-windows` job, if it has one. A job-level condition is invisible to
+/// `upload_condition`: the upload step is still written without an `if:`, it just never runs.
+fn build_job_condition(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.trim_end() == "  build-windows:")
+        .expect("the workflow has no `build-windows` job");
+    for line in &lines[start + 1..] {
+        if line.starts_with("  ") && !line.starts_with("   ") && !line.trim().is_empty() {
+            break;
+        }
+        if let Some(rest) = line.trim_start().strip_prefix("if:") {
+            if line.starts_with("    ") && !line.starts_with("     ") {
+                return Some(rest.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The `if:` of the step named `Upload installer artifact`, if it has one. Unlike the attach
+/// step this must be `None`: a dispatch run is only build-only because this upload runs.
+fn upload_condition(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.contains("name: Upload installer artifact"))
+        .expect("the workflow has no step named `Upload installer artifact`");
+    for line in &lines[start + 1..] {
+        let item = line.trim();
+        if let Some(rest) = item.strip_prefix("if:") {
+            return Some(rest.trim().to_string());
+        }
+        if line.starts_with("      - ") {
+            break;
+        }
+    }
+    None
+}
+
 /// Evaluates the condition as a disjunction of `startsWith(github.ref, '<prefix>')` terms.
 /// Anything else panics: this test only claims to understand the shape the workflow ships.
 fn attach_accepts(condition: &str, git_ref: &str) -> bool {
@@ -275,6 +316,30 @@ fn a_dispatch_run_on_a_branch_does_not_publish_a_release() {
     assert!(
         !attach_accepts(&condition, "refs/heads/p2-windows-test"),
         "`if: {condition}` publishes on a branch ref, but only tag runs should create a release"
+    );
+}
+
+/// The build-only dispatch path needs the job to run at all. A job-level `if:` would leave the
+/// upload step looking unconditional in the text while never executing it.
+#[test]
+fn the_windows_build_job_is_unconditional() {
+    assert!(
+        build_job_condition(&workflow()).is_none(),
+        "the build-windows job has an `if:` condition, so a workflow_dispatch run would build \
+         no installer; the upload step's own condition would still read as clean"
+    );
+}
+
+/// The dispatch run is the only way to get an installer without publishing. That property
+/// lives entirely in the upload step running unconditionally, and the attach guard cannot
+/// see it: an `if:` added here would make every dispatch produce no artifact while
+/// `a_dispatch_run_on_a_branch_does_not_publish_a_release` stayed green.
+#[test]
+fn the_installer_upload_step_is_unconditional() {
+    assert!(
+        upload_condition(&workflow()).is_none(),
+        "the upload step has an `if:` condition, so a workflow_dispatch run would upload no \
+         installer and the build-only path would silently disappear"
     );
 }
 
