@@ -18,12 +18,37 @@
 # Usage:
 #   scripts/mutate.sh <cargo-test-args...>
 #
+#   MUTATE_RUNTIME_READ=<path>   the guard reads this file at run time (see below)
+#   MUTATE_TARGET=<path>         the file the caller mutated, for the evidence record
+#   MUTATE_ALLOW_CACHED=1        harness self-test only; never a verdict
+#   MUTATE_TIMEOUT=<seconds>     internal run budget; opts in to the TIMEOUT verdict
+#   MUTATE_TIMEOUT_CONFIRM=<s>   budget for the run that separates a hang from a slow test
+#                                (default: three times MUTATE_TIMEOUT)
+#
 # Run it after applying a mutant to a file the guard reads. It exits:
 #   0  the mutant compiled and the tests failed  -> caught, as intended
 #   1  the tests passed                          -> SURVIVED: coverage finding
 #   2  the mutant did not compile               -> MEASUREMENT ERROR: not a catch
 #   3  no summary line although the build was clean -> MEASUREMENT ERROR
-#   4  freshness could not be established       -> MEASUREMENT ERROR: stale or undecidable
+#   4  freshness could not be established, or the build did not finish
+#                                               -> MEASUREMENT ERROR: stale or undecidable
+#   5  the run exceeded MUTATE_TIMEOUT          -> TIMEOUT: the walk did not terminate
+#
+# TIMEOUT is a verdict, not a measurement error, because it is the one outcome in which the
+# mutant is known to have compiled, known to have run, and the symptom *is* non-termination.
+# A guard that removes a termination check is caught by hanging, and no summary line will ever
+# say so. It is distinguished from a slow-but-terminating run by the only thing that can
+# distinguish them from outside: the caller's declared budget was exceeded while a named test
+# was in flight. That budget is the opt-in; there is no second variable naming the expected
+# test, because the in-flight test is already recorded on the record and the identity of the
+# mutant is already declared by MUTATE_TARGET.
+#
+# MUTATE_TIMEOUT=<seconds> opts in. Unset means no internal budget and the behaviour is
+# unchanged. The clock does not start when this script does: it starts at cargo's first
+# `Finished` line, so neither a cold build nor the crate's own compile is charged to the run.
+# Until that line appears the run is in phase=build, where a derived ceiling (twenty times the
+# run budget, never below ten minutes) applies, and exceeding it is a MEASUREMENT ERROR --
+# a build that did not finish says nothing about the mutant.
 #
 # Two classes of guard, and the distinction is load-bearing:
 #
@@ -80,6 +105,128 @@ fi
 
 log=$(mktemp)
 
+# The run budget, and what was observed when it was armed. Empty TIMEOUT_PHASE means the run
+# finished on its own.
+BUDGET="${MUTATE_TIMEOUT:-}"
+if [ -n "$BUDGET" ] && ! [[ "$BUDGET" =~ ^[0-9]+$ ]]; then
+    echo "MUTATE_TIMEOUT must be a whole number of seconds, got: $BUDGET" >&2
+    exit 64
+fi
+TIMEOUT_PHASE=""
+KILL_SIGNAL=""
+BUDGET_START_SECONDS=""
+BUDGET_MARKER=""
+TIMEOUT_LAST_TEST=""
+TIMEOUT_REPORTED=""
+TIMEOUT_SUITES=""
+CARGO_PID=""
+
+# Which named test was in flight, from libtest's own lines. Only tests that already finished are
+# visible: libtest writes `test NAME ... ` with no newline and flushes at the verdict, so a test
+# that never returns leaves nothing readable in a redirected log. `last_test` is therefore the
+# last one to *complete*, and a TIMEOUT means the hang is in the next one, or in the binary before
+# it printed. The count is the progress measure; the name is a lower bound on where the run was.
+last_test_name() {
+    grep -oE '^test [A-Za-z0-9_:]+ \.\.\.' "$1" 2>/dev/null | tail -1 \
+        | sed -E 's/^test //; s/[[:space:]]*\.\.\.[[:space:]]*$//'
+}
+
+tests_reported() {
+    grep -cE '^test [A-Za-z0-9_:]+ \.\.\. (ok|FAILED|ignored)' "$1" 2>/dev/null || true
+}
+
+# The running-test header line, when the suite got far enough to print one. `running 1 test`
+# followed by no completed test is a *different* shape from a run that never started, and it is
+# the only in-flight statement the log carries.
+suite_started() {
+    grep -cE '^running [0-9]+ tests?$' "$1" 2>/dev/null || true
+}
+
+# The first `Finished` line is the build's own completion statement: `Compiling
+# document-reader` is printed when the crate *starts* compiling, so arming there would charge
+# the crate's own compile time to the run budget. Before `Finished` the run is in phase=build
+# and only the derived ceiling applies.
+budget_marker() {
+    grep -m1 -E '^ *Finished ' "$1" 2>/dev/null
+}
+
+# Kills cargo and its children, not a named process pattern.
+terminate_tree() {
+    local sig="$1" pid="$2" kid grandkid
+    for kid in $(ps -o pid= --ppid "$pid" 2>/dev/null); do
+        for grandkid in $(ps -o pid= --ppid "$kid" 2>/dev/null); do
+            kill -s "$sig" "$grandkid" 2>/dev/null
+        done
+        kill -s "$sig" "$kid" 2>/dev/null
+    done
+    kill -s "$sig" "$pid" 2>/dev/null
+}
+
+# Runs the suite under the declared budget. The clock is armed by cargo's build-complete line,
+# not by this script's start, so a cold build cannot consume the run budget: before that line
+# only a derived build ceiling applies (twenty times the run budget, never below ten minutes).
+# The log is a file that grows, so the marker is re-read on every poll -- that is how a streamed
+# build is observed without a pipe the harness would have to drain.
+run_under_budget() {
+    local budget="$1" logfile="$2"
+    shift 2
+    local elapsed start_seconds=0 build_ceiling=600
+    if [ -n "$budget" ]; then
+        local derived=$((budget * 20))
+        [ "$derived" -gt "$build_ceiling" ] && build_ceiling=$derived
+        echo "BUDGET: ${budget}s run budget, build ceiling ${build_ceiling}s, armed at the first build-complete line" >&2
+    fi
+
+    cargo test --release "$@" >"$logfile" 2>&1 &
+    CARGO_PID=$!
+
+    while kill -0 "$CARGO_PID" 2>/dev/null; do
+        sleep 1
+        elapsed=$SECONDS
+
+        if [ -n "$budget" ] && [ -z "$BUDGET_START_SECONDS" ]; then
+            BUDGET_MARKER=$(budget_marker "$logfile")
+            if [ -n "$BUDGET_MARKER" ]; then
+                BUDGET_START_SECONDS=$elapsed
+                start_seconds=$elapsed
+                echo "BUDGET: run clock armed after ${elapsed}s at: ${BUDGET_MARKER}" >&2
+            elif [ "$elapsed" -ge "$build_ceiling" ]; then
+                TIMEOUT_PHASE="build"
+                break
+            fi
+        elif [ -n "$budget" ] && [ $((elapsed - start_seconds)) -ge "$budget" ]; then
+            TIMEOUT_PHASE="run"
+            break
+        fi
+    done
+
+    if [ -n "$TIMEOUT_PHASE" ]; then
+        # Captured before the kill, because the log stops changing when the process dies.
+        TIMEOUT_LAST_TEST=$(last_test_name "$logfile")
+        TIMEOUT_REPORTED=$(tests_reported "$logfile")
+        TIMEOUT_SUITES=$(suite_started "$logfile")
+        if [ "$TIMEOUT_PHASE" = "build" ]; then
+            echo "BUDGET: the build exceeded ${build_ceiling}s; killing it." >&2
+        else
+            echo "BUDGET: ${budget}s elapsed after the build; killing the run." >&2
+        fi
+        terminate_tree TERM "$CARGO_PID"
+        KILL_SIGNAL="TERM"
+        local grace=0
+        while kill -0 "$CARGO_PID" 2>/dev/null && [ "$grace" -lt 10 ]; do
+            sleep 1
+            grace=$((grace + 1))
+        done
+        if kill -0 "$CARGO_PID" 2>/dev/null; then
+            terminate_tree KILL "$CARGO_PID"
+            KILL_SIGNAL="KILL(after TERM)"
+        fi
+    fi
+
+    wait "$CARGO_PID"
+    status=$?
+}
+
 # Durable evidence trail. The mktemp log above is still the working buffer, but it is deleted
 # on exit, so until this existed no mutation verdict outlived the shell that produced it: the
 # only surviving record was whatever the caller happened to paste into a history file. Append
@@ -129,6 +276,33 @@ record_evidence() {
             printf 'RUNTIME_READ: no Compiling line is required and its absence is not evidence of staleness.\n'
         fi
         printf 'cached_override: %s\n' "${MUTATE_ALLOW_CACHED:-0}"
+        if [ -n "$TIMEOUT_PHASE" ]; then
+            printf 'budget: %ss phase=%s signal=%s\n' "$BUDGET" "$TIMEOUT_PHASE" "$KILL_SIGNAL"
+            printf 'budget_armed: %s\n' "${BUDGET_MARKER:-<never; build did not complete>}"
+            printf 'suites_started: %s\n' "${TIMEOUT_SUITES:-0}"
+            printf 'last_test_completed: %s\n' "${TIMEOUT_LAST_TEST:-<none>}"
+            printf 'tests_reported: %s\n' "${TIMEOUT_REPORTED:-0}"
+            if [ -n "${TIMEOUT_CONF_S:-}" ]; then
+                printf 'confirmation_budget: %ss outcome=%s\n' "$TIMEOUT_CONF_S" "${TIMEOUT_CONF_OUTCOME:-unknown}"
+            fi
+            if [ "$TIMEOUT_PHASE" = "run" ]; then
+                printf 'TIMEOUT_CLAIM: verdict=TIMEOUT rests on TWO runs, %ss and %ss,\n' "$BUDGET" "${TIMEOUT_CONF_S:-?}"
+                printf 'TIMEOUT_CLAIM: each with the build complete (%s) and no summary line.\n' "$BUDGET_MARKER"
+                printf 'TIMEOUT_CLAIM: A slow suite terminates at the larger budget and reports; this one did not.\n'
+                printf 'TIMEOUT_CLAIM: Progress in the redirect cannot say which test hung -- libtest flushes a header\n'
+                printf 'TIMEOUT_CLAIM: only at its verdict -- so the identity of the hung test is NOT claimed here.\n'
+                printf 'TIMEOUT_CLAIM: last_test_completed is the last one that returned. Pair with MUTATE_TARGET.\n'
+            elif [ "$TIMEOUT_PHASE" = "stale" ]; then
+                printf 'TIMEOUT_CLAIM: the run hung, but cargo never compiled document-reader, so the\n'
+                printf 'TIMEOUT_CLAIM: binary may not have contained the mutant. Not a catch.\n'
+            elif [ "$TIMEOUT_PHASE" = "slow" ]; then
+                printf 'TIMEOUT_CLAIM: the run exceeded %ss but the confirmation run completed.\n' "$BUDGET"
+                printf 'TIMEOUT_CLAIM: verdict is MEASUREMENT_ERROR, not TIMEOUT: slowness, not non-termination.\n'
+            else
+                printf 'TIMEOUT_CLAIM: the build never completed, so no test ran and nothing about the\n'
+                printf 'TIMEOUT_CLAIM: mutant was observed. This is a measurement error, not a catch.\n'
+            fi
+        fi
         printf 'diff:\n'
         git -C "$REPO_ROOT" --no-pager diff --no-color -- "${MUTATE_TARGET:-}" 2>/dev/null | sed 's/^/  /'
         printf 'end\n\n'
@@ -152,8 +326,77 @@ artifact() {
         -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-
 }
 
-cargo test --release "$@" >"$log" 2>&1
-status=$?
+TIMEOUT_CONFIRM_S="${MUTATE_TIMEOUT_CONFIRM:-}"
+run_under_budget "$BUDGET" "$log" "$@"
+
+# A timeout is classified before anything else, because a hung run has no summary line and would
+# otherwise be reported as a missing one. The build phase is separated first: a build that did
+# not finish says nothing about the mutant.
+if [ "$TIMEOUT_PHASE" = "build" ]; then
+    echo "MEASUREMENT ERROR: the build did not finish inside ${BUDGET}s x 20, so no test ran." >&2
+    echo "Raise MUTATE_TIMEOUT or warm the build cache; nothing about the mutant was observed." >&2
+    STALE_BRANCH="timeout_during_build"
+    record_evidence "MEASUREMENT_ERROR:timeout_during_build" 4
+    exit 4
+fi
+
+if [ "$TIMEOUT_PHASE" = "run" ] && ! grep -qE '^test result:' "$log"; then
+    # The same freshness rule the passing paths use. A hang is only evidence if the binary that
+    # hung contained the mutant, and for a compiled-in guard the only proof of that is cargo's
+    # own `Compiling document-reader`. Checked on the FIRST log: the confirmation run is
+    # legitimately cached, so its silence is expected and is not evidence either way.
+    if [ "$RT_CLASS" = "compiled-in" ] && [ "${MUTATE_ALLOW_CACHED:-0}" != "1" ] \
+        && ! grep -qE '^ *Compiling document-reader' "$log"; then
+        echo "MEASUREMENT ERROR: the run hung, but cargo never compiled document-reader," >&2
+        echo "so the binary that hung may not contain the mutant. Touch the mutated file and" >&2
+        echo "re-run; if you meant to test the harness itself, set MUTATE_ALLOW_CACHED=1." >&2
+        STALE_BRANCH="timeout_but_no_compile"
+        TIMEOUT_PHASE="stale"
+        record_evidence "MEASUREMENT_ERROR:timeout_but_no_compile" 4
+        exit 4
+    fi
+
+    # Progress in the log cannot separate a hang from a slow test: libtest flushes a test header
+    # only at its verdict, so a test that never returns and a test that is merely slow both leave
+    # one `running N test` line and nothing else. The only sound discriminator is a second run at
+    # a larger budget: a slow test terminates and reports, a hang does not, at any budget.
+    confirm="${TIMEOUT_CONFIRM_S:-$((BUDGET * 3))}"
+    echo "BUDGET: first run exceeded ${BUDGET}s with ${TIMEOUT_REPORTED:-0} completed test(s)."
+    echo "BUDGET: confirming at ${confirm}s; a slow test terminates there, a hang does not."
+    FIRST_KILL="$KILL_SIGNAL"
+    FIRST_REPORTED="$TIMEOUT_REPORTED"
+    FIRST_LAST="$TIMEOUT_LAST_TEST"
+    FIRST_SUITES="$TIMEOUT_SUITES"
+    TIMEOUT_PHASE=""
+    KILL_SIGNAL=""
+    BUDGET_START_SECONDS=""
+    BUDGET_MARKER=""
+    confirm_log=$(mktemp)
+    run_under_budget "$confirm" "$confirm_log" "$@"
+    if [ -z "$TIMEOUT_PHASE" ] && grep -qE '^test result:' "$confirm_log"; then
+        echo "MEASUREMENT ERROR: the run exceeded ${BUDGET}s but completed inside ${confirm}s." >&2
+        echo "That is a slow test, not a removed termination guard: nothing was proved about" >&2
+        echo "non-termination. Raise MUTATE_TIMEOUT above the suite's real cost and re-run." >&2
+        grep -E '^test result:' "$confirm_log" | tail -1 >&2
+        STALE_BRANCH="slow_not_hung"
+        TIMEOUT_PHASE="slow"
+        TIMEOUT_CONF_S="$confirm"
+        TIMEOUT_CONF_OUTCOME="completed"
+        record_evidence "MEASUREMENT_ERROR:slow_not_hung" 3
+        rm -f "$confirm_log"
+        exit 3
+    fi
+    echo "TIMEOUT: the mutant compiled, the run began, and it exceeded both ${BUDGET}s and ${confirm}s."
+    echo "First run: ${FIRST_SUITES:-0} suite(s) started, ${FIRST_REPORTED:-0} test(s) completed, last completed ${FIRST_LAST:-<none>}, killed by ${FIRST_KILL}."
+    echo "Confirmation run: no summary line at ${confirm}s either."
+    echo "Both runs share one shape and only non-termination explains it. This is a removed"
+    echo "termination guard caught by hanging, not a slow suite."
+    TIMEOUT_CONF_S="$confirm"
+    TIMEOUT_CONF_OUTCOME="no_summary_at_${confirm}s"
+    record_evidence "TIMEOUT" 5
+    rm -f "$confirm_log"
+    exit 5
+fi
 
 # Only *compilation* failures count. `error: test failed, to rerun pass ...` is the normal
 # footer of a caught mutant, so matching a bare `^error:` misclassifies a real catch as a
