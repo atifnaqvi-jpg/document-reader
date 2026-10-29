@@ -294,3 +294,112 @@ fn editing_the_committed_two_draw_fixture_saves_a_reloadable_clone() {
         2
     );
 }
+
+// --- P2.7.7: the PDFium-side walk --------------------------------------------
+//
+// These are the tests `xobject_fixtures.rs` was blind to: every assertion above reads the
+// fixtures through **lopdf**, so a production picker that saw no runs at all still passed.
+// These read the same files through PDFium, the reader the picker actually uses.
+
+use document_reader_lib::editor::runmetrics;
+use document_reader_lib::provider::DocumentHandles;
+
+fn pdfium_walk(name: &str) -> runmetrics::PageRuns {
+    let path = fixture(name);
+    DocumentHandles::new()
+        .with_document(&path, None, |document| {
+            runmetrics::page_runs_walked(document, 0, &path)
+        })
+        .expect("PDFium walk failed")
+}
+
+/// The form's child bounds are in the form's space, so the second draw's text must land where
+/// the second draw is, not where the first one is.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn the_recursive_walk_maps_a_form_box_into_page_space() {
+    let walked = pdfium_walk("xobject-two-draws.pdf");
+    assert_eq!(walked.runs.len(), 2, "both draws carry text: {walked:?}");
+    let first = &walked.runs[0];
+    let second = &walked.runs[1];
+    assert_eq!(first.text.trim(), "ALPHA");
+    assert_eq!(second.text.trim(), "ALPHA");
+    // The second draw is translated by `1 0 0 1 0 -100 cm`. PDFium reports both children at
+    // the same y, so a walk that emits the child box unchanged makes these two identical.
+    assert!(
+        (first.y0 - second.y0 - 100.0).abs() < 0.01,
+        "second draw must sit 100pt below the first: {} vs {}",
+        first.y0,
+        second.y0
+    );
+    assert!((first.y0 - 700.0).abs() < 0.5, "first draw keeps its own y");
+}
+
+/// `emit-at-visit` and the order `page.text()` reports must agree, or pairing aligns fragments
+/// to the wrong character window.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn the_walk_visits_runs_in_the_order_the_page_text_reports_them() {
+    let walked = pdfium_walk("xobject-interleaved.pdf");
+    let joined: String = walked
+        .runs
+        .iter()
+        .map(|run| run.text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        joined, "BEFORE ALPHA AFTER",
+        "a walk that emits a form after its neighbours reorders this: {walked:?}"
+    );
+
+    let path = fixture("xobject-interleaved.pdf");
+    let text = DocumentHandles::new()
+        .with_document(&path, None, |document| {
+            Ok::<_, document_reader_lib::model::AppError>(
+                document
+                    .pages()
+                    .get(0)
+                    .map_err(|e| document_reader_lib::model::AppError::Other(e.to_string()))?
+                    .text()
+                    .map_err(|e| document_reader_lib::model::AppError::Other(e.to_string()))?
+                    .all()
+                    .to_string(),
+            )
+        })
+        .unwrap();
+    let rendered: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        rendered.starts_with(&joined),
+        "walk order {joined:?} must be a prefix of PDFium's own {rendered:?}"
+    );
+}
+
+/// The cap is the only termination guard. `xobject-depth-9` must reach the text at depth 8 and
+/// refuse the draw one level deeper; a self-drawing form must stop at the cap rather than hang.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn the_walk_stops_at_the_cap_and_a_self_drawing_form_terminates() {
+    let deep = pdfium_walk("xobject-depth-9.pdf");
+    assert!(
+        deep.runs.iter().any(|run| run.text.trim() == "EDGE"),
+        "depth 8 is within the cap and must be emitted: {deep:?}"
+    );
+    assert!(
+        !deep.runs.iter().any(|run| run.text.trim() == "ALPHA"),
+        "depth 9 is past the cap and must not be emitted"
+    );
+    assert_eq!(
+        deep.refusals,
+        vec![document_reader_lib::editor::textlocate::XObjectRefusal::Depth],
+        "the cap must report itself as Depth, once"
+    );
+
+    // Reaching this assertion at all is the cycle half: the walk returned.
+    let cycle = pdfium_walk("xobject-cycle.pdf");
+    assert!(cycle.runs.is_empty(), "a self-drawing form has no text");
+    assert_eq!(
+        cycle.refusals,
+        vec![document_reader_lib::editor::textlocate::XObjectRefusal::Depth],
+        "a self-drawing form terminates at the cap, not by object identity"
+    );
+}

@@ -194,6 +194,10 @@ fn main() {
             testpdf::bytes(&testpdf::xobject_depth_nine()),
         ),
         (
+            "xobject-interleaved.pdf",
+            testpdf::bytes(&testpdf::xobject_interleaved()),
+        ),
+        (
             "xobject-shared-resources.pdf",
             testpdf::bytes(&testpdf::xobject_shared_resources()),
         ),

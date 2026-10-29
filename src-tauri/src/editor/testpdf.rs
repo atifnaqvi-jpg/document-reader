@@ -335,8 +335,33 @@ fn cid_page(cmap: &[u8]) -> Document {
 pub fn compressed_program_cid_page(program_glyphs: &[char]) -> Document {
     let mut document = cid_tounicode_page();
     let page_id = document.get_pages().values().next().copied().unwrap();
-    let font =
-        crate::editor::textlocate::font_dictionary_at(&document, page_id, &[], b"F1").unwrap();
+    // `font_dictionary_at` is `pub(crate)`, so this `#[path]`-included module cannot call it.
+    // The page-level lookup it performs is spelled out here; `font_dictionary_at` is what the
+    // product uses and what the tests exercise, so this is a fixture-side duplicate of a
+    // one-level lookup, not a second implementation of resolution.
+    let font = {
+        let (inline, referenced) = document.get_page_resources(page_id).unwrap();
+        let mut dictionaries: Vec<&lopdf::Dictionary> = inline.into_iter().collect();
+        dictionaries.extend(
+            referenced
+                .iter()
+                .filter_map(|id| document.get_dictionary(*id).ok()),
+        );
+        dictionaries
+            .into_iter()
+            .find_map(|resources| {
+                let fonts = resources.get(b"Font").ok()?;
+                let fonts = document.dereference(fonts).ok()?.1.as_dict().ok()?;
+                document
+                    .dereference(fonts.get(b"F1").ok()?)
+                    .ok()?
+                    .1
+                    .as_dict()
+                    .ok()
+                    .cloned()
+            })
+            .unwrap()
+    };
     let descendant_id = font.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
         .as_reference()
         .unwrap();
@@ -564,6 +589,17 @@ fn form_run(text: &str) -> Vec<Operation> {
         Operation::new("BT", vec![]),
         Operation::new("Tf", vec!["F1".into(), 24.into()]),
         Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("Tj", vec![Object::string_literal(text)]),
+        Operation::new("ET", vec![]),
+    ]
+}
+
+/// One 24pt run of `text` at `y`, drawn **on the page** rather than inside a form.
+fn text_at(text: &str, y: f64) -> Vec<Operation> {
+    vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), y.into()]),
         Operation::new("Tj", vec![Object::string_literal(text)]),
         Operation::new("ET", vec![]),
     ]
@@ -808,6 +844,29 @@ pub fn xobject_two_draws() -> Document {
                 ],
             ));
             operations.extend(draw_form("X1"));
+            operations
+        }],
+    )
+}
+
+/// `xobject-interleaved.pdf`: page-level text, then a form, then page-level text.
+///
+/// The order is the whole point. A walk that emits a form's children before the text that
+/// precedes the draw, or after the text that follows it, produces a run order that no longer
+/// matches `page.text()`; the picker would then pair each fragment to the wrong character
+/// window. `emit-at-visit` is what keeps the two orders equal, and this fixture is the only
+/// one whose shape can tell the difference.
+pub fn xobject_interleaved() -> Document {
+    xobject_document(
+        vec![(
+            "X1".into(),
+            form_run("ALPHA"),
+            FormResources::Own(Vec::new()),
+        )],
+        vec![{
+            let mut operations = text_at("BEFORE", 600.0);
+            operations.extend(draw_form("X1"));
+            operations.extend(text_at("AFTER", 500.0));
             operations
         }],
     )

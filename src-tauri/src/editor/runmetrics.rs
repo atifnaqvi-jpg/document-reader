@@ -24,7 +24,26 @@ use std::path::Path;
 use pdfium_render::prelude::*;
 
 use crate::editor::geometry::{Point2, RunFrame};
+use crate::editor::textlocate::{XObjectRefusal, MAX_XOBJECT_DEPTH};
 use crate::model::AppError;
+
+/// One [PdfiumRun], plus the form draws the walk refused to enter.
+///
+/// PDFium keeps a form's child bounds in the form's **own** coordinate space; `bounds()` on a
+/// text object nested in a form is not a page rectangle. Measured on `xobject-two-draws.pdf`:
+/// the second draw sits 100pt lower on the page, and its child text still reports
+/// `(72.336, 700.0, 150.384, 717.232)` — the first draw's rectangle. The walk therefore carries
+/// the composed placement matrix and maps every child box through it, rather than emitting the
+/// child-space box as if it were page space.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageRuns {
+    /// Every non-empty text object reachable within [`MAX_XOBJECT_DEPTH`], in document order,
+    /// with its box mapped into page space.
+    pub runs: Vec<PdfiumRun>,
+    /// One entry per form the walk refused to enter, in document order. A refusal names a
+    /// *draw*, not a run, because the text inside it was never read.
+    pub refusals: Vec<XObjectRefusal>,
+}
 
 /// One text object as PDFium sees it, for the picker's display and hit-testing.
 ///
@@ -80,6 +99,25 @@ pub fn page_runs(
     page: u32,
     path: &Path,
 ) -> Result<Vec<PdfiumRun>, AppError> {
+    Ok(page_runs_walked(document, page, path)?.runs)
+}
+
+/// The same walk, reporting what it refused as well as what it found.
+///
+/// `page.objects().iter()` is the page's **own** object list: pdfium-render's
+/// `PdfPageObjects::iter` resolves through `FPDFPage_GetObject`, and a Form is yielded as one
+/// object whose children are reached only through `PdfPageXObjectFormObject::iter`
+/// (`FPDFFormObj_GetObject`). A page whose text is all drawn inside a form therefore reports
+/// zero runs without recursion — measured: the 2025 Steuerbelege document is 999 characters of
+/// text and one top-level form.
+///
+/// The walk is depth-first in document order and emits a run when it visits it, so the order
+/// matches the order PDFium flattens the same page into `page.text()`.
+pub fn page_runs_walked(
+    document: &PdfDocument<'_>,
+    page: u32,
+    path: &Path,
+) -> Result<PageRuns, AppError> {
     let page = document.pages().get(page as u16).map_err(|e| {
         AppError::Other(format!(
             "page {page} unavailable on {}: {e}",
@@ -87,34 +125,82 @@ pub fn page_runs(
         ))
     })?;
 
-    let mut runs = Vec::new();
-    for object in page.objects().iter() {
-        let Some(text_object) = object.as_text_object() else {
-            continue;
+    let mut collected = PageRuns::default();
+    collect_runs(page.objects(), 0, PdfMatrix::IDENTITY, &mut collected);
+    Ok(collected)
+}
+
+/// One level of the depth-first walk (P2.7.3 Q1, P2.7.7).
+///
+/// `placement` maps this collection's coordinate space into page space: identity at the page,
+/// and the parent's placement composed with each child form's own matrix below it. That
+/// composition is what makes a nested box usable — PDFium reports a form's child bounds in the
+/// form's space, and only the walk knows where that form was placed.
+///
+/// **Termination is the depth cap, not an identity check.** `pdfium-render` exposes no page
+/// object handle and no object equality (both `PdfPageObjectPrivate::object_handle` and the
+/// module holding it are `pub(crate)`), so a walk cannot tell "this form is already on the
+/// path" from "a different form placed at the same matrix". An identity-by-placement check was
+/// written and measured against the real document: the top-level form and the header form
+/// inside it are both identity-placed, so the check refused the header and deleted twenty real
+/// runs. The cap at [`MAX_XOBJECT_DEPTH`] bounds a self-drawing form just as well — it reaches
+/// the cap and reports [`XObjectRefusal::Depth`] — without ever confusing nesting for a cycle.
+///
+/// Runs and refusals are both emitted **at the point of visit**, so their order is document
+/// order across both arms.
+fn collect_runs<'a, T: PdfPageObjectsCommon<'a>>(
+    collection: &T,
+    depth: usize,
+    placement: PdfMatrix,
+    collected: &mut PageRuns,
+) {
+    for index in collection.as_range() {
+        let Ok(object) = collection.get(index) else {
+            return;
         };
-        let text = text_object.text();
-        if text.is_empty() {
+        if let Some(text_object) = object.as_text_object() {
+            let text = text_object.text();
+            if text.is_empty() {
+                continue;
+            }
+            let Ok(bounds) = object.bounds() else {
+                // An object with no bounds cannot be hit-tested or measured; skipping it is
+                // the honest choice rather than inventing a zero rect on the page origin.
+                continue;
+            };
+            // `transform` maps all four corners, so a flipped or rotated form yields the
+            // axis-aligned box that encloses the mapped glyphs rather than an inverted one.
+            let rect = bounds.transform(placement).to_rect();
+            collected.runs.push(PdfiumRun {
+                text,
+                font_name: text_object.font().family(),
+                font_size: text_object.unscaled_font_size().value,
+                x0: rect.left().value,
+                y0: rect.bottom().value,
+                x1: rect.right().value,
+                y1: rect.top().value,
+                width: rect.width().value,
+            });
             continue;
         }
-        let bounds = match object.bounds() {
-            Ok(bounds) => bounds,
-            // An object with no bounds cannot be hit-tested or measured; skipping it is
-            // the honest choice rather than inventing a zero rect that would sit on top
-            // of the page origin.
-            Err(_) => continue,
+        let Some(form) = object.as_x_object_form_object() else {
+            continue;
         };
-        runs.push(PdfiumRun {
-            text,
-            font_name: text_object.font().family(),
-            font_size: text_object.unscaled_font_size().value,
-            x0: bounds.left().value,
-            y0: bounds.bottom().value,
-            x1: bounds.right().value,
-            y1: bounds.top().value,
-            width: bounds.width().value,
-        });
+        // One step past the cap, not at it: `depth` counts the forms already entered, so a form
+        // at `depth == MAX_XOBJECT_DEPTH` is the deepest one whose children are in reach.
+        // `textlocate` states the same boundary as `xobject_path.len() >= MAX_XOBJECT_DEPTH`.
+        if depth >= MAX_XOBJECT_DEPTH {
+            collected.refusals.push(XObjectRefusal::Depth);
+            continue;
+        }
+        let Ok(matrix) = form.matrix() else {
+            collected.refusals.push(XObjectRefusal::Unlocatable);
+            continue;
+        };
+        // Row-vector convention: a child point is placed by its own matrix and then by the
+        // parent's, so the parent multiplies on the left.
+        collect_runs(form, depth + 1, placement.multiply(matrix), collected);
     }
-    Ok(runs)
 }
 
 /// One character of PDFium's **rendered** text grid (P2.4.3 T23a).

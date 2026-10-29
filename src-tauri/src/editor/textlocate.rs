@@ -182,6 +182,9 @@ pub enum XObjectRefusal {
     Depth,
     /// The form is already on the current path.
     Cycle,
+    /// PDFium reported no placement matrix for the form, so its children cannot be mapped into
+    /// page space. Emitting them with a child-space box would pair them to the wrong place.
+    Unlocatable,
 }
 
 impl XObjectRefusal {
@@ -195,6 +198,10 @@ impl XObjectRefusal {
             XObjectRefusal::Cycle => {
                 "this form draws itself, so its text cannot be walked; select a narrower range, or \
                  use the annotation tools to add a note"
+            }
+            XObjectRefusal::Unlocatable => {
+                "this text sits in a form the renderer cannot place on the page; select a \
+                 narrower range, or use the annotation tools to add a note"
             }
         }
     }
@@ -864,7 +871,13 @@ fn walk_level<'a>(
             // because `Td`/`TJ` arithmetic and every run-to-run comparison live there; this is
             // only for comparing against PDFium, which knows nothing of text space.
             let page_origin = walker.to_page(origin.0, origin.1);
-            let (advance_axis, up_axis, page_scale, mirrored, degenerate) = walker.axes();
+            let TextAxes {
+                advance: advance_axis,
+                up: up_axis,
+                scale: page_scale,
+                mirrored,
+                degenerate,
+            } = walker.axes();
 
             runs.push(RawRun {
                 id: RunId {
@@ -1286,7 +1299,7 @@ impl TextMatrixWalk {
     /// never reaches `advance` or `up`; computing handedness from the axes alone therefore
     /// calls PDFlib's `1 0 0 -1 0 841 cm` with `Tz -100` mirrored, although it renders upright
     /// (measured against poppler, four variants). A degenerate `Tz` has no handedness.
-    fn axes(&self) -> ((f32, f32), (f32, f32), Option<f32>, bool, bool) {
+    fn axes(&self) -> TextAxes {
         let m = self.composed();
         let unit = |x: f32, y: f32| {
             let length = (x * x + y * y).sqrt();
@@ -1317,7 +1330,13 @@ impl TextMatrixWalk {
         // either axis's direction. Zero collapses the pen, so there is no handedness to state.
         let degenerate = determinant.abs() <= f32::EPSILON || self.horizontal_scale == 0.0;
         let mirrored = !degenerate && determinant * self.horizontal_scale < 0.0;
-        (advance, up, scale, mirrored, degenerate)
+        TextAxes {
+            advance,
+            up,
+            scale,
+            mirrored,
+            degenerate,
+        }
     }
 
     /// The text rise (`Ts`) in force, in points.
@@ -1328,6 +1347,15 @@ impl TextMatrixWalk {
     fn rise(&self) -> f32 {
         self.rise
     }
+}
+
+/// The axes, page scale and handedness one text-matrix state resolves to (see `axes`).
+struct TextAxes {
+    advance: (f32, f32),
+    up: (f32, f32),
+    scale: Option<f32>,
+    mirrored: bool,
+    degenerate: bool,
 }
 
 /// Tracks the `BDC`/`BMC`/`EMC` stack across a page's operations (P2.7.1).

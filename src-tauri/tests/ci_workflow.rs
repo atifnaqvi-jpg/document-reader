@@ -312,8 +312,9 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
     );
     assert!(
-        tests_step.contains("ignored") && tests_step.contains("ne 76"),
-        "the Linux job must assert exactly the 76 known machine-dependent tests"
+        tests_step.contains("ignored") && tests_step.contains("ne 79"),
+        "the Linux job must assert exactly the 79 known machine-dependent tests: 76 from before
+         the Form XObject walk, plus the three PDFium-side walk tests it added"
     );
 }
 
@@ -365,8 +366,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 482 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 482. \
+        tests_step.contains(r#"if [ "$passed" -lt 489 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 489. \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }
