@@ -639,16 +639,30 @@ fn declared_rust_version() -> (u64, u64) {
 #[test]
 fn the_declared_msrv_can_build_the_locked_graph() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // `--offline` is deliberately absent. It was here first, and it made this guard report a
+    // registry-cache miss as an MSRV violation: the lock contains `android_system_properties`
+    // (via `iana-time-zone`, `cfg(target_os = "android")`), which a Linux runner never builds,
+    // so `--offline` refused to read its manifest and `metadata` failed on a tree whose MSRV
+    // was valid. Resolving the graph needs those target-conditional packages; `--locked` still
+    // pins every version, so allowing the fetch cannot drift the graph.
     let output = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--locked", "--offline"])
+        .args(["metadata", "--format-version", "1", "--locked"])
         .current_dir(&manifest)
         .output()
         .expect("cargo metadata must run; the guard cannot verify the graph without it");
-    assert!(
-        output.status.success(),
-        "cargo metadata --locked failed; the guard would otherwise pass on an empty graph: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+
+    // A graph that could not be resolved yields no verdict. That is still a failure -- a
+    // measurement error is not a pass -- but it must not read as an MSRV violation. Keeping
+    // the two distinct is the point: conflated, this test was red on every CI run while the
+    // declared floor was correct, which trains a reader to ignore it.
+    if !output.status.success() {
+        panic!(
+            "MEASUREMENT: could not resolve the locked dependency graph, so no MSRV verdict \
+             was produced. This is a network or registry-cache failure, NOT a finding about \
+             rust-version. cargo metadata --locked stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     let metadata: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("cargo metadata must emit valid JSON");
