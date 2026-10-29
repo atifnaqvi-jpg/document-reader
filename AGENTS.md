@@ -1,5 +1,17 @@
 # Agent instructions — Document Reader
 
+## First action: `cd` to the project directory before running any `git`
+
+An agent session starts in `/workspace/project/<conversation-id>`. That
+directory may be **empty**, and its **parent** `/workspace/project` is itself a git
+repository on branch `master` with **zero commits**. So a `git commit` run from the starting
+directory walks up, finds that parent repository, and silently creates its *first* commit — on a
+repository unrelated to this project, with no HEAD to compare against and nothing to show the
+mistake. It does not fail; it succeeds somewhere else. Always change into
+`/workspace/project/<project-id>` explicitly, and confirm with
+`git rev-parse --show-toplevel` that the top level is the project directory, before any status,
+diff, add or commit.
+
 ## Standing rule: `--include-ignored` must pass before a phase is marked `[x]`
 
 A phase is not complete until `cargo test -- --include-ignored` passes with PDFium available.
