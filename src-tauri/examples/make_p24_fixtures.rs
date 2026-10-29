@@ -201,6 +201,14 @@ fn main() {
             "xobject-shared-resources.pdf",
             testpdf::bytes(&testpdf::xobject_shared_resources()),
         ),
+        (
+            "xobject-subset-font.pdf",
+            testpdf::bytes(&testpdf::xobject_subset_font()),
+        ),
+        (
+            "xobject-subset-font-siblings.pdf",
+            testpdf::bytes(&testpdf::xobject_subset_font_siblings()),
+        ),
     ];
 
     for (name, bytes) in fixtures {

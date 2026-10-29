@@ -235,6 +235,138 @@ fn the_shared_resources_fixture_gives_both_forms_one_indirect_dictionary() {
     );
 }
 
+/// `xobject-subset-font`: the fixture whose *point* is that `/Resources` is **inline**. The
+/// committed bytes must carry the sibling and the subset font in one dictionary, or the
+/// regression test in `textedit` would be exercising a shape the artefact does not have.
+#[test]
+fn the_subset_font_fixture_declares_one_inline_dictionary_with_a_sibling() {
+    let document = load("xobject-subset-font.pdf");
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let form = testpdf_form(&document, page_id, "X1").expect("X1 is a form");
+    let resources = form
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .expect("X1 declares /Resources inline, not as a reference");
+
+    let font = resources
+        .get(b"Font")
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .and_then(|fonts| fonts.get(b"F1").ok())
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(_, object)| object.as_dict().ok())
+        .expect("the inline map names a font");
+    let base = font
+        .get(b"BaseFont")
+        .ok()
+        .and_then(|object| object.as_name().ok())
+        .unwrap_or_default();
+    assert!(
+        base.starts_with(b"ABCDEF+"),
+        "the font must be subset-flagged so the edit has to substitute: {:?}",
+        String::from_utf8_lossy(base)
+    );
+
+    let x2 = resources
+        .get(b"XObject")
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .and_then(|xobjects| xobjects.get(b"X2").ok())
+        .and_then(|object| object.as_reference().ok())
+        .expect("the same inline map names the sibling /X2");
+    assert!(
+        document.get_object(x2).is_ok(),
+        "the sibling is a real object, not a dangling name"
+    );
+
+    // The draw the sibling name exists for.
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let x1 = testpdf_form(&document, page_id, "X1").expect("X1");
+    let content = String::from_utf8_lossy(&x1.content);
+    assert!(
+        content.contains("/X2 Do"),
+        "X1 draws the sibling it declares: {content:?}"
+    );
+}
+
+fn testpdf_form<'a>(
+    document: &'a lopdf::Document,
+    page_id: lopdf::ObjectId,
+    name: &str,
+) -> Option<&'a lopdf::Stream> {
+    let (inline, referenced) = document.get_page_resources(page_id).ok()?;
+    let mut dictionaries: Vec<&lopdf::Dictionary> = inline.into_iter().collect();
+    dictionaries.extend(
+        referenced
+            .iter()
+            .filter_map(|id| document.get_dictionary(*id).ok()),
+    );
+    dictionaries.iter().find_map(|resources| {
+        resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|entry| document.dereference(entry).ok())
+            .and_then(|(_, object)| object.as_dict().ok())?
+            .get(name.as_bytes())
+            .ok()
+            .and_then(|object| document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_stream().ok())
+    })
+}
+
+/// `xobject-subset-font-siblings`: the committed bytes must name the subset font as `F1`, keep a
+/// standard face as `F2`, and *use* both. A fixture that declares `F2` but never draws through
+/// it would let the copy drop it without any test noticing.
+#[test]
+fn the_siblings_fixture_declares_and_uses_both_font_entries() {
+    let document = load("xobject-subset-font-siblings.pdf");
+    let page_id = textlocate::page_id(&document, 0).unwrap();
+    let form = testpdf_form(&document, page_id, "X1").expect("X1 is a form");
+    let fonts = form
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .and_then(|resources| resources.get(b"Font").ok())
+        .and_then(|object| object.as_dict().ok())
+        .expect("X1 declares an inline /Font map");
+
+    let base_of = |name: &[u8]| -> Vec<u8> {
+        fonts
+            .get(name)
+            .ok()
+            .and_then(|object| document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_dict().ok())
+            .and_then(|font| font.get(b"BaseFont").ok())
+            .and_then(|object| object.as_name().ok())
+            .unwrap_or_default()
+            .to_vec()
+    };
+    assert!(
+        base_of(b"F1").starts_with(b"ABCDEF+"),
+        "F1 is the subset-flagged face the edit must replace"
+    );
+    assert_eq!(
+        base_of(b"F2"),
+        b"Helvetica".to_vec(),
+        "F2 is a face the substitution has no reason to touch"
+    );
+
+    let located = runs(&document, 0);
+    let used: Vec<Vec<u8>> = located
+        .iter()
+        .filter(|run| run.text == "ALPHA" || run.text == "KEEPME")
+        .map(|run| run.font_key.clone())
+        .collect();
+    assert_eq!(
+        used,
+        vec![b"F1".to_vec(), b"F2".to_vec()],
+        "both entries are drawn, so dropping F2 breaks a live run"
+    );
+}
+
 /// The committed artefact must support the edit, not just the read: a draw is copied, saved,
 /// and re-read. This is the only test in the suite that goes through `Document::save` for a
 /// form edit, which is where a resource name that `renumber_objects` invalidated would show.

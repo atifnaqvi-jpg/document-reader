@@ -2598,6 +2598,11 @@ pub(crate) fn form_id_at(
 /// answered by who points at it, not by whether it is indirect — the same reasoning §5.1 uses
 /// for pages.
 fn resources_is_shared(document: &Document, resources_id: ObjectId) -> bool {
+    resources_holders(document, resources_id) != 1
+}
+
+/// How many dictionaries name `resources_id` as their `/Resources`.
+fn resources_holders(document: &Document, resources_id: ObjectId) -> usize {
     document
         .objects
         .values()
@@ -2609,7 +2614,6 @@ fn resources_is_shared(document: &Document, resources_id: ObjectId) -> bool {
                 == Some(resources_id)
         })
         .count()
-        != 1
 }
 
 /// Gives a form a private `/Resources` object, returning it for writing.
@@ -2618,24 +2622,41 @@ fn resources_is_shared(document: &Document, resources_id: ObjectId) -> bool {
 /// `/Properties` clone (Q3). The copy is unconditional at that point rather than share-counted
 /// on the *entry*: a resources dictionary is small, and failing to notice a second reader would
 /// recreate B-7 one level down. Idempotent, so two legs of one edit do not leave an orphan.
+///
+/// The source dictionary is whichever shape the form declares. A form may write `/Resources`
+/// as an indirect reference (what real producers do, and what
+/// `xobject-shared-resources.pdf` models) or **inline**, which is legal and is what every
+/// other §8 fixture does. Both are copied whole: the font substitution replaces one `/Font`
+/// entry, and `/XObject`, `/Properties`, `/ExtGState` and every other key survive verbatim.
+/// Copying only the reference form and falling back to an empty dictionary silently dropped
+/// those siblings from the clone, leaving `Do` operations pointing at names the private
+/// dictionary no longer defined.
 pub(crate) fn private_form_resources(
     document: &mut Document,
     form_id: ObjectId,
 ) -> Result<&mut Dictionary, AppError> {
-    let existing = form_dictionary(document, form_id)
-        .and_then(|form| form.get(b"Resources").ok())
-        .and_then(|object| object.as_reference().ok());
-    if let Some(resources_id) = existing {
+    let declared = form_dictionary(document, form_id).and_then(|form| form.get(b"Resources").ok());
+    let referenced = declared.and_then(|object| object.as_reference().ok());
+    if let Some(resources_id) = referenced {
         if !resources_is_shared(document, resources_id) {
             return document
                 .get_dictionary_mut(resources_id)
                 .map_err(|error| AppError::Other(format!("form resources unreadable: {error}")));
         }
     }
-    let copy = existing
-        .and_then(|resources_id| document.get_dictionary(resources_id).ok())
-        .cloned()
-        .unwrap_or_default();
+    let copy = match (referenced, declared) {
+        (Some(resources_id), _) => document
+            .get_dictionary(resources_id)
+            .map_err(|error| AppError::Other(format!("form resources unreadable: {error}")))?
+            .clone(),
+        (None, Some(Object::Dictionary(inline))) => inline.clone(),
+        (None, Some(_)) => {
+            return Err(AppError::Other(
+                "form resources are neither a reference nor a dictionary".to_string(),
+            ))
+        }
+        (None, None) => Dictionary::new(),
+    };
     let resources_id = document.add_object(copy);
     form_dictionary_mut(document, form_id)
         .ok_or_else(|| AppError::Other("form object unreadable".to_string()))?

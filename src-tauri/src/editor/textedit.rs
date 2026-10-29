@@ -4792,6 +4792,171 @@ mod tests {
         );
     }
 
+    /// Q3, inline branch: a form that declares `/Resources` **inline** and names a sibling
+    /// XObject must keep that sibling when a substitution forces a private copy.
+    ///
+    /// The copy used to be taken only from an indirect `/Resources`; an inline declaration fell
+    /// through to an empty dictionary, so the clone's `/X2 Do` named a resource the clone no
+    /// longer had. The draw still *rendered* here because the page also names `X2` and PDF
+    /// resources inherit, which is exactly why a text-only assertion would stay green: the test
+    /// has to look at the clone's dictionary, and at the operation that consumes the name.
+    #[test]
+    fn a_substitution_copies_an_inline_resources_dict_without_dropping_siblings() {
+        let mut document = testpdf::xobject_subset_font();
+        let page = page_id(&document, 0).unwrap();
+
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("X1's run is located");
+        let outcome = edit(
+            &mut document,
+            &request(&run, "BRAVO", 400.0, &measure_fixed(400.0)),
+        )
+        .unwrap();
+
+        let clone = testpdf::form_stream(&document, page, &["X1_edit1"]).expect("the clone");
+        let declared = clone
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|object| object.as_reference().ok())
+            .expect("the clone declares a private /Resources object");
+        assert_eq!(
+            Some(declared),
+            outcome
+                .inverse
+                .xobject_clones
+                .first()
+                .and_then(|clone| clone.cloned_resources),
+            "undo must drop the dictionary the edit actually created"
+        );
+        let resources = document.get_dictionary(declared).unwrap();
+
+        // The font the clone uses is the substitute, installed under the clone's own name.
+        let fonts = resources
+            .get(b"Font")
+            .ok()
+            .and_then(|object| object.as_dict().ok())
+            .expect("the copy keeps the /Font map");
+        assert!(
+            fonts.has(b"FS1"),
+            "the substitute is installed in the clone"
+        );
+
+        // The sibling survives, as an entry in the copied map rather than a re-derived one.
+        let xobjects = resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|object| object.as_dict().ok())
+            .expect("the copy keeps the form's /XObject map");
+        let x2 = xobjects
+            .get(b"X2")
+            .ok()
+            .and_then(|object| object.as_reference().ok())
+            .expect("/X2 is still named by the clone's resources");
+        // The original form keeps its own inline dictionary, so the entry can be compared with
+        // the one X1 still declares: the copy reuses the sibling, it does not re-create it.
+        let original_x2 = testpdf::form_stream(&document, page, &["X1"])
+            .and_then(|form| form.dict.get(b"Resources").ok())
+            .and_then(|object| object.as_dict().ok())
+            .and_then(|resources| resources.get(b"XObject").ok())
+            .and_then(|object| object.as_dict().ok())
+            .and_then(|xobjects| xobjects.get(b"X2").ok())
+            .and_then(|object| object.as_reference().ok())
+            .expect("X1's inline /XObject map names X2");
+        assert_eq!(
+            x2, original_x2,
+            "the copied entry points at the original sibling, not a new object"
+        );
+
+        // A `Do` that names it, so the assertion is about a live reference and not a stray key.
+        let clone_text = String::from_utf8_lossy(&clone.content).into_owned();
+        assert!(
+            clone_text.contains("/X2 Do"),
+            "the clone still draws the sibling: {clone_text:?}"
+        );
+        let located = textlocate::locate_runs(&document, page).unwrap();
+        assert_eq!(
+            located
+                .iter()
+                .find(|run| run.text == "BRAVO")
+                .expect("the sibling still resolves through the clone")
+                .id
+                .xobject_path
+                .first()
+                .map(|step| step.name.clone()),
+            Some(b"X1_edit1".to_vec()),
+            "BRAVO is reached through the clone, so the copied /XObject entry is the one used"
+        );
+    }
+
+    /// Q3, `/Font` siblings: substituting one entry must not rewrite the rest of the map.
+    ///
+    /// `X1` names the subset font as `F1` and a standard-14 face as `F2`, and draws through
+    /// both. Only `F1`'s run is edited; `F2` must survive **in the clone's own dictionary**,
+    /// pointing at the same face, or the clone's second run names a font it no longer defines.
+    #[test]
+    fn a_substitution_keeps_the_other_font_entries_of_an_inline_dict() {
+        let mut document = testpdf::xobject_subset_font_siblings();
+        let page = page_id(&document, 0).unwrap();
+
+        let run = textlocate::locate_runs(&document, page)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.text == "ALPHA")
+            .expect("X1's F1 run is located");
+        edit(
+            &mut document,
+            &request(&run, "BRAVO", 400.0, &measure_fixed(400.0)),
+        )
+        .unwrap();
+
+        let clone = testpdf::form_stream(&document, page, &["X1_edit1"]).expect("the clone");
+        let resources = clone
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|object| object.as_reference().ok())
+            .and_then(|id| document.get_dictionary(id).ok())
+            .expect("the clone declares a private /Resources object");
+        let fonts = resources
+            .get(b"Font")
+            .ok()
+            .and_then(|object| object.as_dict().ok())
+            .expect("the copy keeps the /Font map");
+
+        assert!(fonts.has(b"FS1"), "the edited run gets the substitute");
+
+        // `F2` is untouched: same face name, resolved through the clone's own dictionary.
+        let f2 = fonts
+            .get(b"F2")
+            .ok()
+            .and_then(|object| document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_dict().ok())
+            .expect("the sibling font entry survives the copy");
+        assert_eq!(
+            f2.get(b"BaseFont")
+                .ok()
+                .and_then(|object| object.as_name().ok()),
+            Some(b"Helvetica".as_slice()),
+            "the surviving entry is the same face, not a re-derived one"
+        );
+
+        // And the run that uses it still resolves, through the clone. The page declares no
+        // `/Font`, so this can only succeed through the clone's copied entry.
+        let located = textlocate::locate_runs(&document, page).unwrap();
+        assert_eq!(
+            located
+                .iter()
+                .find(|run| run.text == "KEEPME")
+                .expect("the F2 run is still reachable through the clone")
+                .font_key,
+            b"F2".to_vec()
+        );
+    }
+
     /// Q6/Q3: an undo after a **substitution** must remove the private `/Resources` too. The
     /// write path creates that dictionary lazily, so the inverse has to record what was actually
     /// made — recording nothing would leak one resources object per substitute-then-undo.

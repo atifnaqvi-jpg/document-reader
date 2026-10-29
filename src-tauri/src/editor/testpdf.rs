@@ -585,10 +585,15 @@ enum FormResources {
 
 /// The operations that draw one run through the resource name `F1`.
 fn form_run(text: &str) -> Vec<Operation> {
+    form_run_in(text, "F1", 700)
+}
+
+/// The operations that draw one run through a named resource, at a given baseline.
+fn form_run_in(text: &str, font: &str, y: i64) -> Vec<Operation> {
     vec![
         Operation::new("BT", vec![]),
-        Operation::new("Tf", vec!["F1".into(), 24.into()]),
-        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("Tf", vec![font.into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), y.into()]),
         Operation::new("Tj", vec![Object::string_literal(text)]),
         Operation::new("ET", vec![]),
     ]
@@ -931,15 +936,104 @@ pub fn xobject_shared_resources() -> Document {
 /// `xobject-subset-font.pdf`: `X1`'s own `/Resources` names a subset-flagged font, so the edit
 /// must substitute a standard-14 face (MECH-A) — the case that has to give the clone a
 /// **private** `/Resources` rather than write `FS1` into the page's or the form's dictionary.
+///
+/// `X1`'s dictionary is **inline** and names a sibling `/XObject` as well as the font. The
+/// private copy therefore has to carry `/XObject` over: dropping it leaves the clone's trailing
+/// `/X2 Do` naming nothing. Both branches of the copy matter — this fixture is the inline one,
+/// `xobject-shared-resources.pdf` is the indirect one.
 pub fn xobject_subset_font() -> Document {
+    let mut operations = form_run("ALPHA");
+    operations.extend(draw_form("X2"));
     xobject_document_with_font(
-        vec![(
-            "X1".into(),
-            form_run("ALPHA"),
-            FormResources::Own(Vec::new()),
-        )],
+        vec![
+            (
+                "X1".into(),
+                operations,
+                FormResources::Own(vec!["X2".into()]),
+            ),
+            (
+                "X2".into(),
+                form_run("BRAVO"),
+                FormResources::Own(Vec::new()),
+            ),
+        ],
         vec![draw_form("X1")],
         subset_font(),
+    )
+}
+
+/// A one-form document whose form declares a caller-supplied `/Resources` **inline**, with no
+/// `/F1` injected: the fixture's whole point is which resource names the form itself declares.
+fn xobject_document_with_inline_resources(
+    forms: Vec<(String, Vec<Operation>, Dictionary)>,
+    pages: Vec<Vec<Operation>>,
+) -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+
+    let ids: Vec<lopdf::ObjectId> = forms.iter().map(|_| document.new_object_id()).collect();
+    let mut page_xobjects = Dictionary::new();
+    for (index, (name, operations, resources)) in forms.into_iter().enumerate() {
+        let form = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => resources,
+        };
+        document.set_object(
+            ids[index],
+            Stream::new(form, Content { operations }.encode().unwrap()),
+        );
+        page_xobjects.set(name.as_str(), Object::Reference(ids[index]));
+    }
+
+    let page_resources = document.add_object(dictionary! { "XObject" => page_xobjects });
+    let mut kids = Vec::new();
+    for operations in pages {
+        let content = document.add_object(page_body(operations));
+        kids.push(Object::Reference(document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content,
+            "Resources" => page_resources,
+        })));
+    }
+    let count = kids.len() as i64;
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => count,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// `xobject-subset-font-siblings.pdf`: `X1`'s inline `/Resources` names the subset font under
+/// **two** names, and both are drawn.
+///
+/// A substitution rewrites only the entry the edited run resolves. The other entry is a
+/// different resource name for an object the clone still needs — dropping it (or replacing the
+/// whole `/Font` map with just the substitute) leaves the clone's second run naming a font its
+/// own dictionary no longer defines.
+pub fn xobject_subset_font_siblings() -> Document {
+    let mut operations = form_run("ALPHA");
+    operations.extend(form_run_in("KEEPME", "F2", 600));
+    let resources = dictionary! {
+        "Font" => dictionary! {
+            "F1" => subset_font(),
+            "F2" => winansi_helvetica(),
+        },
+        "XObject" => Dictionary::new(),
+    };
+    xobject_document_with_inline_resources(
+        vec![("X1".into(), operations, resources)],
+        vec![draw_form("X1")],
     )
 }
 
