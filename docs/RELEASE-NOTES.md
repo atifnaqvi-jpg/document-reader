@@ -27,6 +27,39 @@ freezing it.
 > **Pre-release when it ships.** 1.0.0 (P2.8, reflow) is the point text editing is declared
 > complete.
 
+### Triage: claims in this section that are not yet backed
+
+**Status: open. Nothing below has been rewritten to match the triage — the claims stand until
+each row's evidence exists.** This block exists so the outstanding work is recorded in the
+repository instead of living in a conversation.
+
+**Provenance.** A review on 2026-10-28 recorded **nine** unbacked lines in this section. That
+list was never written into the repository and is not recoverable from the tree, the git
+history, or the session notes, so the nine rows below were **re-derived on 2026-10-29** by
+measuring every falsifiable claim in this section against the tree at `f9c75d5`. The count
+happens to agree; the membership is a re-derivation, not a recovery, and a row that was on the
+original list but is not falsifiable (and so is not here) would still be missing.
+
+Resolution classes: **needs-installer** (only a Windows installer can settle it),
+**needs-test** (a gate could settle it and none exists), **reword-to-tested** (true, but stated
+more strongly than the evidence permits).
+
+| # | Line in this section | Claim as written | Measured at `f9c75d5` | Class |
+|---|---|---|---|---|
+| 1 | Draft block, condition 1 | "the PDFium row-1 check must pass in CI" | **Not yet satisfied.** It fails in CI: the Windows job aborted with `STATUS_ACCESS_VIOLATION` on 2026-10-29 (run `40908435884`, attempt 1) and passed only on attempt 2 of the same SHA. Undiagnosed. | needs-installer |
+| 2 | Draft block, condition 2 | "the installer from that tagged run must be hand-confirmed" | **Not satisfiable yet.** No tag exists for 0.9.0, so no "tagged run" has produced an installer. The newest installer is `dd8efce` (dispatch run `40719287682`), 8 commits behind HEAD, and a tag run also publishes a release, which condition 1 currently forbids. | needs-installer |
+| 3 | Draft block | "the suite is green at 482 passed / 76 ignored on Linux" | True of `559e4c7`; **stale for HEAD**. Measured at `f9c75d5`: **493 passed / 81 ignored / 0 failed**. | reword-to-tested |
+| 4 | "What is in this release", list of four | "This section covers **four** things" | The four named commits all exist and none is an ancestor of `v0.8.1` — verified. The count is right; it simply is not four *any more*, since several later commits are also unreleased (see row 9). | reword-to-tested |
+| 5 | "MECH-B font embedding", opening | "Twelve Liberation faces now ship in the installer (4,360,440 bytes)" | Correct as a payload property: 12 `.ttf` files, 4,360,440 bytes total, `bundle.resources` includes them. **Not verified in an installer** — the only installer is from `dd8efce`, which this section does not describe. | needs-installer |
+| 6 | "MECH-B font embedding", error codes | `SUBSTITUTE_REFUSED`, `GLYPHS_NOT_COVERABLE`, `SUBSET_BUILD_FAILED` are distinct refusals | All three are real constants/paths with the stated distinction. The three *behaviours* are covered by `row2`, `row3` and the subset builder tests. | reword-to-tested |
+| 7 | "MECH-B font embedding" | "A run whose own font covers the replacement keeps its own font" | Covered by `a_subset_that_covers_the_replacement_keeps_the_original_font`. | reword-to-tested |
+| 8 | "MECH-B font embedding" | "`GLYPHS_NOT_COVERABLE` … `漢` is a permanent gap, not a retry" | No test asserts the permanent-gap property for a specific out-of-bundle character; `row3` covers an uncovered glyph, not the permanence claim. | needs-test |
+| 9 | 0.9.0 section throughout | The section describes what 0.9.0 *is* | Several unreleased commits are **not described at all**: the recursive Form XObject walk (`44c9457`), the imported-font measurement fix (`3ea86f5`), the MSRV guards (`8c29534`), and the inline-`/Resources` fix (`f9c75d5`). If 0.9.0 ships as written, the notes will be incomplete. | reword-to-tested |
+
+Rows 1 and 2 are the blocking pair: **neither can be settled without a Windows installer**, and
+row 2 cannot even begin until a tag exists, which condition 1 forbids until the crash in row 1
+is understood. The section stays **DRAFT**.
+
 ### What is in this release, and why A7 is not its own version
 
 This section covers **four** things that were all unreleased at `v0.8.1`:
