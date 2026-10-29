@@ -114,7 +114,34 @@ scripts/mutate.sh --test embed_plan_order
 #   exit 2  MEASUREMENT   did not compile            -- not a catch, no test ran
 #   exit 3  MEASUREMENT   no `test result:` line     -- not a catch, no test ran
 #   exit 4  MEASUREMENT   crate did not compile      -- stale binary, mutant not in it
+#   exit 5  TIMEOUT       compiled, ran, never terminated -- a verdict, not a measurement error
 ```
+
+**Exit 5 is a verdict, not a measurement error.** It records something the mutant did: it
+compiled, the suite began, and the run exceeded the declared budget. A guard that removes a
+termination check is caught by hanging, and no summary line will ever say so — so the absence
+of a summary line is the finding, not a lost measurement.
+
+It is distinct from `MEASUREMENT_ERROR:slow_not_hung` (exit 3), and the two are **not**
+interchangeable — a hang and a slow test look identical from outside:
+
+- The first run exceeds `MUTATE_TIMEOUT`. That budget is the caller's **opt-in**; unset means
+  no internal budget and the old behaviour, so a timeout verdict cannot arrive by accident.
+- The harness then **re-runs at a larger budget** (`MUTATE_TIMEOUT_CONFIRM`, default three
+  times the first). A slow test terminates there and reports a summary line → **exit 3,
+  `slow_not_hung`**, and nothing was proved about non-termination. Only if the confirmation run
+  also produces no summary does the verdict stand as **exit 5, TIMEOUT**.
+- One budget can only guess. Two budgets let a slow suite terminate and report while a genuine
+  hang stays terminated. Treating a `hang_witness` helper as the sole evidence instead was
+  tried and withdrawn: it cannot distinguish the two cases either.
+
+**A timeout log cannot name the hung test, and must never be read as if it does.** libtest
+writes `test NAME ... ` with no newline and flushes at the verdict, so a test that never returns
+leaves nothing readable in a redirected log. `last_test_completed` is the last test that
+*returned* — the hang is in the next one, or in the binary before it printed. Pair the record
+with `MUTATE_TARGET` to say which guard was removed; do not read it as test identity. The
+per-run record in `.mutation-log/` states this limitation itself, so a verdict that cannot
+distinguish stale from fresh, or which test hung, says so every time.
 
 The harness was itself mutation-tested: a non-compiling mutant exits 2, a clean tree exits 1,
 a real catch exits 0. Its first version matched a bare `^error:` and therefore classified a
