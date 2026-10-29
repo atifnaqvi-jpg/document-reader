@@ -540,15 +540,16 @@ pub fn measure(
         return Ok(0.0);
     }
 
-    // The font is taken from a text object *already on the page* whose family matches,
-    // rather than looked up in an abstract font table: that is the only handle that
-    // carries the document's own font program, and therefore the only measurement that
-    // reflects what the renderer will draw.
-    let token = find_font_token(&page, font_name).ok_or_else(|| {
-        // Unreachable on the real path: `font_name` is read back from a text object on
-        // this very page. It can only happen if the page changed under us, and a
-        // measurement in the wrong font would silently mis-gate the edit — so refuse
-        // rather than substitute a built-in of unknown metrics.
+    // The font is taken from a text object the page already draws -- at page level or inside
+    // a Form XObject -- rather than looked up in an abstract font table: that is the only
+    // handle that carries the document's own font program, and therefore the only measurement
+    // that reflects what the renderer will draw.
+    let token = find_font_token(page.objects(), 0, font_name).ok_or_else(|| {
+        // Should be unreachable: `font_name` is read back from a text object this page draws.
+        // When it did happen, the page drew all its text inside a form and the search stopped
+        // at page level. It can also mean the page changed under us, and a measurement in the
+        // wrong font would silently mis-gate the edit — so refuse rather than substitute a
+        // built-in of unknown metrics.
         AppError::Other(format!(
             "the font {font_name:?} is no longer on this page; reopen the page and try again"
         ))
@@ -562,23 +563,44 @@ pub fn measure(
     Ok(bounds.width().value)
 }
 
-/// Finds the token of the page font whose family matches `font_name`, if any.
+/// Finds the token of the font whose family matches `font_name`, if any, **including fonts
+/// used only inside Form XObjects**.
 ///
-/// An explicit indexed loop rather than an iterator chain: `as_text_object()` borrows the
-/// `PdfPageObject` it is called on, so a `filter_map` closure that owns the object cannot
-/// return the borrow. Getting each object into a named local keeps the borrow alive for as
-/// long as it is used.
-fn find_font_token(page: &PdfPage<'_>, font_name: &str) -> Option<PdfFontToken> {
-    let objects = page.objects();
-    for index in 0..objects.len() {
-        let Ok(object) = objects.get(index) else {
+/// A token is only a handle, so the walk returns it rather than a `PdfFont` borrow: `form` is a
+/// temporary inside the recursion, and a reference into it cannot outlive the call. The token
+/// stays valid because it names an `FPDF_FONT` owned by the document, which outlives this
+/// measurement.
+///
+/// The recursion is load-bearing on documents whose page has no text of its own: the 2025
+/// Steuerbelege page reports `page-level token=false` and 45 text objects, all inside forms, so
+/// a page-only lookup made every edit on it refuse with "the font is no longer on this page".
+/// The depth cap is [`MAX_XOBJECT_DEPTH`], the same bound the run walk uses: a form that draws
+/// itself is reachable here too, and an uncapped search never returns on one.
+fn find_font_token<'a, T: PdfPageObjectsCommon<'a>>(
+    collection: &T,
+    depth: usize,
+    font_name: &str,
+) -> Option<PdfFontToken> {
+    for index in collection.as_range() {
+        let Ok(object) = collection.get(index) else {
             continue;
         };
-        let Some(text_object) = object.as_text_object() else {
+        if let Some(text_object) = object.as_text_object() {
+            if family_matches(&text_object.font(), font_name) {
+                return Some(text_object.font().token());
+            }
+            continue;
+        }
+        let Some(form) = object.as_x_object_form_object() else {
             continue;
         };
-        if family_matches(&text_object.font(), font_name) {
-            return Some(text_object.font().token());
+        // Same cap as the run walk, and for the same reason: a form that draws itself is
+        // reachable, and without the cap this search never returns.
+        if depth >= MAX_XOBJECT_DEPTH {
+            continue;
+        }
+        if let Some(token) = find_font_token(form, depth + 1, font_name) {
+            return Some(token);
         }
     }
     None

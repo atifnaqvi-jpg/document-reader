@@ -60,10 +60,11 @@ jobs:
       # only library that exists is an untracked aarch64 drop on the dev VM, and the runner is
       # x64, so the fetch would produce a file the loader cannot use.
       #
-      # Consequence, accepted rather than overlooked: the 79 PDFium-gated tests never execute on
-      # Linux, and running this job with `--include-ignored` yields 367 passed and 26 failures,
-      # all `PdfiumUnavailable` (measured on `dd8efce`-era tree, 2026-10-28). That is the
-      # recorded state, not a defect to fix here.
+      # Consequence, accepted rather than overlooked: the 81 PDFium-gated tests never execute on
+      # Linux, and running this job with `--include-ignored` yields 26 failures, all
+      # `PdfiumUnavailable` (measured on the `dd8efce`-era tree, 2026-10-28; the two picker-path
+      # tests added since pass with the library and add no failure). That is the recorded state,
+      # not a defect to fix here.
       #
       # The counts are asserted for the same reason the Windows job asserts its own. A test
       # that stops being collected -- a malformed attribute, a module that no longer compiles
@@ -89,18 +90,20 @@ jobs:
           # This is literal for the same reason: any added `#[ignore]` must be acknowledged
           # here in the same commit, so a gated test cannot arrive -- or vanish -- silently.
           #
-          # Measured on the P2.7.7 walk commit, not incremented: 79 -- 76 machine-dependent tests
-          # plus the three PDFium-side Form XObject walk tests added with the recursion.
-          if [ "$ignored" -ne 79 ]; then
-            echo "::error::$ignored tests ignored; 79 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured, not incremented: 81 -- 76 machine-dependent tests, the three PDFium-side Form
+          # XObject walk tests added with the recursion, and two that compose the picker path
+          # (the font search, and describe/edit/save/re-open) after it refused on the live file.
+          if [ "$ignored" -ne 81 ]; then
+            echo "::error::$ignored tests ignored; 81 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
           # guards and the font table-range check, plus the seven tests that arrived with
           # P2.7.7 (three PDFium-side walk tests, two fixture-order guards, and the two
-          # regression tests for the interleaved walk). Raising this to the measured value
-          # rather than leaving headroom is what makes a test that stops being collected
-          # fail here instead of passing quietly.
+          # regression tests for the interleaved walk). The two picker-path tests are
+          # `#[ignore]`d, so they move the ignored count and not this one. Raising this to
+          # the measured value rather than leaving headroom is what makes a test that stops
+          # being collected fail here instead of passing quietly.
           if [ "$passed" -lt 489 ]; then
             echo "::error::only $passed tests ran; 489 is the non-PDFium baseline. A test stopped being collected."
             exit 1

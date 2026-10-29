@@ -403,3 +403,118 @@ fn the_walk_stops_at_the_cap_and_a_self_drawing_form_terminates() {
         "a self-drawing form terminates at the cap, not by object identity"
     );
 }
+
+/// P2.7.7: measurement must find a font the page only *imports*.
+///
+/// `measure` resolves the replacement's width by building a text object in the run's own font,
+/// and it looked for that font on the page's object list alone. On a page whose text is all
+/// drawn inside a form that list has no text object at all — the live 2025 Steuerbelege page
+/// reports 45 text objects and **zero** of them at page level — so every edit on it refused
+/// with "the font is no longer on this page" before the width gate ever ran. The search walks
+/// forms now, and this test is what would have caught the refusal.
+///
+/// Mutation-verified: reverting the search to the page's own objects fails it with that
+/// message. (`cargo test --test xobject_fixtures measure_finds_the_font ... -- --include-ignored`)
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn measure_finds_the_font_a_form_imports_and_the_self_drawing_form_terminates() {
+    let path = fixture("xobject-single.pdf");
+    let walked = pdfium_walk("xobject-single.pdf");
+    let run = walked.runs.first().expect("X1 draws ALPHA");
+    // The family PDFium reports, not the PDF's `/BaseFont`: it renames `Helvetica` to
+    // `Chrom Sans OTF`, and `measure` is given the family the picker showed.
+    let width = DocumentHandles::new()
+        .with_document(&path, None, |document| {
+            runmetrics::measure(document, 0, &run.font_name, run.font_size, &run.text)
+        })
+        .expect("the font inside X1 is on the page even though the page draws no text");
+    assert!(
+        (width - run.width).abs() < 1.0,
+        "measuring the run's own text in its own font must reproduce its own {0}pt, got {width}",
+        run.width
+    );
+
+    // The search is recursive, so it needs the run walk's termination guard. Without the cap
+    // this call never returns on `xobject-cycle.pdf`.
+    let cycle = fixture("xobject-cycle.pdf");
+    let missing = DocumentHandles::new().with_document(&cycle, None, |document| {
+        runmetrics::measure(document, 0, "NoSuchFamily", 24.0, "ALPHA")
+    });
+    assert!(
+        missing.is_err(),
+        "an absent font still refuses, and a self-drawing form still terminates"
+    );
+}
+
+/// P2.7.7: the whole picker path, on a page that draws no text of its own.
+///
+/// The three tests above cover the walk, the order and the cap; the one before this covers
+/// measurement. What none of them did was run the sequence the product runs — `describe_runs`
+/// (PDFium runs + char grid + lopdf gates), then `edit`, then save, then re-open — over a form
+/// document. On the live document that sequence refused every run at `measure`, a defect that
+/// only appeared when the three parts were composed.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn a_form_only_page_describes_edits_and_reopens_with_the_same_count() {
+    use document_reader_lib::render::RenderService;
+
+    let service = RenderService::new();
+    let path = fixture("xobject-single.pdf");
+    let runs = service.page_runs(&path, None, 0).unwrap();
+    let grid = service.char_grid(&path, None, 0).unwrap();
+    let source = std::fs::read(&path).unwrap();
+    let mut document = lopdf::Document::load_mem(&source).unwrap();
+
+    let described = textedit::describe_runs(&document, 0, &runs, &grid).unwrap();
+    let editable = || described.iter().filter(|run| run.editable()).count();
+    let target = described
+        .iter()
+        .find(|run| run.text.trim() == "ALPHA" && run.editable())
+        .expect("the run inside X1 must be offered");
+    assert_eq!(editable(), 1, "one form run, one editable target");
+
+    let measure = |text: &str| {
+        service.measure_text(&path, None, 0, &target.font_name, target.font_size, text)
+    };
+    textedit::edit(
+        &mut document,
+        &textedit::EditRequest {
+            page: 0,
+            run_id: target.run_id.clone(),
+            expected: target.text.clone(),
+            replacement: "ALPHZ".to_string(),
+            old_width: target.width.expect("a described run has a measured width"),
+            font_size: target.font_size,
+            allow_substitution: true,
+            fragments: Vec::new(),
+            range: Vec::new(),
+            measure: &measure,
+        },
+    )
+    .expect("the width gate must measure the form's font, not fail to find it");
+
+    document.renumber_objects();
+    document.compress();
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("edited.pdf");
+    document.save(&copy).unwrap();
+
+    let reopened_runs = service.page_runs(&copy, None, 0).unwrap();
+    let reopened_grid = service.char_grid(&copy, None, 0).unwrap();
+    let reopened_document = lopdf::Document::load(&copy).unwrap();
+    let reopened =
+        textedit::describe_runs(&reopened_document, 0, &reopened_runs, &reopened_grid).unwrap();
+    assert_eq!(
+        reopened.iter().filter(|run| run.editable()).count(),
+        editable(),
+        "the saved copy must offer the same number of editable runs"
+    );
+    assert!(
+        reopened.iter().any(|run| run.text.trim() == "ALPHZ"),
+        "the saved copy must read the replacement: {reopened:?}"
+    );
+    assert!(
+        !reopened.iter().any(|run| run.text.trim() == "ALPHA"),
+        "and must not still read the text it replaced: {reopened:?}"
+    );
+}
