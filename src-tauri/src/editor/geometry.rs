@@ -93,6 +93,15 @@ impl Point2 {
 pub struct RunFrame {
     pub advance: Point2,
     pub up: Point2,
+    /// The sign of the determinant of the matrix the glyphs are actually drawn through.
+    ///
+    /// The axes alone cannot answer "are the glyphs mirrored": a horizontal scale `Tz` is part
+    /// of the drawing matrix but not of its direction, so `det(tm x ctm) = -1` with `Tz < 0`
+    /// draws upright text. `false` when the matrix is degenerate (no area, so no handedness).
+    pub mirrored: bool,
+    /// True when the matrix has no area at all (`Tz == 0`, or a collapsed `tm x ctm`): the
+    /// pen does not advance, so there is neither a direction nor a handedness to state.
+    pub degenerate: bool,
 }
 
 impl RunFrame {
@@ -100,12 +109,42 @@ impl RunFrame {
     pub const PAGE: Self = Self {
         advance: Point2::new(1.0, 0.0),
         up: Point2::new(0.0, 1.0),
+        mirrored: false,
+        degenerate: false,
     };
 
     /// Builds a frame from two vectors, normalising each. A degenerate vector falls back to
     /// the page axis for that direction, so callers never divide by zero; the caller is
     /// responsible for refusing a run whose transform has no usable scale.
+    /// Callers with no drawing matrix get handedness from the axes themselves: a negative
+    /// cross product means the glyph axes are reflected. That is correct for every case where
+    /// the scale is positive, which is the default when no `Tz` is in force. A source that
+    /// knows the matrix must use [`Self::with_matrix`], because `Tz` can cancel this sign.
     pub fn from_vectors(advance: (f32, f32), up: (f32, f32)) -> Self {
+        let mirrored = advance.0 * up.1 - advance.1 * up.0 < 0.0;
+        Self::with_handedness(advance, up, mirrored)
+    }
+
+    /// The same frame, with the drawing matrix's handedness and degeneracy supplied.
+    pub fn with_matrix(
+        advance: (f32, f32),
+        up: (f32, f32),
+        mirrored: bool,
+        degenerate: bool,
+    ) -> Self {
+        Self {
+            degenerate,
+            ..Self::with_handedness(advance, up, mirrored)
+        }
+    }
+
+    /// The same frame with the drawing matrix's handedness supplied by the caller.
+    ///
+    /// Handedness has to come from the matrix that includes `Tz`, which is a scalar the axes
+    /// cannot carry; see [`Self::mirrored`]. The axes are not flipped here: `advance` stays the
+    /// direction the pen moves, and a replacement is written through the same `Tz` as the
+    /// original, so the write is correct in the original's own coordinates.
+    pub fn with_handedness(advance: (f32, f32), up: (f32, f32), mirrored: bool) -> Self {
         fn unit(vector: (f32, f32), fallback: Point2) -> Point2 {
             let length = (vector.0 * vector.0 + vector.1 * vector.1).sqrt();
             if length > f32::EPSILON {
@@ -117,6 +156,8 @@ impl RunFrame {
         Self {
             advance: unit(advance, Point2::new(1.0, 0.0)),
             up: unit(up, Point2::new(0.0, 1.0)),
+            mirrored,
+            degenerate: false,
         }
     }
 
@@ -157,6 +198,11 @@ impl RunFrame {
 
     /// True when the advance axis is the page's `x` axis, which is what lets a box's width be
     /// trusted as a width (P2.7.4 Q2).
+    ///
+    /// `advance.x > 0`, not `!= 0`: a run whose pen travels leftward has its box to the left of
+    /// its origin, so an axis-aligned box cannot be projected onto it the way this predicate
+    /// promises. Reflecting the axis instead would make `advance` disagree with the direction
+    /// the write path actually draws.
     pub fn is_horizontal(&self) -> bool {
         const EPSILON: f32 = 1e-4;
         self.advance.x > 0.0 && self.advance.y.abs() <= EPSILON
@@ -164,8 +210,19 @@ impl RunFrame {
 
     /// True when the frame reverses handedness — the glyphs are reflected, so the text does
     /// not read left-to-right along its own advance axis (Q5).
+    ///
+    /// Supplied by the caller from the **drawing** matrix, not derived from the axes: a
+    /// negative `Tz` reflects the pen while leaving both axis directions untouched, so a
+    /// determinant of the axes would call PDFlib's `1 0 0 -1 0 841 cm` + `Tz -100` idiom
+    /// mirrored when it renders upright. Measured against poppler: the same flip with
+    /// `Tz +100` renders reflected and with `Tz -100` renders correctly.
     pub fn is_mirrored(&self) -> bool {
-        self.advance.x * self.up.y - self.advance.y * self.up.x < 0.0
+        self.mirrored
+    }
+
+    /// True when the drawing matrix has no area, so no replacement can be laid out at all.
+    pub fn is_degenerate(&self) -> bool {
+        self.degenerate
     }
 
     /// Whether two fragments share one text direction, within a small angular tolerance.

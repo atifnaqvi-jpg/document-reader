@@ -864,7 +864,7 @@ fn walk_level<'a>(
             // because `Td`/`TJ` arithmetic and every run-to-run comparison live there; this is
             // only for comparing against PDFium, which knows nothing of text space.
             let page_origin = walker.to_page(origin.0, origin.1);
-            let (advance_axis, up_axis, page_scale) = walker.axes();
+            let (advance_axis, up_axis, page_scale, mirrored, degenerate) = walker.axes();
 
             runs.push(RawRun {
                 id: RunId {
@@ -879,7 +879,7 @@ fn walk_level<'a>(
                 origin,
                 page_origin,
                 page_scale,
-                frame: RunFrame::from_vectors(advance_axis, up_axis),
+                frame: RunFrame::with_matrix(advance_axis, up_axis, mirrored, degenerate),
                 font_size: walker.size,
                 advance: spaced_advance(&metrics, &text, walker),
                 advance_exact: advance_exact.map(|width| spaced_width(width, &text, walker)),
@@ -1280,7 +1280,13 @@ impl TextMatrixWalk {
     /// `scale` is `None` when the two axes scale differently, because then no single number
     /// converts a text-space length to a page-space length and the width gate has nothing
     /// honest to compare.
-    fn axes(&self) -> ((f32, f32), (f32, f32), Option<f32>) {
+    ///
+    /// The third value is the sign of the determinant of the matrix the **glyphs are drawn
+    /// through**, which is `tm x ctm` times the horizontal scale `Tz`. `Tz` is a scalar, so it
+    /// never reaches `advance` or `up`; computing handedness from the axes alone therefore
+    /// calls PDFlib's `1 0 0 -1 0 841 cm` with `Tz -100` mirrored, although it renders upright
+    /// (measured against poppler, four variants). A degenerate `Tz` has no handedness.
+    fn axes(&self) -> ((f32, f32), (f32, f32), Option<f32>, bool, bool) {
         let m = self.composed();
         let unit = |x: f32, y: f32| {
             let length = (x * x + y * y).sqrt();
@@ -1306,7 +1312,12 @@ impl TextMatrixWalk {
         } else {
             None
         };
-        (advance, up, scale)
+        let determinant = m[0] * m[3] - m[1] * m[2];
+        // `Tz` scales the advance only, so it multiplies the determinant without changing
+        // either axis's direction. Zero collapses the pen, so there is no handedness to state.
+        let degenerate = determinant.abs() <= f32::EPSILON || self.horizontal_scale == 0.0;
+        let mirrored = !degenerate && determinant * self.horizontal_scale < 0.0;
+        (advance, up, scale, mirrored, degenerate)
     }
 
     /// The text rise (`Ts`) in force, in points.

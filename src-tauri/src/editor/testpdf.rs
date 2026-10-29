@@ -2063,6 +2063,98 @@ pub fn mirrored_by_graphics_matrix() -> Document {
     )
 }
 
+/// Builds the PDFlib page idiom as a **Form**: one `cm` that flips the vertical axis, text
+/// drawn inside the form at a caller-chosen `Tz` and `Tf` size.
+///
+/// This is the shape a real producer emits and none of the existing fixtures had: a page whose
+/// only content is a form, with `1 0 0 -1 0 841 cm` at the top of the form and *negative*
+/// `Tz` and `Tf` inside it. The two negatives cancel; the text renders upright, and the
+/// handedness test must not call it mirrored.
+fn flipped_form_page(tz: f32, size: f32) -> Document {
+    xobject_document(
+        vec![(
+            "X1".into(),
+            vec![
+                Operation::new(
+                    "cm",
+                    vec![
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        (-1).into(),
+                        0.into(),
+                        792.into(),
+                    ],
+                ),
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), size.into()]),
+                Operation::new("Tz", vec![tz.into()]),
+                Operation::new("Td", vec![72.into(), 100.into()]),
+                Operation::new("Tj", vec![Object::string_literal("UPRIGHT")]),
+                Operation::new("ET", vec![]),
+            ],
+            FormResources::Own(Vec::new()),
+        )],
+        vec![draw_form("X1")],
+    )
+}
+
+/// The flip idiom as PDFlib writes it: `cm [1 0 0 -1 0 841]` with `Tz -100`.
+///
+/// The glyphs are drawn through `det(tm x ctm) * (Tz/100) = (-1) * (-1) = +1`, so the text is
+/// upright. Measured against poppler: the same flip with `Tz +100` renders reflected.
+pub fn pdflib_flip_with_negative_tz() -> Document {
+    flipped_form_page(-100.0, -12.0)
+}
+
+/// The same flip with a positive `Tz`: genuinely reflected, and must still refuse.
+pub fn flip_with_positive_tz() -> Document {
+    flipped_form_page(100.0, 12.0)
+}
+
+/// The same flip with `Tz 0`: no advance at all, so no handedness and no width.
+pub fn flip_with_zero_tz() -> Document {
+    flipped_form_page(0.0, 12.0)
+}
+
+/// A 180-degree rotation: `det = +1`, `Tz +100`. Not mirrored — the glyphs are upside down
+/// but read consistently along their own advance axis. Distinguished from a flip empirically.
+pub fn upright_upside_down_by_rotation() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    (-1).into(),
+                    0.into(),
+                    0.into(),
+                    (-1).into(),
+                    600.into(),
+                    792.into(),
+                ],
+            ),
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    72.into(),
+                    700.into(),
+                ],
+            ),
+            Operation::new("Tj", vec![Object::string_literal("TURNED")]),
+            Operation::new("ET", vec![]),
+            Operation::new("Q", vec![]),
+        ]],
+    )
+}
+
 /// The control for [`rotated_by_graphics_matrix`]: the same `q`/`cm`/`Q` scaffolding with a
 /// pure translation, which moves the run without rotating it. Detection must not refuse
 /// text merely because a `cm` was present.

@@ -47,6 +47,9 @@ pub enum Gate {
     /// (h) the run's glyphs are mirrored (`det M < 0`): the advance axis exists, but a
     /// replacement would read opposite to the direction the text is drawn (P2.7.4 Q5).
     MirroredText,
+    /// (j) the drawing matrix has no area (`Tz == 0`), so the pen does not advance and no
+    /// replacement can be laid out. Distinct from mirrored: nothing is drawn at all.
+    DegenerateText,
     /// (i) the text sits in a Form XObject this walk refused to enter: nested past the cap, or
     /// drawing itself (P2.7.3 Q1). Carries no text, so there is nothing to rewrite.
     NestedXObject,
@@ -64,6 +67,7 @@ impl Gate {
             Gate::RunMismatch => "run-mismatch",
             Gate::SelectionRange => "selection-range",
             Gate::MirroredText => "mirrored-text",
+            Gate::DegenerateText => "degenerate-text",
             Gate::NestedXObject => "nested-xobject",
         }
     }
@@ -99,6 +103,10 @@ impl Gate {
             Gate::MirroredText => {
                 "this text is mirrored, so a replacement would read against its drawing \
                  direction; select a narrower range, or use the annotation tools to add a note"
+            }
+            Gate::DegenerateText => {
+                "this text is drawn with no horizontal scale, so it occupies no width to \
+                 replace; select a narrower range, or use the annotation tools to add a note"
             }
             Gate::NestedXObject => {
                 "this text sits in a form nested too deeply to edit, or in a form that draws \
@@ -170,6 +178,9 @@ pub struct RunGates {
     /// True when the run's frame reverses handedness, so its glyphs are reflected
     /// (P2.7.4 Q5).
     pub mirrored: bool,
+    /// True when the drawing matrix has no area (`Tz == 0`, or a degenerate `tm x ctm`), so
+    /// the run has no advance axis at all. Distinct from mirrored: nothing can be drawn.
+    pub degenerate: bool,
     /// Why this run is a Form XObject refusal placeholder (P2.7.3 X1), if it is one.
     pub nested_xobject: Option<XObjectRefusal>,
     /// A CID/Type0 font's `/ToUnicode` exists, so its codes can be read back (P2.7.5).
@@ -195,6 +206,7 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
             },
             round_trips: false,
             mirrored: false,
+            degenerate: run.frame.is_degenerate(),
             nested_xobject: run.xobject_refusal,
             cid_readable: false,
         });
@@ -244,6 +256,7 @@ pub fn resolve_gates(document: &Document, page: u32, run: &RawRun) -> Result<Run
         font,
         round_trips,
         mirrored: run.frame.is_mirrored(),
+        degenerate: run.frame.is_degenerate(),
         nested_xobject: run.xobject_refusal,
         cid_readable,
     })
@@ -263,6 +276,9 @@ pub fn font_admissibility(gates: &RunGates) -> Admissibility {
     // P2.7.4: rotation is no longer a refusal - a turned run is measured along its own
     // advance axis. Mirroring still is: the axis exists, but the glyphs run counter to it, so
     // a replacement would be drawn reflected and the caret has no honest meaning (Q5).
+    if gates.degenerate {
+        return Admissibility::refused(Gate::DegenerateText);
+    }
     if gates.mirrored {
         return Admissibility::refused(Gate::MirroredText);
     }
@@ -401,7 +417,9 @@ pub enum PairConfidence {
 /// would be far too tight for one and too loose for the other. 0.25em also covers the left
 /// side bearing that puts a box's ink to the *right* of the pen origin (measured ~0.08em).
 fn origin_tolerance(font_size: f32) -> f32 {
-    (0.25 * font_size).max(0.5)
+    // `abs`: a negative `Tf` size is legal and PDFlib emits it, so the tolerance must scale
+    // with the magnitude. Without this a `-12 Tf` run got the 0.5pt floor instead of 3pt.
+    (0.25 * font_size.abs()).max(0.5)
 }
 
 /// The baseline agreement required to call a pair strong, in points (P2.4.1 T19/§3.3).
@@ -3830,6 +3848,94 @@ mod tests {
         let error = edit(&mut document, &request(&run, "X", 100.0, &measure)).unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_NOT_EDITABLE");
         assert!(error.to_string().contains("mirrored-text"), "{error}");
+    }
+
+    /// The PDFlib idiom: `cm [1 0 0 -1 0 841]` with `Tz -100`. The two negatives cancel, the
+    /// text renders upright, and the run must be admissibly editable rather than mirrored.
+    ///
+    /// Measured against poppler with four synthetic pages: this combination renders upright,
+    /// while the same flip with `Tz +100` renders reflected. Handedness taken from the axes
+    /// alone calls both mirrored, which is what refused a real 82-run tax document.
+    #[test]
+    fn a_flipped_form_with_negative_tz_is_upright_and_editable() {
+        let document = testpdf::pdflib_flip_with_negative_tz();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(
+            !run.frame.is_mirrored(),
+            "a flip cancelled by negative Tz is upright: det(tm x ctm) = -1, Tz = -100"
+        );
+
+        let gates = resolve_gates(&document, 0, &run).unwrap();
+        assert_eq!(
+            font_admissibility(&gates).gate,
+            None,
+            "the run must reach the font gates, not be refused as mirrored"
+        );
+    }
+
+    /// The control for the test above: the same flip with `Tz +100` is genuinely reflected.
+    /// Without this, deleting the handedness test entirely would still pass the guard.
+    #[test]
+    fn a_flipped_form_with_positive_tz_is_mirrored() {
+        let document = testpdf::flip_with_positive_tz();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(run.frame.is_mirrored());
+        assert_eq!(
+            font_admissibility(&resolve_gates(&document, 0, &run).unwrap())
+                .gate
+                .as_deref(),
+            Some("mirrored-text")
+        );
+    }
+
+    /// `Tz 0` collapses the advance, so the run has no direction and no handedness. It must
+    /// refuse — there is no width to replace — but as `degenerate-text`, not `mirrored-text`.
+    #[test]
+    fn a_flipped_form_with_zero_tz_is_degenerate_not_mirrored() {
+        let document = testpdf::flip_with_zero_tz();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(run.frame.is_degenerate());
+        assert!(
+            !run.frame.is_mirrored(),
+            "zero scale has no handedness; calling it mirrored would name the wrong cause"
+        );
+        assert_eq!(
+            font_admissibility(&resolve_gates(&document, 0, &run).unwrap())
+                .gate
+                .as_deref(),
+            Some("degenerate-text")
+        );
+    }
+
+    /// A 180-degree rotation has `det +1` and `Tz +100`: upside down, but not mirrored. The
+    /// empirical table distinguished this from a flip, so the predicate must too. The advance
+    /// axis points left, which is a *measurement* limitation (`is_horizontal`), not mirroring.
+    #[test]
+    fn a_half_turn_is_not_mirrored() {
+        let document = testpdf::upright_upside_down_by_rotation();
+        let run =
+            textlocate::locate_runs(&document, page_id(&document, 0).unwrap()).unwrap()[0].clone();
+        assert!(
+            !run.frame.is_mirrored(),
+            "a half turn preserves handedness; only a reflection reverses it"
+        );
+        assert_eq!(run.frame.advance.x, -1.0, "the pen travels leftward");
+    }
+
+    /// The tolerance must scale with the *magnitude* of the size. PDFlib writes `-12 Tf`, and
+    /// without `abs` a 12pt run got the 0.5pt floor instead of 3pt.
+    #[test]
+    fn the_origin_tolerance_uses_the_absolute_font_size() {
+        assert_eq!(origin_tolerance(-12.0), 3.0);
+        assert_eq!(origin_tolerance(12.0), 3.0);
+        assert_eq!(
+            origin_tolerance(-1.0),
+            0.5,
+            "the floor still applies to small sizes"
+        );
     }
 
     /// The picker must reach the mirrored verdict, not overwrite it with `run-mismatch` when
