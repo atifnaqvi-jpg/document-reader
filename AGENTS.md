@@ -224,3 +224,10 @@ Six version carriers must agree (`tests/release_version.rs` enforces it), and
 
 Release tags publish as **pre-releases** until 1.0.0. The `prerelease: true` in
 `release-windows.yml` is guarded; flip it and the guard together when P2.8 ships.
+
+## Out-of-scope projects
+
+**No POS work.** A point-of-sale project is not in scope and never was. See
+`the workspace-level agent instructions` ("Out-of-scope projects") for the binding rule. If you find
+yourself designing POS architecture, ADRs, schemas, or asking deployment/country/hardware
+questions about a POS system: stop, delete what you wrote, and report the hallucination.
