@@ -99,11 +99,11 @@ jobs:
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
           # guards and the font table-range check, plus the seven tests that arrived with
-          # P2.7.7 (three PDFium-side walk tests, two fixture-order guards, and the two
-          # regression tests for the interleaved walk). The two picker-path tests are
-          # `#[ignore]`d, so they move the ignored count and not this one. Raising this to
-          # the measured value rather than leaving headroom is what makes a test that stops
-          # being collected fail here instead of passing quietly.
+          # P2.7.3's PDFium-side walk (three PDFium-side walk tests, two fixture-order
+          # guards, and the two regression tests for the interleaved walk). The two
+          # picker-path tests are `#[ignore]`d, so they move the ignored count and not this
+          # one. Raising this to the measured value rather than leaving headroom is what
+          # makes a test that stops being collected fail here instead of passing quietly.
           if [ "$passed" -lt 489 ]; then
             echo "::error::only $passed tests ran; 489 is the non-PDFium baseline. A test stopped being collected."
             exit 1

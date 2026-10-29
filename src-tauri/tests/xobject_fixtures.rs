@@ -427,7 +427,7 @@ fn editing_the_committed_two_draw_fixture_saves_a_reloadable_clone() {
     );
 }
 
-// --- P2.7.7: the PDFium-side walk --------------------------------------------
+// --- P2.7.3: the PDFium-side walk --------------------------------------------
 //
 // These are the tests `xobject_fixtures.rs` was blind to: every assertion above reads the
 // fixtures through **lopdf**, so a production picker that saw no runs at all still passed.
@@ -536,7 +536,7 @@ fn the_walk_stops_at_the_cap_and_a_self_drawing_form_terminates() {
     );
 }
 
-/// P2.7.7: measurement must find a font the page only *imports*.
+/// P2.7.3: measurement must find a font the page only *imports*.
 ///
 /// `measure` resolves the replacement's width by building a text object in the run's own font,
 /// and it looked for that font on the page's object list alone. On a page whose text is all
@@ -578,7 +578,7 @@ fn measure_finds_the_font_a_form_imports_and_the_self_drawing_form_terminates() 
     );
 }
 
-/// P2.7.7: the whole picker path, on a page that draws no text of its own.
+/// P2.7.3: the whole picker path, on a page that draws no text of its own.
 ///
 /// The three tests above cover the walk, the order and the cap; the one before this covers
 /// measurement. What none of them did was run the sequence the product runs — `describe_runs`

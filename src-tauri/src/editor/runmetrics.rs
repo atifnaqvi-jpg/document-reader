@@ -130,7 +130,7 @@ pub fn page_runs_walked(
     Ok(collected)
 }
 
-/// One level of the depth-first walk (P2.7.3 Q1, P2.7.7).
+/// One level of the depth-first walk (P2.7.3 Q1; the PDFium-side walk is P2.7.3 too).
 ///
 /// `placement` maps this collection's coordinate space into page space: identity at the page,
 /// and the parent's placement composed with each child form's own matrix below it. That
