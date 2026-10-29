@@ -53,10 +53,17 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
-      # Two jobs run `cargo test`; only the Windows one can load PDFium. The gated tests carry
-      # `#[ignore]`, which is static, not conditional: on a machine without the library they
-      # must stay ignored. Do NOT add `--include-ignored` here. Measured, that flag forces all
-      # 76 to run without a library and turns a green suite into 27 failures.
+      # `--include-ignored` is deliberately omitted here. The product ships Windows-only; Linux
+      # is a later phase. The Windows job is the one that runs the full suite with PDFium against
+      # the shipping reader, so this job validates the platform-independent majority and nothing
+      # more. Do NOT add `--include-ignored` here and do NOT add a PDFium fetch for Linux: the
+      # only library that exists is an untracked aarch64 drop on the dev VM, and the runner is
+      # x64, so the fetch would produce a file the loader cannot use.
+      #
+      # Consequence, accepted rather than overlooked: the 76 PDFium-gated tests never execute on
+      # Linux, and running this job with `--include-ignored` yields 367 passed and 26 failures,
+      # all `PdfiumUnavailable` (measured on `dd8efce`-era tree, 2026-10-28). That is the
+      # recorded state, not a defect to fix here.
       #
       # The counts are asserted for the same reason the Windows job asserts its own. A test
       # that stops being collected -- a malformed attribute, a module that no longer compiles

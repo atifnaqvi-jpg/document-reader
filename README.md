@@ -138,14 +138,32 @@ npm run build                       # typecheck + frontend bundle
 ```
 
 A green `cargo test` is **not** on its own evidence that rendering works. The
-PDFium-backed tests (rasterization, the render cache, the memory assertion) skip
-themselves where PDFium is absent, which is the common case on a Linux box: it
-cannot load the Windows `pdfium.dll`. Count the skips — the only acceptable
-answer is zero:
+PDFium-backed tests (rasterization, the render cache, the memory assertion, most of
+the text-edit suite) carry `#[ignore = "requires a real PDFium library"]` and skip
+themselves where PDFium is absent — which is the normal case on Linux, because the
+loader wants a Windows `pdfium.dll`.
+
+**Linux dev VM: the library is a local, untracked drop.** `src-tauri/resources/
+libpdfium.so` is **not in git** — `src-tauri/resources/.gitignore` ignores the whole
+directory, and the file is an **aarch64** build (7,971,376 bytes) placed there by
+hand. A fresh checkout therefore has **no library at all**, and on Linux a bare
+`cargo test` ignores every PDFium test silently. To run them, name the file
+explicitly; there is no fallback path that finds it:
 
 ```bash
-cd src-tauri && cargo test 2>&1 | grep -c "skipping: PDFium"
+cd src-tauri && PDFIUM_LIBRARY_PATH="$PWD/resources/libpdfium.so" \
+  cargo test -- --include-ignored
 ```
+
+Without that variable the same command gives **367 passed, 26 failed** (all
+`PdfiumUnavailable`); with it, the suite is green. The Windows job in
+`ci.yml` fetches `pdfium.dll` and runs with the variable set, which is why CI never
+sees the failure. This has cost three sessions — the file being present is not the
+same as the loader reaching it.
+
+**Do not** add `--include-ignored` to the Linux CI job or a PDFium fetch for Linux:
+the product ships Windows-only, the runner is x64, and the only library that exists
+here is the untracked aarch64 drop. See the comment at the top of that job.
 
 The full render path is exercised in CI on `windows-latest`, which fails the
 build if any of those tests skipped.
