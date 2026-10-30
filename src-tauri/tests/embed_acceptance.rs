@@ -490,14 +490,116 @@ fn embedded_font(
 
 #[test]
 fn the_matrix_rows_are_all_present() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/embed_acceptance.rs"),
-    )
-    .expect("cannot read this file");
-    for row in ["row1_", "row2_", "row3_", "row4_"] {
+    // Both files, and every row. Until P2.7.7 this check listed four rows and read one file, so
+    // rows 5 and 6 could be absent while it stayed green — and row 5 *was* absent.
+    //
+    // It matches **function definitions**, not the raw text. An earlier version searched the
+    // whole file for `"row5_"`, which its own list of row names satisfied: deleting the row-5
+    // test left it green, because the check's own literal was the thing it found. Measured, not
+    // assumed — that mutation survived.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut names = Vec::new();
+    for file in ["embed_acceptance.rs", "type0_row6.rs"] {
+        let source = std::fs::read_to_string(root.join(file))
+            .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
+        for line in source.lines() {
+            let line = line.trim_start();
+            if let Some(rest) = line.strip_prefix("fn ") {
+                names.push(rest.split('(').next().unwrap_or("").to_string());
+            }
+        }
+    }
+    for row in ["row1", "row2", "row3", "row4", "row5"] {
         assert!(
-            source.contains(row),
-            "§5 row {row} has no test; the matrix is the acceptance gate, not a description"
+            names
+                .iter()
+                .any(|name| name.starts_with(&format!("{row}_"))),
+            "§5 row {row} has no test function; the matrix is the acceptance gate, not a \
+             description"
         );
     }
+    // Row 6 is three independent assertions. Counting it once would let the row go green on one
+    // of them, which is exactly the failure the row exists to prevent.
+    for row in ["row6a", "row6b", "row6c"] {
+        assert!(
+            names
+                .iter()
+                .any(|name| name.starts_with(&format!("{row}_"))),
+            "§5 row 6 is three assertions and {row}_ is missing; one passing alone does not make \
+             the row green"
+        );
+    }
+}
+
+/// Row 5 of §5 (P2.7.7): a `/CIDToGIDMap` that is not `/Identity` is refused as
+/// `CID_MAPPING_UNSUPPORTED`, and the page is left alone.
+///
+/// **This row did not exist before P2.7.7**, which is why it is written now rather than
+/// alongside rows 1-4: until the CID writer landed there was nothing to refuse, and
+/// `CID_MAPPING_UNSUPPORTED` did not exist to refuse with. The matrix check
+/// (`the_matrix_rows_are_all_present`) listed only rows 1-4 and so could not notice.
+///
+/// The fixture is derived here rather than committed: the difference from row 6's fixture is
+/// exactly one dictionary value, and a second binary file would be a second thing to keep in
+/// sync. What is under test is the *writer's* response to a mapping it cannot extend, not the
+/// PDF's ability to express one.
+#[test]
+fn row5_a_non_identity_cid_to_gid_map_refuses_as_a_mapping_fact() {
+    let path = fixture("type0-shared-font-multi-run.pdf");
+    let mut document = load(&path);
+    // Find the descendant font object itself. Reaching it through the page's resources would
+    // mean re-implementing the resource walk; the fixture has exactly one CID-keyed descendant,
+    // and the assertion below fails loudly if that stops being true.
+    let descendants: Vec<_> = document
+        .objects
+        .iter()
+        .filter(|(_, object)| {
+            object.as_dict().is_ok_and(|dict| {
+                dict.get(b"Subtype")
+                    .and_then(|s| s.as_name())
+                    .is_ok_and(|n| n == b"CIDFontType2")
+            })
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(
+        descendants.len(),
+        1,
+        "the fixture must have exactly one /CIDFontType2 descendant for this row to be about \
+         the map; found {descendants:?}"
+    );
+    let descendant_id = descendants[0];
+
+    // Replace `/CIDToGIDMap /Identity` with a stream map on the descendant. A stream map means
+    // "the CID is not the glyph id", and a writer extending this font cannot know the glyph id
+    // a new CID should have without decoding the whole CIDs-to-GIDs table.
+    let stream_id = document.add_object(lopdf::Stream::new(
+        lopdf::Dictionary::new(),
+        vec![0u8, 1, 0, 2, 0, 3],
+    ));
+    document
+        .get_dictionary_mut(descendant_id)
+        .unwrap()
+        .set("CIDToGIDMap", lopdf::Object::Reference(stream_id));
+
+    let before = page_content(&document, 0);
+    let run = first_run(&document, 0);
+    let error = edit(&mut document, run.id, &run.text, "\u{3a9}", true)
+        .expect_err("a non-Identity /CIDToGIDMap must not be silently assumed to be identity");
+
+    assert_eq!(
+        error.code(),
+        "CID_MAPPING_UNSUPPORTED",
+        "expected CID_MAPPING_UNSUPPORTED, got {} ({error}). This is a permanent fact about the \
+         document, so it must not be reported as our bug (CID_SUBSET_BUILD_FAILED) or as a \
+         coverage limit (GLYPHS_NOT_COVERABLE): the face has the glyph and our code is fine — \
+         the font says its CIDs are not glyph ids",
+        error.code()
+    );
+    assert_eq!(
+        before,
+        page_content(&document, 0),
+        "a refused edit must leave the page byte-identical; the user must not be told 'no' \
+         after the document has already changed"
+    );
 }

@@ -319,10 +319,17 @@ pub fn subset(face: &Face, text: &str) -> Result<Subset, String> {
     let prefix = subset_prefix(face, &codes, &glyphs);
     let base_font = format!("{prefix}+{}", face.written_family);
 
+    let max_advance = glyphs
+        .iter()
+        .filter_map(|id| parsed.glyph_hor_advance(ttf_parser::GlyphId(*id)))
+        .max()
+        .unwrap_or(0);
     let program = assemble(Assemble {
         source: &source,
         parsed: &parsed,
-        glyphs: &glyphs,
+        num_glyphs: u16::try_from(glyphs.len())
+            .map_err(|_| "the subset has more than 65535 glyphs".to_string())?,
+        max_advance,
         glyf: &glyf,
         loca: &loca,
         hmtx: &hmtx,
@@ -342,6 +349,323 @@ pub fn subset(face: &Face, text: &str) -> Result<Subset, String> {
         descent: parsed.descender(),
         cap_height: parsed.capital_height().unwrap_or(parsed.ascender()),
     })
+}
+
+/// A face cut down to the glyphs one replacement needs, written as a **CID** program.
+///
+/// The simple-font [`Subset`] cannot serve a `/Type0` run: its `codes` are one byte, its
+/// `/Widths` is indexed by code, and `embed::subset` numbers glyphs from 1 in first-use order.
+/// A Type0 font needs two-byte CIDs, a `/W` array, and — under `/CIDToGIDMap /Identity` — a
+/// program whose glyph ids *are* the document's CIDs.
+///
+/// That last requirement is R5, and it is why this rebuild cannot reuse `subset`'s numbering.
+/// [`subset_at_cids`] takes the assignment as an argument instead of inventing one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CidSubset {
+    /// The subset program, uncompressed. Glyph slots are the document's CID space: a CID the
+    /// rebuild keeps has its outline at that id, and every other slot is empty.
+    pub program: Vec<u8>,
+    /// `CID → character`, in ascending CID order: the correspondence the written program and
+    /// its `/ToUnicode` both state.
+    pub assignments: Vec<(u16, char)>,
+    /// The written `/BaseFont`, e.g. `KQ3F7A+Sans-Regular`.
+    pub base_font: String,
+    pub units_per_em: u16,
+    /// The subset's own bounding box, in font units.
+    pub bbox: [i16; 4],
+    pub ascent: i16,
+    pub descent: i16,
+    pub cap_height: i16,
+}
+
+impl CidSubset {
+    /// The two-byte CID for `ch`, or `None` when the subset does not carry it.
+    pub fn encode(&self, text: &str) -> Option<Vec<u8>> {
+        text.chars()
+            .map(|ch| {
+                self.assignments
+                    .iter()
+                    .find(|(_, c)| *c == ch)
+                    .map(|(cid, _)| *cid)
+            })
+            .collect::<Option<Vec<u16>>>()
+            .map(|cids| cids.iter().flat_map(|cid| cid.to_be_bytes()).collect())
+    }
+
+    /// The advance of `text` at `font_size` points, from the **written** program's `hmtx`.
+    ///
+    /// Read from the program rather than from the bundled face on purpose: T13 compares the
+    /// final font's metrics, and `/W` must state the same numbers, so both derive from the
+    /// bytes in the file.
+    pub fn advance(&self, text: &str, font_size: f32) -> Option<f32> {
+        if self.units_per_em == 0 {
+            return None;
+        }
+        let face = ttf_parser::Face::parse(&self.program, 0).ok()?;
+        let mut thousandths: f64 = 0.0;
+        for ch in text.chars() {
+            let (cid, _) = *self.assignments.iter().find(|(_, c)| *c == ch)?;
+            let advance = face.glyph_hor_advance(ttf_parser::GlyphId(cid))?;
+            thousandths += f64::from(scale_to_1000(advance, face.units_per_em()));
+        }
+        Some((thousandths * f64::from(font_size) / 1000.0) as f32)
+    }
+
+    /// The `/W` entries R1 requires: one `[cid [w1 w2 …]]` pair per contiguous CID run.
+    ///
+    /// Never the `[cfirst clast w]` range form, and never CID 0. The range form would state one
+    /// width for a span the subset measures individually, so it can only be right by luck.
+    pub fn width_entries(&self) -> Vec<(u16, Vec<u16>)> {
+        let face = match ttf_parser::Face::parse(&self.program, 0) {
+            Ok(face) => face,
+            Err(_) => return Vec::new(),
+        };
+        let upem = face.units_per_em();
+        let mut out: Vec<(u16, Vec<u16>)> = Vec::new();
+        for (cid, _) in &self.assignments {
+            if *cid == 0 {
+                continue;
+            }
+            let width = face
+                .glyph_hor_advance(ttf_parser::GlyphId(*cid))
+                .map(|advance| scale_to_1000(advance, upem))
+                .unwrap_or(0);
+            match out.last_mut() {
+                Some((first, widths)) if *first + widths.len() as u16 == *cid => {
+                    widths.push(width);
+                }
+                _ => out.push((*cid, vec![width])),
+            }
+        }
+        out
+    }
+
+    /// `/DW` (R1): the advance of the first assigned CID, in thousandths of an em.
+    ///
+    /// Written **always**. A CID the `/W` array does not name must still measure; naming
+    /// neither would make the file unmeasurable by the same reader that wrote it, which is
+    /// the state `cid.rs::CidFont::advance` refuses to guess from.
+    pub fn default_width(&self) -> u16 {
+        let Some(face) = ttf_parser::Face::parse(&self.program, 0).ok() else {
+            return 0;
+        };
+        let upem = face.units_per_em();
+        self.assignments
+            .iter()
+            .find(|(cid, _)| *cid != 0)
+            .and_then(|(cid, _)| face.glyph_hor_advance(ttf_parser::GlyphId(*cid)))
+            .map(|advance| scale_to_1000(advance, upem))
+            .unwrap_or(0)
+    }
+}
+
+/// Rebuilds `face` as a CID-keyed program with the glyphs placed **at the given CIDs** (R5).
+///
+/// `placements` is `(cid, character)`; `face` supplies the outlines. The id comes from the
+/// document, the outline from the bundle, and the two are unrelated numbers — this function's
+/// whole job is to put the bundled outline down at the document's id instead of assigning a
+/// new one. A rebuild that numbered the glyphs from 1 would produce a perfectly valid font in
+/// which every retained glyph has moved, which is the silent corruption R2's `/Identity`
+/// depends on not happening.
+///
+/// `source_gid` maps a character to the glyph id it must take in the *source* program. That is
+/// what makes `/Identity` true rather than asserted: after this call, the written program's
+/// `cmap` resolves every retained character to the same id the source did.
+pub fn subset_at_cids(
+    face: &Face,
+    placements: &[(u16, char)],
+    retained: &dyn Fn(char) -> Option<u16>,
+) -> Result<CidSubset, String> {
+    if placements.is_empty() {
+        return Err("a CID subset needs at least one glyph".into());
+    }
+    let parsed = ttf_parser::Face::parse(face.bytes, 0)
+        .map_err(|e| format!("bundled face {} did not parse: {e}", face.file))?;
+    let units_per_em = parsed.units_per_em();
+    if units_per_em == 0 {
+        return Err(format!(
+            "bundled face {} declares no units-per-em",
+            face.file
+        ));
+    }
+    let source = SourceTables::parse(face.bytes)?;
+
+    // `slot -> outline`, where the slot *is* the document's CID. Missing slots stay empty,
+    // which is R5's "leaving an empty slot where the source had a glyph this subset drops".
+    let highest = placements.iter().map(|(cid, _)| *cid).max().unwrap_or(0);
+    if highest == u16::MAX {
+        return Err("the document's CIDs leave no room for a new glyph at 65535".into());
+    }
+    let mut slot_count = usize::from(highest) + 1;
+    let mut outlines: Vec<Option<Vec<u8>>> = vec![None; slot_count];
+    let mut assignments: Vec<(u16, char)> = placements.to_vec();
+    assignments.sort_unstable_by_key(|(cid, _)| *cid);
+
+    // The outline always comes from the **bundle**. R5 is exact about which number comes from
+    // where: "the retained glyph's *outlines* come from the bundled face; its *id* comes from
+    // the document." So glyph data is addressed by the bundle's own glyph id for the character,
+    // and only the slot it is copied into is the document's CID. Confusing the two indexes
+    // yields a program of empty slots — the bundle's glyph 1 is not `A` — which parses, draws
+    // nothing, and measures zero.
+    let mut slot_source: Vec<Option<u16>> = vec![None; slot_count];
+    for (cid, ch) in &assignments {
+        if let Some(source_gid) = retained(*ch) {
+            if source_gid != *cid {
+                return Err(format!(
+                    "{ch:?} draws glyph {source_gid} in the source program but the document \
+                     draws it at CID {cid}; /Identity would be a false claim and a stream \
+                     /CIDToGIDMap is not what this writer produces"
+                ));
+            }
+        }
+        let gid = parsed
+            .glyph_index(*ch)
+            .map(|glyph| glyph.0)
+            .ok_or_else(|| format!("the bundle has no glyph for {ch:?}"))?;
+        if outlines[usize::from(*cid)].is_some() {
+            return Err(format!("CID {cid} is assigned twice"));
+        }
+        outlines[usize::from(*cid)] = Some(source.glyph_data(gid).unwrap_or(&[]).to_vec());
+        slot_source[usize::from(*cid)] = Some(gid);
+    }
+
+    // A composite names its components by *bundle* id, and those ids cannot be kept: under
+    // `/Identity` a glyph id is a document CID, and the document never used them. Each component
+    // gets a fresh slot above every CID in use, and the composite's records are rewritten to
+    // name those slots.
+    let mut component_slot: Vec<(u16, u16)> = Vec::new();
+    for (cid, _) in &assignments {
+        let Some(Some(data)) = outlines.get(usize::from(*cid)).cloned() else {
+            continue;
+        };
+        for component in source.components(&data) {
+            if component_slot
+                .iter()
+                .any(|(bundle, _)| *bundle == component)
+            {
+                continue;
+            }
+            let slot = u16::try_from(slot_count).map_err(|_| {
+                "the CID subset needs more slots than a Type0 can address".to_string()
+            })?;
+            slot_count += 1;
+            outlines.push(Some(source.glyph_data(component).unwrap_or(&[]).to_vec()));
+            slot_source.push(Some(component));
+            component_slot.push((component, slot));
+        }
+    }
+
+    // `loca`/`glyf` for every slot, empty ones included.
+    let remap = |id: u16| -> Result<u16, String> {
+        component_slot
+            .iter()
+            .find(|(bundle, _)| *bundle == id)
+            .map(|(_, slot)| *slot)
+            .ok_or_else(|| format!("composite names component {id}, which was never collected"))
+    };
+    let mut glyf = Vec::new();
+    let mut loca: Vec<u32> = vec![0];
+    let mut bbox = BBox::default();
+    for outline in &outlines {
+        // An empty slot is a real zero-length glyph, not a gap a reader must skip: `loca`
+        // names it, and `/Identity` may point a CID at it, which draws nothing and parses.
+        let data = match outline {
+            None => Vec::new(),
+            Some(data) => source.rewrite_composite(data, &remap)?,
+        };
+        bbox.include(&data);
+        glyf.extend_from_slice(&data);
+        while glyf.len() % 4 != 0 {
+            glyf.push(0);
+        }
+        loca.push(glyf.len() as u32);
+    }
+
+    // `hmtx` describes the outlines actually written, slot by slot, so `/W`, `hhea` and the
+    // width gate all state the same numbers the page will be drawn with.
+    let mut hmtx = Vec::new();
+    let mut max_advance = 0u16;
+    for source_id in &slot_source {
+        let (advance, bearing) = match source_id {
+            Some(id) => (
+                parsed
+                    .glyph_hor_advance(ttf_parser::GlyphId(*id))
+                    .unwrap_or(0),
+                parsed
+                    .glyph_hor_side_bearing(ttf_parser::GlyphId(*id))
+                    .unwrap_or(0),
+            ),
+            None => (0, 0),
+        };
+        max_advance = max_advance.max(advance);
+        hmtx.extend_from_slice(&advance.to_be_bytes());
+        hmtx.extend_from_slice(&bearing.to_be_bytes());
+    }
+
+    let chars_to_glyph: BTreeMap<char, u16> =
+        assignments.iter().map(|(cid, ch)| (*ch, *cid)).collect();
+    let prefix = cid_subset_prefix(face, &assignments, highest);
+    let base_font = format!("{prefix}+{}", face.written_family);
+    let program = assemble(Assemble {
+        source: &source,
+        parsed: &parsed,
+        num_glyphs: u16::try_from(slot_count)
+            .map_err(|_| "the CID subset has more than 65535 glyph slots".to_string())?,
+        max_advance,
+        glyf: &glyf,
+        loca: &loca,
+        hmtx: &hmtx,
+        bbox,
+        chars_to_glyph: &chars_to_glyph,
+    })?;
+
+    // The program must answer for what was claimed, and this is the one place that can check
+    // it before the bytes leave the builder. `ttf-parser` parses what was just assembled, so a
+    // disagreement between the tables and the `cmap` is caught here rather than by a renderer.
+    let written = ttf_parser::Face::parse(&program, 0)
+        .map_err(|e| format!("the CID subset did not parse back: {e}"))?;
+    for (cid, ch) in &assignments {
+        let actual = written.glyph_index(*ch).map(|glyph| glyph.0);
+        if actual != Some(*cid) {
+            return Err(format!(
+                "the written program resolves {ch:?} to {actual:?} instead of CID {cid}"
+            ));
+        }
+    }
+
+    Ok(CidSubset {
+        program,
+        assignments,
+        base_font,
+        units_per_em,
+        bbox: [bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max],
+        ascent: parsed.ascender(),
+        descent: parsed.descender(),
+        cap_height: parsed.capital_height().unwrap_or(parsed.ascender()),
+    })
+}
+
+/// Deterministic six-letter prefix for a CID subset.
+///
+/// Separate from [`subset_prefix`] because the inputs differ: CIDs are two bytes and the
+/// highest slot matters, not the glyph count. The prefix must still be six uppercase letters —
+/// `install_embedded_resource` derives the resource name from it, and the OFL rule that
+/// `/BaseFont` never carries the Reserved Font Name keys off the same shape.
+fn cid_subset_prefix(face: &Face, assignments: &[(u16, char)], highest: u16) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in face
+        .written_family
+        .bytes()
+        .chain(assignments.iter().flat_map(|(cid, _)| cid.to_be_bytes()))
+        .chain(highest.to_be_bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    (0..6)
+        .map(|index| alphabet[((hash >> (index * 5)) % 26) as usize] as char)
+        .collect()
 }
 
 /// Deterministic six-letter uppercase prefix from the subset's own content.
@@ -555,7 +879,11 @@ impl BBox {
 struct Assemble<'a> {
     source: &'a SourceTables<'a>,
     parsed: &'a ttf_parser::Face<'a>,
-    glyphs: &'a [u16],
+    /// Glyph slots the written program has, which for the CID rebuild is the highest placed
+    /// id plus one and *not* the number of glyphs kept: R5 leaves gaps.
+    num_glyphs: u16,
+    /// The largest advance in the subset, for `hhea`.
+    max_advance: u16,
     glyf: &'a [u8],
     loca: &'a [u32],
     hmtx: &'a [u8],
@@ -573,7 +901,8 @@ fn assemble(input: Assemble<'_>) -> Result<Vec<u8>, String> {
     let Assemble {
         source,
         parsed,
-        glyphs,
+        num_glyphs,
+        max_advance,
         glyf,
         loca,
         hmtx,
@@ -603,13 +932,8 @@ fn assemble(input: Assemble<'_>) -> Result<Vec<u8>, String> {
         }
     };
     let head = head_table(source, &bbox, if long_loca { 1 } else { 0 })?;
-    let max_advance = glyphs
-        .iter()
-        .filter_map(|id| parsed.glyph_hor_advance(ttf_parser::GlyphId(*id)))
-        .max()
-        .unwrap_or(0);
-    let hhea = hhea_table(source, max_advance, glyphs.len() as u16)?;
-    let maxp = maxp_table(glyphs.len() as u16, source);
+    let hhea = hhea_table(source, max_advance, num_glyphs)?;
+    let maxp = maxp_table(num_glyphs, source);
     let cmap = unicode_cmap(chars_to_glyph);
     let name = name_table(parsed)?;
     let post = post_v3();
@@ -814,6 +1138,156 @@ fn unicode_cmap(chars_to_glyph: &BTreeMap<char, u16>) -> Vec<u8> {
     cmap.extend_from_slice(&12u32.to_be_bytes());
     cmap.extend_from_slice(&subtable);
     cmap
+}
+
+/// The `/ToUnicode` CMap for a CID subset: two-byte source codes (R5).
+///
+/// A one-byte `codespacerange` here would be a different codec from the font it describes, and
+/// a reader would split every CID in half. The `/CIDSystemInfo` **inside this stream** is
+/// `UCS` because its destinations are Unicode code points — a different object and a different
+/// claim from the `CIDFontType2`'s triple, which is why R3 forbids copying one into the other.
+pub fn cid_to_unicode_cmap(assignments: &[(u16, char)]) -> Vec<u8> {
+    let mut out = String::from(
+        "/CIDInit /ProcSet findresource begin\n\
+12 dict begin\nbegincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    for chunk in assignments.chunks(100) {
+        out.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (cid, ch) in chunk {
+            let mut units = [0u16; 2];
+            let target: String = ch
+                .encode_utf16(&mut units)
+                .iter()
+                .map(|unit| format!("{unit:04X}"))
+                .collect();
+            out.push_str(&format!("<{cid:04X}> <{target}>\n"));
+        }
+        out.push_str("endbfchar\n");
+    }
+    out.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    out.into_bytes()
+}
+
+/// The `/W` array, in R1's form: explicit `[cid [w1 w2 …]]` pairs, one list per contiguous run.
+///
+/// The `[cfirst clast w]` range form is deliberately never emitted. It only pays when many
+/// consecutive codes share one width; our CIDs are consecutive *and individually measured*, so
+/// a range would equalise advances the program distinguishes — a font that parses and lays out
+/// wrongly, which is the silent-wrongness shape.
+pub fn width_array(subset: &CidSubset) -> Object {
+    let mut array: Vec<Object> = Vec::new();
+    for (first, widths) in subset.width_entries() {
+        array.push(Object::Integer(i64::from(first)));
+        array.push(
+            widths
+                .into_iter()
+                .map(|width| Object::Integer(i64::from(width)))
+                .collect::<Vec<Object>>()
+                .into(),
+        );
+    }
+    Object::Array(array)
+}
+
+/// The `/CIDFontType2` descendant of a written `Type0`.
+///
+/// `/CIDSystemInfo` is `(Adobe) (Identity) (0)` (R3): it names the character collection *our*
+/// CIDs are drawn from, and ours is identity-ordered by R2 and R5. `UCS` here would be a false
+/// claim — our CIDs are glyph indices, not code points.
+pub fn cid_descendant_dictionary(subset: &CidSubset, descriptor_id: lopdf::ObjectId) -> Dictionary {
+    let mut descendant = Dictionary::new();
+    descendant.set("Type", Object::Name(b"Font".to_vec()));
+    descendant.set("Subtype", Object::Name(b"CIDFontType2".to_vec()));
+    descendant.set(
+        "BaseFont",
+        Object::Name(subset.base_font.as_bytes().to_vec()),
+    );
+    let mut info = Dictionary::new();
+    info.set("Registry", Object::string_literal("Adobe"));
+    info.set("Ordering", Object::string_literal("Identity"));
+    info.set("Supplement", Object::Integer(0));
+    descendant.set("CIDSystemInfo", Object::Dictionary(info));
+    // R2: `/Identity` is honest only because R5 placed each retained glyph at its own CID.
+    descendant.set("CIDToGIDMap", Object::Name(b"Identity".to_vec()));
+    descendant.set("DW", Object::Integer(i64::from(subset.default_width())));
+    descendant.set("W", width_array(subset));
+    descendant.set("FontDescriptor", Object::Reference(descriptor_id));
+    descendant
+}
+
+/// The `Type0` root of a written CID font.
+///
+/// `/Encoding /Identity-H` states that two-byte codes *are* the CIDs, which is true here for
+/// the same reason `/CIDToGIDMap /Identity` is. The source document's CMap is not copied — its
+/// CIDs named the old font's glyphs, and inheriting them would make the new program answer for
+/// characters it does not draw.
+pub fn cid_font_dictionary(
+    subset: &CidSubset,
+    descendant_id: lopdf::ObjectId,
+    cmap_id: lopdf::ObjectId,
+) -> Dictionary {
+    let mut font = Dictionary::new();
+    font.set("Type", Object::Name(b"Font".to_vec()));
+    font.set("Subtype", Object::Name(b"Type0".to_vec()));
+    font.set(
+        "BaseFont",
+        Object::Name(subset.base_font.as_bytes().to_vec()),
+    );
+    font.set("Encoding", Object::Name(b"Identity-H".to_vec()));
+    font.set(
+        "DescendantFonts",
+        Object::Array(vec![Object::Reference(descendant_id)]),
+    );
+    font.set("ToUnicode", Object::Reference(cmap_id));
+    font
+}
+
+/// The `/FontFile2` stream for a CID subset, Flate-compressed.
+pub fn cid_program_stream(subset: &CidSubset) -> Stream {
+    let mut program = Stream::new(Dictionary::new(), subset.program.clone());
+    program
+        .dict
+        .set("Length1", Object::Integer(subset.program.len() as i64));
+    let _ = program.compress();
+    program
+}
+
+/// The `/ToUnicode` stream for a CID subset, Flate-compressed.
+pub fn cid_cmap_stream(subset: &CidSubset) -> Stream {
+    let mut cmap = Stream::new(Dictionary::new(), cid_to_unicode_cmap(&subset.assignments));
+    let _ = cmap.compress();
+    cmap
+}
+
+/// The `/FontDescriptor` for a CID subset.
+pub fn cid_descriptor_dictionary(subset: &CidSubset, program_id: lopdf::ObjectId) -> Dictionary {
+    let mut descriptor = Dictionary::new();
+    descriptor.set("Type", Object::Name(b"FontDescriptor".to_vec()));
+    descriptor.set(
+        "FontName",
+        Object::Name(subset.base_font.as_bytes().to_vec()),
+    );
+    descriptor.set("Flags", Object::Integer(32));
+    descriptor.set(
+        "FontBBox",
+        Object::Array(
+            subset
+                .bbox
+                .iter()
+                .map(|value| Object::Integer(i64::from(*value)))
+                .collect(),
+        ),
+    );
+    descriptor.set("ItalicAngle", Object::Integer(0));
+    descriptor.set("Ascent", Object::Integer(i64::from(subset.ascent)));
+    descriptor.set("Descent", Object::Integer(i64::from(subset.descent)));
+    descriptor.set("CapHeight", Object::Integer(i64::from(subset.cap_height)));
+    descriptor.set("StemV", Object::Integer(80));
+    descriptor.set("FontFile2", Object::Reference(program_id));
+    descriptor
 }
 
 /// A `name` table carrying only what OFL condition 2 requires to travel.

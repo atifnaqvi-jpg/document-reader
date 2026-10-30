@@ -1829,6 +1829,9 @@ pub struct MergedWrite<'a> {
     /// this run end up in", and two optional fields let a caller name both, or neither while
     /// meaning one. The enum makes the choice total.
     pub embed: Option<&'a crate::editor::embed::Subset>,
+    /// P2.7.7: the CID subset to install, when the run's font is CID-keyed. Distinct from
+    /// `embed` because the two write different objects and different content bytes.
+    pub embed_cid: Option<&'a crate::editor::embed::CidSubset>,
     /// Which face the run must end up in. `Keep` covers an ordinary edit and a run whose own
     /// font already sets the replacement; the two mechanisms are exclusive here, not by
     /// convention.
@@ -1922,6 +1925,15 @@ pub fn apply_merged(
             };
             ensure_substitute_resource(document, page_id, level, base_font)?;
             swap_fonts(&mut content, &write.fragments, SUBSTITUTE_NAME, &mut swaps)?;
+        }
+        FaceWrite::EmbedCid => {
+            let Some(subset) = write.embed_cid else {
+                return Err(AppError::Other(
+                    "an embedded CID run was written without the subset to install".into(),
+                ));
+            };
+            let (name, _id) = install_embedded_cid_resource(document, page_id, level, subset)?;
+            swap_fonts(&mut content, &write.fragments, &name, &mut swaps)?;
         }
         FaceWrite::Embed => {
             let Some(subset) = write.embed else {
@@ -3041,6 +3053,64 @@ fn install_embedded_resource(
     Ok((name, font_id))
 }
 
+/// Installs a `/Type0` → `/CIDFontType2` pair for a CID subset (P2.7.7).
+///
+/// Five objects, not four: a Type0 root, its descendant, a descriptor, the program and the
+/// `/ToUnicode` CMap. The resource name still comes from the subset prefix, so two different
+/// CID subsets cannot share one — the same reason the simple installer derives its name that
+/// way.
+fn install_embedded_cid_resource(
+    document: &mut Document,
+    page_id: ObjectId,
+    level: &[XObjectStep],
+    subset: &crate::editor::embed::CidSubset,
+) -> Result<(Vec<u8>, ObjectId), AppError> {
+    let program_id = document.add_object(crate::editor::embed::cid_program_stream(subset));
+    let descriptor_id = document.add_object(crate::editor::embed::cid_descriptor_dictionary(
+        subset, program_id,
+    ));
+    let descendant_id = document.add_object(crate::editor::embed::cid_descendant_dictionary(
+        subset,
+        descriptor_id,
+    ));
+    let cmap_id = document.add_object(crate::editor::embed::cid_cmap_stream(subset));
+    let font_id = document.add_object(crate::editor::embed::cid_font_dictionary(
+        subset,
+        descendant_id,
+        cmap_id,
+    ));
+
+    let prefix = subset
+        .base_font
+        .split('+')
+        .next()
+        .filter(|prefix| prefix.len() == 6)
+        .ok_or_else(|| AppError::Other("a subset name must carry a six-letter prefix".into()))?;
+    let name = format!("F{prefix}").into_bytes();
+
+    let resources = writable_resources_at(document, page_id, level)?;
+    if !resources.has(b"Font") {
+        resources.set(b"Font", Object::Dictionary(Dictionary::new()));
+    }
+    let fonts = resources
+        .get_mut(b"Font")
+        .and_then(Object::as_dict_mut)
+        .map_err(|_| {
+            AppError::Other("page /Font map is an indirect form this edit does not rewrite".into())
+        })?;
+    if fonts.has(&name)
+        && fonts
+            .get(&name)
+            .ok()
+            .and_then(|object| object.as_reference().ok())
+            == Some(font_id)
+    {
+        return Ok((name, font_id));
+    }
+    fonts.set(name.clone(), Object::Reference(font_id));
+    Ok((name, font_id))
+}
+
 /// Which face a write leaves the run in.
 ///
 /// Three states, not two booleans: the writer must be able to tell "keep the run's font" from
@@ -3050,6 +3120,8 @@ pub enum FaceWrite {
     Keep,
     Substitute,
     Embed,
+    /// P2.7.7: install a `/Type0` → `/CIDFontType2` pair.
+    EmbedCid,
 }
 
 /// Drops every embedded subset this level no longer draws with.

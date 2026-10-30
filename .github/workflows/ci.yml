@@ -90,11 +90,14 @@ jobs:
           # This is literal for the same reason: any added `#[ignore]` must be acknowledged
           # here in the same commit, so a gated test cannot arrive -- or vanish -- silently.
           #
-          # Measured, not incremented: 81 -- 76 machine-dependent tests, the three PDFium-side Form
-          # XObject walk tests added with the recursion, and two that compose the picker path
-          # (the font search, and describe/edit/save/re-open) after it refused on the live file.
-          if [ "$ignored" -ne 81 ]; then
-            echo "::error::$ignored tests ignored; 81 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured, not incremented: 83 -- 76 machine-dependent tests, the three PDFium-side Form
+          # XObject walk tests added with the recursion, two that compose the picker path
+          # (the font search, and describe/edit/save/re-open) after it refused on the live file,
+          # and two added with P2.7.7's Type0/CID writer: `row6a` compares rendered pixels of the
+          # untouched runs and `row6c` reads the written `/W` against the program's own `hmtx`,
+          # so both need a real PDFium. `row6b` is the structural one and is not ignored.
+          if [ "$ignored" -ne 83 ]; then
+            echo "::error::$ignored tests ignored; 83 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV

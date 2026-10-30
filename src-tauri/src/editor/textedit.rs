@@ -2275,6 +2275,16 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
             })?,
             None,
         ),
+        // P2.7.7: two-byte CIDs, not one-byte codes. The bytes are the CIDs the written
+        // program draws, so they and the font installed below cannot disagree.
+        crate::editor::substitute::Plan::EmbedCid { subset, .. } => (
+            subset.encode(&request.replacement).ok_or_else(|| {
+                AppError::CidSubsetBuildFailed(
+                    "the CID subset carries no CID for a character it was built from".into(),
+                )
+            })?,
+            None,
+        ),
     };
 
     // T13: the width gate compares the FINAL font's metrics. When MECH-A fires, the final
@@ -2306,6 +2316,18 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         // T13: the width gate compares the FINAL font's metrics, and here that is the subset's
         // own `hmtx`. Reading the source face instead would be the same numbers today and a
         // different claim the moment a subset adjusts an advance.
+        // Same rule for the CID subset: the final font's own `hmtx`, which is also what the
+        // `/W` written beside it states, so the gate and the file agree by construction.
+        crate::editor::substitute::Plan::EmbedCid { subset, note, .. } => {
+            let width = subset
+                .advance(&request.replacement, request.font_size)
+                .ok_or_else(|| {
+                    AppError::CidSubsetBuildFailed(
+                        "the CID subset could not measure the replacement it was built for".into(),
+                    )
+                })?;
+            (width, Some(subset.base_font.clone()), Some(note.clone()))
+        }
         crate::editor::substitute::Plan::Embed { subset, note, .. } => {
             let width = subset
                 .advance(&request.replacement, request.font_size)
@@ -2362,11 +2384,18 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         crate::editor::substitute::Plan::Embed { subset, .. } => Some(subset),
         _ => None,
     };
+    let embedded_cid = match &plan {
+        crate::editor::substitute::Plan::EmbedCid { subset, .. } => Some(subset),
+        _ => None,
+    };
     let merged = textlocate::MergedWrite {
         fragments: writes,
         substitute: substitution.as_deref(),
         embed: embedded,
-        face: if embedded.is_some() {
+        embed_cid: embedded_cid,
+        face: if embedded_cid.is_some() {
+            textlocate::FaceWrite::EmbedCid
+        } else if embedded.is_some() {
             textlocate::FaceWrite::Embed
         } else if substitution.is_some() {
             textlocate::FaceWrite::Substitute

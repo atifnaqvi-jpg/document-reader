@@ -2431,21 +2431,6 @@ pub fn text_rise() -> Document {
     )
 }
 
-/// The same text, same placement, for the control case where both operands are unraised.
-pub fn text_without_rise() -> Document {
-    document_with_pages(
-        winansi_helvetica(),
-        vec![vec![
-            Operation::new("BT", vec![]),
-            Operation::new("Tf", vec!["F1".into(), 24.into()]),
-            Operation::new("Td", vec![72.into(), 700.into()]),
-            Operation::new("Tj", vec![Object::string_literal("BASE ")]),
-            Operation::new("Tj", vec![Object::string_literal("HIGH")]),
-            Operation::new("ET", vec![]),
-        ]],
-    )
-}
-
 /// One operand wrapped in `/Span <</ActualText …>>` (P2.7.1 T30), UTF-16BE with its BOM.
 pub fn actualtext_span() -> Document {
     let actual: Vec<u8> = vec![0xFE, 0xFF]
@@ -2791,6 +2776,216 @@ pub fn indirect_resources_inherited() -> Document {
                 .collect::<Vec<_>>(),
             "Count" => 3,
             "Resources" => inherited_resources_id,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+// --- P2.7.7: the glyph-id preservation fixture (§5 row 6) ---------------------
+
+/// One `Type0` font resource, drawn by three runs, so an edit to one can be checked for
+/// collateral damage to the others (§5 row 6).
+///
+/// **The program is a real subset, built with `embed::subset` from the bundled face.** Three
+/// earlier drafts of this fixture were wrong, and each was wrong in a way that made row 6
+/// assert nothing:
+///
+/// 1. `compressed_program_cid_page`'s program comes from `true_type_program_with_advance`,
+///    whose `glyf` is empty and `loca` all zeros. Every glyph draws nothing, so a pixel
+///    comparison of two blank regions passes whatever the writer did.
+/// 2. Embedding the *whole* `LiberationSans-Regular.ttf` draws real ink, but its `cmap` maps
+///    every character — including the one an edit substitutes. `substitute::original_covers`
+///    therefore returns true, the edit keeps the original font, and no new program is ever
+///    written. Row 6 would be green and would have tested nothing.
+/// 3. Hand-picking glyph ids into a synthetic program would duplicate the very writer under
+///    test, so a fixture bug and a writer bug would look identical.
+///
+/// A real subset avoids all three: real outlines, real `hmtx`, and — being a subset — it maps
+/// only the characters the original document used, so anything else genuinely requires a new
+/// program. That is the situation row 6 exists for.
+///
+/// **`/CIDToGIDMap /Identity` is honest here** because `embed::subset` renumbers glyphs in
+/// sorted source order (`.notdef` = 0, then `A`=1, `B`=2, `C`=3, `a`=4, `b`=5), and the CIDs
+/// below are exactly those ids. A reader following `/Identity` reaches the right glyph.
+///
+/// The middle run is the edit target. The runs above and below are what the edit must not
+/// disturb; they sit far apart so their bounding boxes cannot overlap the edit's.
+/// The P2.7.7 §5 row-6 fixture, from an already-built subset program.
+///
+/// Takes the program rather than building it **because this file is compiled twice**: normally
+/// as `editor::testpdf`, and again standalone by `examples/make_p24_fixtures.rs` and
+/// `examples/make_p277_fixtures.rs` through `#[path]`, where `crate::` names the example crate.
+/// A `crate::editor::embed` call here would therefore break both generators. Nothing in this
+/// module may reach outside `lopdf` and `ttf-parser`.
+pub fn type0_page_with_subset(
+    program_bytes: &[u8],
+    base_font: &str,
+    bbox: [i16; 4],
+    ascent: i16,
+    descent: i16,
+    cap_height: i16,
+) -> Document {
+    // The subset ids: `.notdef`=0, then sorted source ids 36,37,38,68,69 -> 1..5.
+    const CID_A: u16 = 1;
+    const CID_B: u16 = 2;
+    const CID_C: u16 = 3;
+    const CID_A_LOWER: u16 = 4;
+    const CID_B_LOWER: u16 = 5;
+
+    let parsed = ttf_parser::Face::parse(program_bytes, 0).expect("the subset parses");
+    let upem = parsed.units_per_em();
+    let width = |gid: u16| -> i64 {
+        let advance = parsed
+            .glyph_hor_advance(ttf_parser::GlyphId(gid))
+            .unwrap_or(0) as i64;
+        // Thousandths of an em, which is what a PDF width means. `hmtx` is in 2048ths.
+        (advance * 1000 + upem as i64 / 2) / upem as i64
+    };
+    let adv = |cid: u16| -> i64 { width(cid) };
+
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+
+    // A `/ToUnicode` covering **every** CID the page draws, which is what a real subset does:
+    // a producer writes the map for the glyphs it embedded, not for a subset of them.
+    //
+    // An earlier version mapped only the edited run's two CIDs. That looked plausible and was
+    // wrong twice over: the untouched runs then decoded to `U+FFFD`, so their advances fell
+    // back to a 0.5em default and the bounding boxes computed from them clipped the real ink —
+    // which would have failed row 6a for a fixture reason that reads like a writer bug. The
+    // substitution still needs a *new* program because the replacement (`Ω`) is in neither this
+    // map nor the subset's `cmap`, which is the point of the row.
+    let cmap = format!(
+        "/CIDInit /ProcSet findresource begin\n\
+         12 dict begin\nbegincmap\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+         5 beginbfchar\n\
+         <{CID_A:04X}> <0041>\n<{CID_B:04X}> <0042>\n<{CID_C:04X}> <0043>\n\
+         <{CID_A_LOWER:04X}> <0061>\n<{CID_B_LOWER:04X}> <0062>\n\
+         endbfchar\n\
+         endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+    );
+    let mut cmap_stream = Stream::new(dictionary! {}, cmap.into_bytes());
+    cmap_stream.compress().unwrap();
+    let cmap_id = document.add_object(cmap_stream);
+
+    let mut program = Stream::new(dictionary! {}, program_bytes.to_vec());
+    program.compress().unwrap();
+    let program_id = document.add_object(program);
+
+    let descriptor_id = document.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => Object::string_literal(base_font.to_string()),
+        "Flags" => 32,
+        // `bbox` is in font units; a PDF descriptor wants thousandths of an em.
+        "FontBBox" => vec![
+            Object::Integer((bbox[0] as i64 * 1000) / upem as i64),
+            Object::Integer((bbox[1] as i64 * 1000) / upem as i64),
+            Object::Integer((bbox[2] as i64 * 1000) / upem as i64),
+            Object::Integer((bbox[3] as i64 * 1000) / upem as i64),
+        ],
+        "ItalicAngle" => 0,
+        "Ascent" => (ascent as i64 * 1000) / upem as i64,
+        "Descent" => (descent as i64 * 1000) / upem as i64,
+        "CapHeight" => (cap_height as i64 * 1000) / upem as i64,
+        "StemV" => 80,
+        "FontFile2" => program_id,
+    });
+
+    let descendant_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => Object::string_literal(base_font.to_string()),
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "CIDToGIDMap" => "Identity",
+        "DW" => adv(CID_A_LOWER),
+        "W" => vec![
+            Object::Integer(CID_A as i64),
+            vec![
+                Object::Integer(adv(CID_A)),
+                Object::Integer(adv(CID_B)),
+                Object::Integer(adv(CID_C)),
+            ]
+            .into(),
+            Object::Integer(CID_A_LOWER as i64),
+            vec![
+                Object::Integer(adv(CID_A_LOWER)),
+                Object::Integer(adv(CID_B_LOWER)),
+            ]
+            .into(),
+        ],
+        "FontDescriptor" => descriptor_id,
+    });
+
+    let font_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => Object::string_literal(base_font.to_string()),
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(descendant_id)],
+        "ToUnicode" => cmap_id,
+    });
+
+    // ONE font resource, named once. All three runs resolve through it, so a writer that
+    // renumbers the program corrupts the runs it did not touch.
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let hex = |codes: &[u16]| -> Object {
+        Object::String(
+            codes.iter().flat_map(|cid| cid.to_be_bytes()).collect(),
+            StringFormat::Hexadecimal,
+        )
+    };
+
+    let content_id = document.add_object(page_body(vec![
+        // Untouched run 1, near the top. Draws `C` (CID 3).
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new("Tj", vec![hex(&[CID_C])]),
+        Operation::new("ET", vec![]),
+        // The edit target. Draws `AB` (CIDs 1, 2).
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), 500.into()]),
+        Operation::new("Tj", vec![hex(&[CID_A, CID_B])]),
+        Operation::new("ET", vec![]),
+        // Untouched run 2, near the bottom. Draws `ab` (CIDs 4, 5) — the last two characters a
+        // first-use renumbering would meet, and therefore the two that move furthest.
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new("Td", vec![72.into(), 300.into()]),
+        Operation::new("Tj", vec![hex(&[CID_A_LOWER, CID_B_LOWER])]),
+        Operation::new("ET", vec![]),
+    ]));
+
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
         }),
     );
     let catalog_id = document.add_object(dictionary! {

@@ -312,10 +312,11 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
     );
     assert!(
-        tests_step.contains("ignored") && tests_step.contains("ne 81"),
-        "the Linux job must assert exactly the 81 known machine-dependent tests: 76 from before
-         the Form XObject walk, the three PDFium-side walk tests it added, and the two that
-         compose the picker path (font search; describe/edit/save/re-open)"
+        tests_step.contains("ignored") && tests_step.contains("ne 83"),
+        "the Linux job must assert exactly the 83 known machine-dependent tests: 76 from before
+         the Form XObject walk, the three PDFium-side walk tests it added, the two that compose
+         the picker path (font search; describe/edit/save/re-open), and two from P2.7.7's Type0
+         writer (row6a renders pixels, row6c reads the program's hmtx; row6b is not ignored)"
     );
 }
 

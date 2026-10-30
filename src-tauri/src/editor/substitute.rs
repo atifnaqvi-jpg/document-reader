@@ -16,11 +16,15 @@
 //!   (`serif`→Times, `mono`/`courier`→Courier, else Helvetica) and weight/slant from
 //!   `Bold`/`Italic` tokens. The subset prefix (`ABCDEF+`) is stripped **first**, or a
 //!   prefixed name would never match a family token.
-//! * **Refusals name the way out** (T3/R4). Four refusals, four remedies, and the remedy is
+//! * **Refusals name the way out** (T3/R4). Five refusals, five remedies, and the remedy is
 //!   in the code's name because the next person reads the code, not this comment:
 //!   `SUBSTITUTE_REFUSED` (say yes), `GLYPHS_NOT_COVERABLE` (choose a different font),
-//!   `SUBSET_BUILD_FAILED` (report it; our bug), and `TYPE0_EMBED_UNIMPLEMENTED` (this build
-//!   cannot write a CID subset yet — not a fact about the document or the bundle).
+//!   `SUBSET_BUILD_FAILED` (report it; our bug), `CID_MAPPING_UNSUPPORTED` (a permanent fact
+//!   about the document's own CIDs) and `CID_SUBSET_BUILD_FAILED` (report it; our bug, in the
+//!   CID builder).
+//!
+//!   `TYPE0_EMBED_UNIMPLEMENTED` was retired by P2.7.7. It was a capability gap in this binary,
+//!   so it was **removed rather than redefined**, as its own doc comment promised.
 //!
 //! Coverage reads the embedded program with `ttf-parser` — the one new dependency, and the
 //! only place a font program is parsed. It never writes a font; [`crate::editor::embed`] does.
@@ -49,17 +53,34 @@ pub enum Plan {
         subset: crate::editor::embed::Subset,
         note: String,
     },
+    /// P2.7.7: the same, written as a `/Type0` → `/CIDFontType2` pair for a run whose font is
+    /// CID-keyed. Separate from [`Plan::Embed`] because the two carry different numbers: a
+    /// simple subset is indexed by one-byte codes, a CID subset by the document's own CIDs.
+    EmbedCid {
+        base_font: String,
+        subset: crate::editor::embed::CidSubset,
+        note: String,
+    },
 }
 
 /// The refusal code for a replacement that no available font can set.
 pub const GLYPHS_NOT_COVERABLE: &str = "GLYPHS_NOT_COVERABLE";
 /// The refusal code for a user who disabled substitution.
 pub const SUBSTITUTE_REFUSED: &str = "SUBSTITUTE_REFUSED";
-/// MECH-B (P2.7.6): the run is `Type0`, and writing an embedded CID subset is not implemented
-/// in this build. Deliberately separate from the other three: it is a capability gap in this
-/// binary, not a property of the document, and a later version will remove the code rather
-/// than change what it means.
-pub const TYPE0_EMBED_UNIMPLEMENTED: &str = "TYPE0_EMBED_UNIMPLEMENTED";
+/// P2.7.7: the source's CIDs cannot be matched to glyphs this writer can place.
+///
+/// A **permanent fact about the document**: a `/CIDToGIDMap` that is not `/Identity`, or a
+/// mapping that puts a character at a CID the source program draws from a different glyph id.
+/// Retrying, updating, or re-running the same edit on the same file changes nothing; the remedy
+/// is a different font or a narrower selection, and the remedy is in the name.
+pub const CID_MAPPING_UNSUPPORTED: &str = "CID_MAPPING_UNSUPPORTED";
+
+/// P2.7.7: the bundled face covers the characters, but the CID subset could not be built.
+///
+/// **Temporary — our bug.** Kept distinct from [`SUBSET_BUILD_FAILED`] because the two builders
+/// fail for different reasons, and a report that says which one failed is a report someone can
+/// act on. Remedy: report it.
+pub const CID_SUBSET_BUILD_FAILED: &str = "CID_SUBSET_BUILD_FAILED";
 
 /// Decides whether a run's font may be kept, or must be substituted, for `replacement`.
 ///
@@ -128,9 +149,9 @@ pub fn plan_with_font(
     // MECH-B. Each step names a different fact with a different remedy, ordered from the most
     // permanent fact to the most transient:
     //
-    // 1. no bundled face covering a character is permanent within the bundle, and stays true
-    //    even after the Type0 writer lands, so it is checked first;
-    // 2. a Type0 run would need a CID writer this build does not have -- our gap, temporary;
+    // 1. no bundled face covering a character is permanent within the bundle;
+    // 2. a source whose CIDs cannot be matched to glyphs is a permanent fact about *the
+    //    document*, and no later build changes it;
     // 3. a face that has the glyph but fails to subset is our defect.
     let Some(face) = crate::editor::embed::face_for_style(&base_font) else {
         return Err(crate::model::AppError::GlyphsNotCoverable);
@@ -138,13 +159,17 @@ pub fn plan_with_font(
     if !crate::editor::embed::covers(face, replacement) {
         return Err(crate::model::AppError::GlyphsNotCoverable);
     }
+
+    // P2.7.7: a CID-keyed run gets a CID-keyed program. This is a different subset with
+    // different numbers, not a flag on the simple one — see `CidSubset`.
     if info
         .subtype
         .as_deref()
         .is_some_and(|subtype| subtype.eq_ignore_ascii_case("type0"))
     {
-        return Err(crate::model::AppError::Type0EmbedUnimplemented);
+        return plan_cid(document, font, face, replacement, &original);
     }
+
     let subset = crate::editor::embed::subset(face, replacement)
         .map_err(crate::model::AppError::SubsetBuildFailed)?;
 
@@ -156,6 +181,106 @@ pub fn plan_with_font(
             subset.base_font
         ),
         base_font: subset.base_font.clone(),
+        subset,
+    })
+}
+
+/// Builds the CID subset for a Type0 replacement (P2.7.7, rulings R1–R5).
+///
+/// **The CID assignment (R4).** Two routes, in `cid::CidFont::encode`'s order, and the order is
+/// load-bearing. Route 1 is the source's `/ToUnicode`: a CID the document already names is
+/// *known* to draw the character the user typed, in the document's own words. Route 2 is the
+/// source program's `cmap`, which is only a glyph id under `/CIDToGIDMap /Identity`. Taking
+/// route 2 first would silently change which picture a symbol font draws.
+///
+/// **The placement (R5).** Retained characters keep the source's own glyph ids — the id comes
+/// from the document and the outline from the bundle — and the replacement, which the source
+/// never drew, takes the next free slot above the highest CID the source used. Nothing below
+/// that boundary moves, which is what makes row 6's byte comparison meaningful.
+fn plan_cid(
+    document: &Document,
+    font: Option<&lopdf::Dictionary>,
+    face: &'static crate::editor::embed::Face,
+    replacement: &str,
+    original: &str,
+) -> Result<Plan, crate::model::AppError> {
+    let unsupported = |why: String| crate::model::AppError::CidMappingUnsupported(why);
+
+    let font =
+        font.ok_or_else(|| unsupported("the run's font dictionary did not resolve".into()))?;
+    let source = crate::editor::cid::CidFont::resolve(document, font)
+        .ok_or_else(|| unsupported("the run's font does not parse as a Type0 font".into()))?;
+
+    // Route 2 is only open under `/Identity`, and an edit that must *extend* a font with a
+    // stream `/CIDToGIDMap` cannot know the new CID's glyph id. R2 forbids assuming it.
+    let identity = source.identity_cid_to_gid();
+    let source_program = source.program();
+    let source_pairs: Vec<(u16, char)> = source.pairs().unwrap_or(&[]).to_vec();
+    if source_pairs.is_empty() {
+        // `Gate::FontEncoding` refuses a font with no `/ToUnicode` before this point, so this
+        // is a contradiction in our own call path rather than a document fact.
+        return Err(unsupported(
+            "the run's font states no /ToUnicode correspondence to preserve".into(),
+        ));
+    }
+
+    // The source's own character -> glyph id, for the characters it draws. Under `/Identity`
+    // this is the source CMap; both are read because a producer may name a CID in `/ToUnicode`
+    // that its program draws from a different glyph id, and that disagreement is exactly what
+    // `CID_MAPPING_UNSUPPORTED` exists to report rather than paper over.
+    let source_face = source_program.and_then(|bytes| ttf_parser::Face::parse(bytes, 0).ok());
+    // Only *retained* characters are asked about here: those are the ones whose id the
+    // document owns. A character the document never drew has no source id at all, and the
+    // builder takes its outline from the bundle at whatever slot R5 assigns it. Asking the
+    // source for the replacement would fail for every genuinely new character, which is the
+    // whole point of the phase.
+    let gid_of = |ch: char| -> Option<u16> {
+        source_face
+            .as_ref()
+            .and_then(|face| face.glyph_index(ch))
+            .map(|glyph| glyph.0)
+    };
+
+    if !identity {
+        return Err(unsupported(
+            "the run's /CIDToGIDMap is not /Identity, so a new CID's glyph id is unknown".into(),
+        ));
+    }
+
+    // R5: every character already in the source keeps its CID; the replacement, if new, goes
+    // above the highest CID the source used.
+    let highest = source_pairs.iter().map(|(cid, _)| *cid).max().unwrap_or(0);
+    let mut placements: Vec<(u16, char)> = source_pairs.clone();
+    let mut next = highest
+        .checked_add(1)
+        .ok_or_else(|| unsupported("the document's CIDs leave no room for a new glyph".into()))?;
+    for ch in replacement.chars() {
+        if placements.iter().any(|(_, existing)| *existing == ch) {
+            continue;
+        }
+        placements.push((next, ch));
+        next = next.checked_add(1).ok_or_else(|| {
+            unsupported("the document's CIDs leave no room for a new glyph".into())
+        })?;
+    }
+
+    let subset = crate::editor::embed::subset_at_cids(face, &placements, &gid_of)
+        .map_err(crate::model::AppError::CidSubsetBuildFailed)?;
+
+    // The replacement must be expressible in what was just built, or the bytes the writer puts
+    // on the page would name a CID the font does not draw.
+    if subset.encode(replacement).is_none() {
+        return Err(crate::model::AppError::CidSubsetBuildFailed(
+            "the CID subset does not encode the replacement it was built for".into(),
+        ));
+    }
+
+    Ok(Plan::EmbedCid {
+        base_font: subset.base_font.clone(),
+        note: format!(
+            "edited with an embedded CID subset of {} substituting {original}",
+            subset.base_font
+        ),
         subset,
     })
 }

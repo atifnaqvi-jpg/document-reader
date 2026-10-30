@@ -416,6 +416,49 @@ if ! grep -qE '^test result:' "$log"; then
     exit 3
 fi
 
+# A summary line is not the same thing as a test having run.
+#
+# Measured failure this closes: `scripts/mutate.sh test --test type0_row6` passes `test`
+# twice -- this script already supplies it -- so cargo read the second one as a *filter*.
+# It matched nothing, zero tests executed, and the harness reported SURVIVED against a clean
+# tree. The summary line read `ok. 0 passed; 0 failed; ... 4 filtered out`, which looks like
+# a pass in every respect except the counts. "No test failed" and "no test ran" are the same
+# sentence until something counts, so count.
+#
+# `passed` + `failed` is what actually executed: an ignored test is selected but not run, and
+# a filtered test is not even selected. Either way it proves nothing about the mutant.
+SUMMARY_LINE=$(grep -E '^test result:' "$log" | tail -1)
+TESTS_RUN=$(printf '%s\n' "$SUMMARY_LINE" | awk '{
+    for (i = 1; i <= NF; i++) {
+        if ($i == "passed;") p = $(i-1);
+        if ($i == "failed;") f = $(i-1);
+        if ($i == "filtered") g = $(i-1);
+    }
+    print p + f
+}')
+TESTS_FILTERED=$(printf '%s\n' "$SUMMARY_LINE" | awk '{
+    for (i = 1; i <= NF; i++) if ($i == "filtered") g = $(i-1);
+    print g + 0
+}')
+
+if [ "${TESTS_RUN:-0}" -eq 0 ]; then
+    if [ "${TESTS_FILTERED:-0}" -gt 0 ]; then
+        echo "MEASUREMENT ERROR: 0 tests ran; the filter matched nothing." >&2
+        echo "$TESTS_FILTERED test(s) were deselected by a name filter, so no assertion was" >&2
+        echo "evaluated and the green summary belongs to the filter, not to the mutant." >&2
+        echo "Check the arguments: this script already supplies the 'test' subcommand, so" >&2
+        echo "passing it again makes it a filter. Use e.g. 'mutate.sh --test my_target'." >&2
+        STALE_BRANCH="zero_tests_filter_matched_nothing"
+    else
+        echo "MEASUREMENT ERROR: 0 tests ran; the target contains no runnable tests." >&2
+        echo "The summary line is green because there was nothing to evaluate." >&2
+        STALE_BRANCH="zero_tests_target_empty"
+    fi
+    printf 'summary: %s\n' "$SUMMARY_LINE" >&2
+    record_evidence "MEASUREMENT_ERROR:zero_tests_ran" 3
+    exit 3
+fi
+
 # Did the run observe the mutant?
 #
 # This is the load-bearing check, and what counts as evidence depends on how the guard

@@ -19,6 +19,15 @@ testfixtures = []
 name = "make_p24_fixtures"
 required-features = ["testfixtures"]
 
+# P2.7.7 §5 row 6: regenerates `type0-shared-font-multi-run.pdf`. Its own binary rather than a
+# second array in `make_p24_fixtures`, because that generator's name and doc comment are the
+# P2.4 fixture matrix and a phase's fixture should be regenerable without rewriting another
+# phase's artefact. The builder itself is shared through `src/editor/testpdf.rs`, so the
+# committed file and the in-memory tests cannot drift.
+[[example]]
+name = "make_p277_fixtures"
+required-features = ["testfixtures"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -118,9 +118,13 @@ export const TEXT_EDIT_ERROR_CODES = [
   // GLYPHS_NOT_COVERABLE on purpose -- the remedy is "report it", not "choose a font", and
   // both belong on the panel so the message lands next to the run it concerns.
   "SUBSET_BUILD_FAILED",
-  // P2.7.6: this build has no CID-subset writer. A capability gap, not a limitation of the
-  // document or the bundle, so it gets its own code and its own sentence.
-  "TYPE0_EMBED_UNIMPLEMENTED",
+  // P2.7.7: the run's own CIDs cannot be matched to glyphs we can place. A permanent fact
+  // about the document -- retrying or updating changes nothing -- so it is shown rather than
+  // retried, and the message names a different font as the way out.
+  "CID_MAPPING_UNSUPPORTED",
+  // P2.7.7: the bundled face has the glyphs but the CID subset would not build. Our bug, and
+  // a different sentence from CID_MAPPING_UNSUPPORTED: this one says "report it".
+  "CID_SUBSET_BUILD_FAILED",
 ];
 
 /**

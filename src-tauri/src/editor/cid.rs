@@ -121,6 +121,15 @@ impl CodeMap {
             .map(|(_, ch)| *ch)
     }
 
+    /// Every `(code, character)` pair the map states, in file order.
+    ///
+    /// The CID writer needs the whole correspondence, not one lookup at a time: R5 rebuilds
+    /// the program from the *document's* numbering, so it must enumerate the CIDs the source
+    /// named rather than ask about them one by one.
+    pub fn pairs(&self) -> &[(u16, char)] {
+        &self.forward
+    }
+
     /// The code that draws `ch`.
     pub fn code(&self, ch: char) -> Option<u16> {
         self.reverse
@@ -270,6 +279,27 @@ impl CidFont {
             thousandths += width;
         }
         Some(thousandths * font_size / 1000.0)
+    }
+
+    /// The source's `/ToUnicode` correspondence, or `None` when it has none.
+    ///
+    /// This is the document's own account of which CID draws which character, which is the
+    /// numbering R5 requires the rebuilt program to honour.
+    pub fn pairs(&self) -> Option<&[(u16, char)]> {
+        self.cmap.as_ref().map(CodeMap::pairs)
+    }
+
+    /// The decompressed program, for callers that must read the source's `cmap`.
+    pub fn program(&self) -> Option<&[u8]> {
+        self.program.as_deref()
+    }
+
+    /// Whether a CID may be used directly as a glyph id (`/CIDToGIDMap /Identity`).
+    ///
+    /// Public because the write side must refuse a font it cannot extend *for this reason*,
+    /// and that refusal (`CID_MAPPING_UNSUPPORTED`) is the document's fact, not ours.
+    pub fn identity_cid_to_gid(&self) -> bool {
+        self.identity_cid_to_gid
     }
 
     fn code_for_char(&self, ch: char) -> Option<u16> {

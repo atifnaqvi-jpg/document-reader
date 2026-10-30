@@ -224,17 +224,27 @@ pub enum AppError {
          it happens again ({0})"
     )]
     SubsetBuildFailed(String),
-    /// MECH-B (P2.7.6): the run is `Type0`, and this build has no CID-subset writer. A
-    /// capability gap, not a property of the document: a later version removes this code
-    /// rather than changing what it means. Deliberately not folded into
-    /// `SUBSET_BUILD_FAILED` -- retrying cannot help, and "this build cannot" is a different
-    /// sentence from "we tried and failed".
+    /// P2.7.7: the run's own CIDs cannot be matched to glyphs this writer can place.
+    ///
+    /// A **permanent fact about the document**, unlike `CID_SUBSET_BUILD_FAILED`: a
+    /// `/CIDToGIDMap` that is not `/Identity`, or a correspondence that puts a character
+    /// somewhere the source program draws from a different glyph. Retrying, updating, or
+    /// re-running the same edit on the same file changes nothing. The remedy is in the name.
     #[error(
-        "this run uses a CID (Type0) font, and embedding a font for this run is not \
-         implemented in this build; retry after updating, or use the annotation tools to add \
-         a note"
+        "this run's font maps characters to glyphs in a way this editor cannot extend ({0}); \
+         choose a different font for this text, or use the annotation tools to add a note"
     )]
-    Type0EmbedUnimplemented,
+    CidMappingUnsupported(String),
+
+    /// P2.7.7: the bundled face covers the characters, but the CID subset could not be built.
+    ///
+    /// **Temporary — our bug**, and separate from `SUBSET_BUILD_FAILED` because the two
+    /// builders fail for different reasons. Remedy: report it.
+    #[error(
+        "this editor could not build the font this text needs ({0}); this is a defect in the \
+         editor, not in your document, so please report it"
+    )]
+    CidSubsetBuildFailed(String),
     /// Stage 2 (O-ST2-4): the user turned substitution off, and the original font cannot
     /// set the replacement. Refused rather than substituting, per the toggle's contract.
     #[error(
@@ -268,7 +278,8 @@ impl AppError {
             AppError::TextRunNotEditable(_) => "TEXT_RUN_NOT_EDITABLE",
             AppError::GlyphsNotCoverable => "GLYPHS_NOT_COVERABLE",
             AppError::SubsetBuildFailed(_) => "SUBSET_BUILD_FAILED",
-            AppError::Type0EmbedUnimplemented => "TYPE0_EMBED_UNIMPLEMENTED",
+            AppError::CidMappingUnsupported(_) => "CID_MAPPING_UNSUPPORTED",
+            AppError::CidSubsetBuildFailed(_) => "CID_SUBSET_BUILD_FAILED",
             AppError::SubstituteRefused => "SUBSTITUTE_REFUSED",
             AppError::TextRunMismatch => "TEXT_RUN_MISMATCH",
             AppError::ContentTooLarge => "CONTENT_TOO_LARGE",
