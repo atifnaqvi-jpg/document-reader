@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 use document_reader_lib::editor::cid::CidFont;
 use document_reader_lib::editor::embed;
+use document_reader_lib::editor::substitute;
 use document_reader_lib::editor::textedit;
 use document_reader_lib::editor::textlocate::{self, RawRun};
 use document_reader_lib::model::AppError;
@@ -1246,4 +1247,97 @@ fn a_component_that_is_also_a_cid_reuses_that_cids_slot() {
          composite names {components:?}, which does not include 1, so the ring is being drawn \
          over a *second* copy of A that no run and no /W entry refers to"
     );
+}
+
+// ---- The plan a retained run gets ----------------------------------------------------
+//
+// These two drive `substitute::plan`, the decision the Apply button reaches through
+// `textedit::edit`. They are the click path's first half: what the writer is *asked* to do,
+// before any bytes are written. Row 6's own tests start one step later, at `subset_at_cids`,
+// so a misroute here would never have shown up in them.
+
+/// The `(gates, font dictionary)` pair `textedit::edit` builds for one run of the fixture.
+fn plan_inputs(
+    document: &lopdf::Document,
+    wanted: &str,
+) -> (textedit::RunGates, lopdf::Dictionary) {
+    let page_id = textlocate::page_id(document, 0).expect("page 0");
+    let all = runs(document);
+    let run = all
+        .iter()
+        .find(|run| run.text == wanted)
+        .unwrap_or_else(|| panic!("the fixture has no run reading {wanted:?}"));
+    let gates = textedit::resolve_gates(document, 0, run).expect("the run's gates resolve");
+    let font = textlocate::font_dict(document, page_id, &run.font_key)
+        .unwrap_or_else(|| {
+            panic!(
+                "the run's font {} does not resolve",
+                String::from_utf8_lossy(&run.font_key)
+            )
+        })
+        .clone();
+    (gates, font)
+}
+
+/// With substitution off, a retained CID run that cannot set the replacement refuses
+/// `SUBSTITUTE_REFUSED`, and the document is untouched.
+///
+/// `x` and `y` are absent from the fixture's embedded program: its `cmap` has exactly three
+/// format-4 segments (`0041-0043`, `0061-0062`, `FFFF-FFFF`), so `glyph_index` returns `None`
+/// for both rather than `.notdef`. That is what makes this a refusal and not a silent
+/// `.notdef` write.
+#[test]
+fn editing_a_retained_run_refuses_without_substitution() {
+    let document = load();
+    let (gates, font) = plan_inputs(&document, "ab");
+
+    let outcome = substitute::plan_with_font(&document, Some(&font), &gates.font, "xy", false);
+
+    match outcome {
+        Err(AppError::SubstituteRefused) => {}
+        Err(other) => panic!("expected SUBSTITUTE_REFUSED, got {}: {other}", other.code()),
+        Ok(plan) => panic!(
+            "with substitution off and no glyph for `x` or `y` in the run's own font, the \
+             edit must refuse; the plan was {plan:?}"
+        ),
+    }
+}
+
+/// With substitution ON, a CID run goes to the CID writer — never to MECH-A.
+///
+/// This is the ordering guard. A Type0 run cannot take the substitution route: its content
+/// stream holds two-byte CIDs, and a standard-14 substitute draws one-byte codes, so
+/// "substituting the font" would mean substituting the encoding too. The panel says as much
+/// in its own label ("CID/Type0 runs keep their own font").
+///
+/// The replacement is deliberately an **in-WinAnsi** one. `afm::covers("Helvetica", "xy")` is
+/// true, so before the reorder this returned `Plan::Substitute` and wrote Helvetica into a
+/// CID-keyed page. A non-WinAnsi character such as `Ω` does *not* discriminate: it fails
+/// `afm::covers` anyway and so reached `plan_cid` even with the defect present.
+#[test]
+fn editing_a_retained_run_reaches_the_cid_writer() {
+    let document = load();
+    let (gates, font) = plan_inputs(&document, "ab");
+
+    let plan = substitute::plan_with_font(&document, Some(&font), &gates.font, "xy", true)
+        .unwrap_or_else(|error| panic!("expected the CID writer, got {}: {error}", error.code()));
+
+    match &plan {
+        substitute::Plan::EmbedCid { subset, .. } => {
+            // The replacement's bytes must be CIDs the written program draws, or the two
+            // halves disagree even though the plan is the right variant.
+            assert_eq!(
+                subset.encode("xy").map(|bytes| bytes.len()),
+                Some(4),
+                "a two-character replacement is four bytes of two-byte CIDs"
+            );
+        }
+        substitute::Plan::Substitute { base_font, .. } => panic!(
+            "a CID-keyed run was routed to the standard-14 substitute `{base_font}`. That \
+             replaces the face but not the two-byte encoding, so the run's codes would name \
+             CIDs the substitute does not draw — and it contradicts the panel's own \
+             \"CID/Type0 runs keep their own font\" label"
+        ),
+        other => panic!("expected EmbedCid for a CID-keyed run, got {other:?}"),
+    }
 }

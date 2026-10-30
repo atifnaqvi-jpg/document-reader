@@ -137,8 +137,41 @@ pub fn plan_with_font(
         .clone()
         .unwrap_or_else(|| String::from("this run's font"));
 
-    // MECH-A first: a standard-14 reference is the cheap path and stays cheap (R4).
+    // MECH-A: a standard-14 reference is the cheap path and stays cheap (R4).
     let base_font = style_match(info.base_font.as_deref());
+
+    // P2.7.7: a CID-keyed run gets a CID-keyed program. This is a different subset with
+    // different numbers, not a flag on the simple one — see `CidSubset`.
+    //
+    // **This branch runs before MECH-A on purpose.** A Type0 run cannot take the substitution
+    // route at all: replacing its font means replacing its encoding as well as its face, and
+    // the two-byte codes in the content stream would then name CIDs the substitute does not
+    // draw. `textlocate` already refuses to merge a CID run into a simple one on exactly this
+    // ground (`composable: CidFont::resolve(..).is_none()`). `plan` used to apply the rule only
+    // *after* the `afm::covers` test, so any in-WinAnsi replacement — which is most of them —
+    // silently wrote a Helvetica substitute into a CID-keyed page and contradicted the panel's
+    // own "CID/Type0 runs keep their own font" label.
+    //
+    // The two checks below are deliberately shared with MECH-B rather than skipped: a
+    // character the bundle has no glyph for is a permanent fact about the bundle
+    // (`GLYPHS_NOT_COVERABLE`, remedy "choose another font"), whereas letting `plan_cid` fail
+    // later would report it as `CID_SUBSET_BUILD_FAILED`, whose remedy is "report this defect".
+    // Only the `afm::covers` test is skipped, because that one is specific to substituting a
+    // standard-14 face — precisely the route a CID run may not take.
+    if info
+        .subtype
+        .as_deref()
+        .is_some_and(|subtype| subtype.eq_ignore_ascii_case("type0"))
+    {
+        let Some(face) = crate::editor::embed::face_for_style(&base_font) else {
+            return Err(crate::model::AppError::GlyphsNotCoverable);
+        };
+        if !crate::editor::embed::covers(face, replacement) {
+            return Err(crate::model::AppError::GlyphsNotCoverable);
+        }
+        return plan_cid(document, font, face, replacement, &original);
+    }
+
     if afm::covers(&base_font, replacement) {
         return Ok(Plan::Substitute {
             note: format!("edited with {base_font} substituting {original}"),
@@ -158,16 +191,6 @@ pub fn plan_with_font(
     };
     if !crate::editor::embed::covers(face, replacement) {
         return Err(crate::model::AppError::GlyphsNotCoverable);
-    }
-
-    // P2.7.7: a CID-keyed run gets a CID-keyed program. This is a different subset with
-    // different numbers, not a flag on the simple one — see `CidSubset`.
-    if info
-        .subtype
-        .as_deref()
-        .is_some_and(|subtype| subtype.eq_ignore_ascii_case("type0"))
-    {
-        return plan_cid(document, font, face, replacement, &original);
     }
 
     let subset = crate::editor::embed::subset(face, replacement)
