@@ -545,6 +545,18 @@ pub fn subset_at_cids(
             {
                 continue;
             }
+            // A component the document already draws is *that* CID. `Å` is `A` plus a ring, and
+            // `A` is usually a live CID, so handing it a fresh slot would ship a second copy of
+            // an outline at an id no run and no `/W` entry names — `/Identity` gives one glyph
+            // id one meaning, and the duplicate would drift from CID 1 the moment either is
+            // rewritten. Reuse the CID.
+            if let Some((live, _)) = assignments
+                .iter()
+                .find(|(_, ch)| parsed.glyph_index(*ch).map(|g| g.0) == Some(component))
+            {
+                component_slot.push((component, *live));
+                continue;
+            }
             let slot = u16::try_from(slot_count).map_err(|_| {
                 "the CID subset needs more slots than a Type0 can address".to_string()
             })?;

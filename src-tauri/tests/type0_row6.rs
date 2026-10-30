@@ -32,6 +32,7 @@
 use std::path::{Path, PathBuf};
 
 use document_reader_lib::editor::cid::CidFont;
+use document_reader_lib::editor::embed;
 use document_reader_lib::editor::textedit;
 use document_reader_lib::editor::textlocate::{self, RawRun};
 use document_reader_lib::model::AppError;
@@ -1032,5 +1033,217 @@ fn row6c_the_edited_run_renders_at_the_advance_the_width_array_claims() {
         ink_pixels(&image, rect) > 0,
         "the edited run draws no ink inside {rect:?}; a write that produced nothing is not a \
          pass, it is a deletion"
+    );
+}
+
+// ---- Composites ----------------------------------------------------------------------
+//
+// The first version of this file exercised only `A`,`B`,`C`,`a`,`b`,`Ω`, and all six are
+// **simple** glyphs in Liberation Sans: `numberOfContours` is 0, 2, 2, 1, 1 and 1 respectively.
+// So `subset_at_cids`'s composite path never ran, and a mutant that rewrote each component id
+// to the *bundle* id instead of the new slot SURVIVED. Measured, not assumed — the numbers below
+// are read from the bundled face by the test itself.
+//
+// `é` (U+00E9) is glyph 171 with `numberOfContours == -1` and components `[72, 118]`; `ü`
+// (U+00FC) is 190 with `[88, 106]`; and `Å` (U+00C5) is 135 with `[36, 668]`, where component 36
+// is `A` — a character the document already draws at its own CID. That last case is the sharp
+// one: the component is both a live CID and a composite component, and it must resolve to the
+// CID's slot rather than to a fresh one, or the ring is drawn from the wrong outline.
+
+/// The component ids a written glyph record names, read straight from the program's `glyf`.
+///
+/// Deliberately not `SourceTables::components`: a check that reuses the reader it is checking
+/// cannot fail when the reader is what broke.
+fn written_components(program: &[u8], gid: u16) -> Option<Vec<u16>> {
+    let read_u16 = |at: usize| -> Option<u16> {
+        Some(u16::from_be_bytes([
+            *program.get(at)?,
+            *program.get(at + 1)?,
+        ]))
+    };
+    let read_u32 = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes([
+            *program.get(at)?,
+            *program.get(at + 1)?,
+            *program.get(at + 2)?,
+            *program.get(at + 3)?,
+        ]))
+    };
+    let tables = {
+        let count = read_u16(4)? as usize;
+        let mut map = std::collections::BTreeMap::new();
+        for index in 0..count {
+            let base = 12 + index * 16;
+            let tag: [u8; 4] = program.get(base..base + 4)?.try_into().ok()?;
+            map.insert(
+                tag,
+                (read_u32(base + 8)? as usize, read_u32(base + 12)? as usize),
+            );
+        }
+        map
+    };
+    let loca_at = tables.get(b"loca")?.0;
+    let glyf_at = tables.get(b"glyf")?.0;
+    let long = read_u16(tables.get(b"head")?.0 + 50)? != 0;
+    let at = usize::from(gid);
+    let (start, end) = if long {
+        (
+            read_u32(loca_at + at * 4)? as usize,
+            read_u32(loca_at + at * 4 + 4)? as usize,
+        )
+    } else {
+        (
+            read_u16(loca_at + at * 2)? as usize * 2,
+            read_u16(loca_at + at * 2 + 2)? as usize * 2,
+        )
+    };
+    if end <= start {
+        return Some(Vec::new());
+    }
+    let data = program.get(glyf_at + start..glyf_at + end)?;
+    if i16::from_be_bytes([data[0], data[1]]) != -1 {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut rest = &data[10..];
+    loop {
+        let flags = u16::from_be_bytes([rest[0], rest[1]]);
+        out.push(u16::from_be_bytes([rest[2], rest[3]]));
+        let mut step = 4;
+        step += if flags & 0x0001 != 0 { 4 } else { 2 };
+        step += if flags & 0x0008 != 0 {
+            2
+        } else if flags & 0x0040 != 0 {
+            4
+        } else if flags & 0x0080 != 0 {
+            8
+        } else {
+            0
+        };
+        rest = rest.get(step..)?;
+        if flags & 0x0020 == 0 {
+            break;
+        }
+    }
+    Some(out)
+}
+
+/// `subset_at_cids` rewrites composite components to the slots it actually wrote.
+///
+/// This is the test the surviving mutant asked for. It fails if a component id is left as the
+/// bundle's id: the bundle's `é` names `72` and `118`, and neither number is a CID in this
+/// document, so the composite would point at empty slots and draw a bare accent.
+#[test]
+fn composites_are_rewritten_to_the_slots_the_writer_wrote() {
+    let face = embed::face_for_style("Helvetica").expect("the bundled Sans face");
+    let parsed = ttf_parser::Face::parse(face.bytes, 0).expect("the bundle parses");
+
+    // Each string's source glyphs, straight from the bundle, so the test states what it means
+    // by "composite" rather than assuming it.
+    for (ch, expected_source_components) in [
+        ('é', [72u16, 118]),
+        ('ü', [88, 106]),
+        // `Å`'s first component is `A` itself, which this document also draws.
+        ('Å', [36, 668]),
+    ] {
+        let gid = parsed
+            .glyph_index(ch)
+            .map(|glyph| glyph.0)
+            .unwrap_or_else(|| panic!("the bundle has no glyph for {ch:?}"));
+        assert_eq!(
+            written_components(face.bytes, gid).as_deref(),
+            Some(&expected_source_components[..]),
+            "the bundled face no longer draws {ch:?} (glyph {gid}) as a composite over \
+             {expected_source_components:?}. The premise of this test is a measured fact about \
+             the font, so it is asserted rather than assumed"
+        );
+
+        // `A` is placed at CID 1 and drawn from the same slot; `ch` is new, so R5 puts it above
+        // the highest retained CID (1) at 2. Its components must go above *both*, or a
+        // component would land on a slot the document already uses.
+        let subset =
+            embed::subset_at_cids(face, &[(1, 'A'), (2, ch)], &|c| (c == 'A').then_some(1))
+                .unwrap_or_else(|e| panic!("subset_at_cids refused {ch:?}: {e}"));
+
+        let written = ttf_parser::Face::parse(&subset.program, 0).expect("the written program");
+        let written_gid = written
+            .glyph_index(ch)
+            .map(|glyph| glyph.0)
+            .unwrap_or_else(|| panic!("the written program does not map {ch:?}"));
+        assert_eq!(
+            written_gid, 2,
+            "{ch:?} must be placed at the CID R5 assigns it (2), not at {written_gid}"
+        );
+
+        let components = written_components(&subset.program, written_gid)
+            .expect("the written composite record is readable");
+        assert_eq!(
+            components.len(),
+            expected_source_components.len(),
+            "the written {ch:?} names {} components but the bundle's version names {}",
+            components.len(),
+            expected_source_components.len()
+        );
+        assert!(
+            !components
+                .iter()
+                .any(|c| expected_source_components.contains(c)),
+            "the written {ch:?} still names the *bundle's* component ids {components:?}. Those \
+             numbers are not CIDs in this document: under /Identity a glyph id is a CID, the \
+             document placed nothing at {:?}, and the composite would draw empty slots. This is \
+             the mutation that survived before this test existed",
+            expected_source_components
+        );
+        // A component must name a slot that exists, and the only permitted overlap with a live
+        // CID is `A` at its own CID — see the dedicated test below, which is what forces this.
+        let slots = subset
+            .assignments
+            .iter()
+            .map(|(cid, _)| *cid)
+            .collect::<Vec<_>>();
+        for component in &components {
+            assert!(
+                !slots.contains(component) || *component == 1,
+                "component {component} of {ch:?} collides with the live CIDs {slots:?}; the \
+                 only permitted overlap is `A` at its own CID"
+            );
+            assert!(
+                written_components(&subset.program, *component).is_some(),
+                "component {component} of {ch:?} does not name a readable glyph slot"
+            );
+        }
+    }
+}
+
+/// `Å`'s ring component is `A`, which the document also draws at CID 1.
+///
+/// The two uses must resolve to the *same* slot, because the outline is identical and
+/// `/Identity` gives a glyph id exactly one meaning. A writer that handed `A` a fresh component
+/// slot would duplicate the outline and, worse, leave CID 1 ambiguous: the same shape reachable
+/// at two ids with only one of them named by `/W`.
+#[test]
+fn a_component_that_is_also_a_cid_reuses_that_cids_slot() {
+    let face = embed::face_for_style("Helvetica").expect("the bundled Sans face");
+    let subset = embed::subset_at_cids(face, &[(1, 'A'), (2, 'Å')], &|c| (c == 'A').then_some(1))
+        .expect("subset_at_cids accepts Å over a retained A");
+
+    // The slot count proves no duplicate was written: `.notdef` at 0, `A` at 1, `Å` at 2, and
+    // one fresh slot for the ring at 3. Four. A fifth would mean `A` shipped twice — once as
+    // CID 1 and again at a slot no run and no `/W` entry names.
+    let written = ttf_parser::Face::parse(&subset.program, 0).expect("the written program");
+    assert_eq!(
+        written.number_of_glyphs(),
+        4,
+        "expected `.notdef`, `A`, `Å` and the ring, so four slots; the program has {}. More \
+         means `A` was shipped twice, fewer means a component is missing",
+        written.number_of_glyphs()
+    );
+    let components =
+        written_components(&subset.program, 2).expect("the written Å is a readable composite");
+    assert!(
+        components.contains(&1),
+        "Å is built from A plus a ring, and A is already CID 1 of this document. The written \
+         composite names {components:?}, which does not include 1, so the ring is being drawn \
+         over a *second* copy of A that no run and no /W entry refers to"
     );
 }
