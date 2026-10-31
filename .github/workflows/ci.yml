@@ -102,8 +102,14 @@ jobs:
           # oracle must be ink, not the writer's own arithmetic -- so none of the four can run
           # here. They are `#[ignore]`d rather than left to fail, because this job has no
           # library to offer them and a failure here would read as a defect in the reader.
-          if [ "$ignored" -ne 87 ]; then
-            echo "::error::$ignored tests ignored; 87 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          #
+          # Measured at 89, not 87: two more with P2.8 case (a), both reflow writes whose oracle
+          # is per-glyph ink for the same reason, and both ignored here rather than left to fail.
+          # The other tests case (a) brought -- the `Td`-offset arithmetic and the R1/R4/R5/R6
+          # refusals -- assert over `measure` and synthesized runs, need no library, and are
+          # counted in `passed` below.
+          if [ "$ignored" -ne 89 ]; then
+            echo "::error::$ignored tests ignored; 89 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -113,8 +119,14 @@ jobs:
           # picker-path tests are `#[ignore]`d, so they move the ignored count and not this
           # one. Raising this to the measured value rather than leaving headroom is what
           # makes a test that stops being collected fail here instead of passing quietly.
-          if [ "$passed" -lt 489 ]; then
-            echo "::error::only $passed tests ran; 489 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # Measured at 509, not 489: this file's floor had drifted below the tree, and P2.8
+          # case (a) added six non-ignored tests (the `Td`-offset arithmetic, the R1/R4/R5/R6
+          # refusals, and the `TJ`-array tag invariant that stands in for R8). The floor was
+          # re-measured from the tree rather than incremented, per the same rule that sets the
+          # ignored count.
+          if [ "$passed" -lt 509 ]; then
+            echo "::error::only $passed tests ran; 509 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

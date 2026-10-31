@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod lopdf_write;
 pub mod pages;
 pub mod protect;
+pub mod reflow;
 pub mod runmetrics;
 pub mod save;
 pub mod session;
