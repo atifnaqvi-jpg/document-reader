@@ -401,37 +401,75 @@ record it as equivalent — do not tick the box.
 Rulings this section obeys: Q7 (1.0.0 is reserved for P2.8), Q9 (no phase `[x]` without a
 confirmed installer), C-2 (line-level only), and the parity plan's §4 invariants.
 
-- [ ] **R-1 Implement R10: the kerned `measured prefix`.** §7.2 was **ruled on 2026-10-31**
-      (R10, `docs/P2.8-reflow-DESIGN.md`), so this is now code, not a ruling. The rule: a run
-      kern-positioned inside one `TJ` array has the kern in its prefix; a run whose position
-      also depends on a preceding `Tj` or a mid-array `Td`/`TD` is refused.
+- [ ] **R-1a Implement R10: the kerned `measured prefix`.** §7.2 was **ruled on 2026-10-31**
+      (R10, `docs/P2.8-reflow-DESIGN.md`), so this is code, not a ruling. The rule: a run
+      kern-positioned inside one `TJ` array has the kern in its prefix.
       Acceptance test first: `a_kerned_prefix_includes_the_kern`.
-      Add the refusal arm and the prefix arithmetic to `reflow_tj_array`'s prefix computation.
-      **NEW ASSERTION:** that the prefix `reflow_tj_array` computes for a kern-positioned
-      trailing run equals `line origin + the run's ink x offset`, i.e. that the kern is in it —
-      and that a run kern-positioned *after* a `Tj`, or after a mid-array `Td`, is refused rather
-      than measured. No existing test states which side of §7.2 the code is on.
-      `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` (`9471313`) asserts ISO 9.4.3
-      *placement* against PDFium's grid and never calls the reflow path, so it does not cover
-      this, and the mutation in R10.2 shows it cannot observe the reader either.
-      **Depends on T-8 only for a `Tz != 100` assertion. Proceed at `Tz 100`:** until the reader applies `Tz` to the
-      kern, a kerned fixture at `Tz 50` measures 3 pt wrong. At `Tz 100` the two agree, so R-1
-      can be written against `kerned-line.pdf` first.
-      **Partly exists — must be shown RED.** The assertion above is new;
-      `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` and `..._at_tz_50` already pass and
-      are not evidence for this entry.
+      Change the prefix arithmetic in `reflow_tj_array` so the kern is included. **No move and no
+      new fixture** — this entry is arithmetic only.
+      **NEW ASSERTION:** that the prefix `reflow_tj_array` computes for the kern-positioned
+      fragment of `kerned-line.pdf` equals line origin + that fragment's ink x offset, i.e. that
+      the kern is in it. No existing test states which side of §7.2 the code is on.
+      **On the fixture, because the topology looks wrong and is not:** `kerned-line.pdf` has
+      **no separate trailing run** on the target's baseline — line 1 is one `TJ` array whose kern
+      sits *between* its own fragments, and line 2 is a second line reached by `Td`. That is
+      **fine for this entry and fatal for a move**: R-1a asserts arithmetic on a prefix, which
+      needs a known-correct prefix, not a run to displace. The move is R-4's job, against R-3's
+      fixture. Do not build a fixture here.
+      **Depends on T-8 only for a `Tz != 100` assertion. Proceed at `Tz 100`:** until the reader
+      applies `Tz` to the kern, a kerned fixture at `Tz 50` measures 3 pt wrong. At `Tz 100` the
+      two agree.
+      **Partly exists — must be shown RED.** `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them`
+      (`9471313`) asserts ISO 9.4.3 *placement* against PDFium's grid and never calls the reflow
+      path, so it is not evidence; the R10.2 mutation shows it cannot observe the reader either.
 
-- [ ] **R-2 Reword and decide §7.3: the refusal strings.** Also a ruling. R8 has no reachable
-      path (a `TJ` array cannot carry `Tf`/`BDC`/`Ts` between strings), so §7.3's premise is
-      wrong and must be restated before it can be ruled. R5's string is settled in code.
-      Acceptance test first: `r5_reports_its_own_gate_string` — assert the exact
-      `Gate`/refusal string a user sees, and that it is **not** a reused existing gate name.
-      **NEW ASSERTION:** the user-visible string for R5, asserted literally.
-      `a_line_that_crosses_content_levels_refuses_under_r5` (`b260966`) asserts
-      `ReflowRefusal::R5StraddlesLevels` and `refused.rule.name() == "R5-straddles-levels"`,
-      which is the enum and its internal name — not the string a user reads, and not a pin
-      against someone reusing `run-mismatch` for it.
-      **Partly exists — must be shown RED.**
+- [ ] **R-1b Refuse a kern the walk cannot attribute.** Same ruling's other half: a run whose
+      position also depends on a preceding `Tj`, or on a `Td`/`TD` issued after the array began,
+      is **refused** rather than measured. **Depends on R-1a** for the arithmetic it declines to
+      compute without — a refusal that guards arithmetic which does not exist yet guards nothing.
+      Acceptance test first: `a_kern_that_spans_a_tj_or_mid_array_td_refuses`.
+      **NEW ASSERTION:** that a run positioned by a `Tj` before it, or by a mid-array `Td`, is
+      refused with the R10b arm rather than measured. **Synthetic run pair, no new fixture** — the
+      states are unreachable from the committed fixtures by construction, which is exactly why
+      they must be built as runs rather than found as files.
+      **Nothing exists — this is new code.** No refusal arm, no enum variant, no test.
+
+- [ ] **R-2a The R8b fixture.** `two-mcid-one-baseline.pdf`: page content with two `BDC`/`EMC`
+      units on one baseline, the edit target in the second, a run from the first lying further
+      left. Operators: `BDC` `/P` `/MCID 0`, `Tm 72 700`, `Tj` a short run, `EMC`; then `BDC`
+      `/P` `/MCID 1`, `Tm 200 700` (same `y`), `TJ` of two strings, `EMC`. Both units are `/P` so
+      the scopes differ by `Block`, not merely by `Untyped`. Expected ink before any edit: unit-0
+      run at `x=72`, target at `x=200`, tail at `200 + advance(target)`.
+      Acceptance test first: `the_r8b_fixture_has_two_units_on_one_baseline`.
+      **NEW ASSERTION:** none about reflow yet. The fixture's own guard asserts, **on the parsed
+      operator list rather than on bytes**, that two `BDC`/`EMC` pairs exist, that their `/MCID`
+      values differ, and that the two runs' baselines are equal. A byte-level assertion would
+      pass on a stream that is textually right and semantically wrong.
+- [ ] **R-2b Refuse a line whose runs leave its merge scope (R8b).** §7.3 was **ruled on
+      2026-10-31**, so this is code. `reflow_tj_array` takes `line_origin` as the minimum
+      `origin.0` over every run on the baseline, and `on_baseline` filters on `baseline()`
+      (`origin.1 + rise`) alone, with **no scope term**. A same-baseline run in another `MCID`,
+      further left, makes `line_origin` too small and the `Td` offset correspondingly too large.
+      **Depends on R-2a** for its fixture.
+      Acceptance test first: `a_same_baseline_run_in_another_mcid_does_not_dislocate_the_tail`.
+      **NEW ASSERTION:** that the edit refuses with `R8b-scope-left-of-line` rather than computing
+      a wrong `line_origin`. **Nothing exists** — no variant, no gate, no test. Red against R-2a's
+      fixture because `on_baseline` carries no tag term.
+      The reason it must refuse rather than correct the arithmetic is recorded as R8b.1 in the
+      design doc: `line_origin + prefix` cancels to `run.origin.0 + new_width`, so the record
+      would report the intended position while the ink sat elsewhere.
+- [ ] **R-2c Pin R5's user-visible string, and give R5 a real-content fixture.** Two small gaps
+      found while ruling §7.3, neither large enough for its own phase. (i) No test asserts the
+      string a user reads for R5 — `message()` (`reflow.rs:67`) is unasserted, and the existing
+      test pins only `name()`. (ii) R5 has never fired on committed content: `xobject-single.pdf`'s
+      page draws only `/X1 Do`, so no fixture puts page text and form text on one baseline, and
+      the gate is proven synthetically only.
+      Acceptance test first: `r5_reports_its_own_message_and_refuses_real_content`.
+      **NEW ASSERTION:** that the R5 message is the exact sentence, and that a committed
+      `page-and-form-one-line.pdf` (page text at a baseline, plus a form drawing text at the same
+      baseline, page text starting left) refuses with `R5-straddles-levels` through `locate_runs`
+      rather than through synthesized runs. R-2a's fixture cannot serve: it differs in
+      `merge_scope`, while R5 fires on `xobject_path` — different term, different refusal.
 
 - [ ] **R-3 The A10 fixture.** `two_run_line()` cannot carry A10 (§6.2: no second line, no `TJ`
       seam, nothing near the content box). Add a builder beside `too_wide_page()` in
