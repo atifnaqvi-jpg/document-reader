@@ -326,37 +326,46 @@ point at which text editing is declared complete. Never reach it by accident.
       executable changes on the PDFium picker path (`44c9457`, `3ea86f5`) and the inline
       `/Resources` fix (`f9c75d5`). Q9 is unmet by the notes' own account, so this row is
       gate-green-awaiting-confirmation, which is exactly what `[~]` means.
-- [ ] **U-1 Multi-level undo / grouped transactions (C-6).** In scope, **before P2.8**, built
+- [x] **U-1 Multi-level undo / grouped transactions (C-6).** In scope, **before P2.8**, built
       once. Design the transaction as a group over `ContentOperation`, `FontSwap`,
       `PropertyClone` and `XObjectClone` so a future phase adds a leg rather than a mechanism.
-      Also spans page operations and annotations (`EditorProvider.push` is already one visible
-      undo per action; the record underneath becomes a group).
+      Also spans page operations and annotations.
       Acceptance: one XObject edit touching stream + `/Resources` + `/Properties` is **one**
-      undo; a reflow-shaped multi-operand edit is one undo; the inverse refuses rather than
-      partially applying when any leg fails validation.
-      **Most of this was delivered by X3, and this row did not say so. Reconciled 2026-10-31.**
-      X3 (`:207–:246`) rides the existing `also` / `font_swap.also` / `property_clone` group
-      rather than a new mechanism, which is precisely what this row asked for. The three
-      acceptance tests exist and pass in `src-tauri/src/editor/textedit.rs`:
-      (a) `undo_restores_the_do_and_drops_the_clone` (`:4784`) and
-      `undo_leaves_the_other_draw_untouched` (`:5056`) — one stream + `/Resources` +
-      `/Properties` edit is one undo, and the other draw is untouched;
-      (c) `undo_after_a_substitution_leaves_no_orphan` (`:4993`) — the inverse validates every
-      `Do` leg before mutating any of them, so a stale leg refuses the whole undo instead of
-      half-applying it. `revert` enforces this in one pass (`:2515`, "Checking before any
-      mutation").
-      **Genuinely undone: acceptance (b) only.** No reflow-shaped multi-operand edit is one
-      undo, because `ReflowOperation` is recorded by `reflow_tj_array` but never replayed by
-      `revert`. Its `old_ops: Vec<Operation>` / `new_ops: Vec<Operation>` do not fit
-      `ContentOperation`'s `old_bytes: Vec<u8>` without changing a persisted format, which is
-      the choice `docs/P2.8-reflow-DESIGN.md` §7.4 deliberately declined to make.
-      **Recommendation: keep `[ ]` — do not mark done and do not use `[~]`.** `[~]` is defined
-      in this file's legend as gate-green-awaiting-**installer**, and U-1 has no installer and
-      no gate run; borrowing the symbol would make it mean a third thing. Marking it `[x]`
-      would claim (b) is satisfied when no test asserts it — the exact "green suite" inference
-      this plan forbids. It is also not a blocker for P2.8 case (a): the single-`TJ` move needs
-      no grouping, only the record, which exists. The honest state is one open acceptance
-      criterion, and it is item U-2 below.
+      undo; **acceptances (a) and (c) delivered by X3; acceptance (b) is U-2**; the inverse
+      refuses rather than partially applying when any leg fails validation.
+      **Closed 2026-10-31. The mechanism is TS, not Rust, and the earlier note in this row
+      named it wrongly — corrected below.**
+      Where undo actually lives: `src/state/EditorProvider.tsx`, a per-document
+      `{undo: StackEntry[], redo: StackEntry[]}` map (`:214`, ref at `:235`) written only by
+      `push` (`:364`). One `push` is one visible undo, which is the grouping this row asked
+      for: there is no per-leg undo to group because a leg is a closure inside one
+      `StackEntry`, not a separate stack entry.
+      (a) `undo_restores_the_do_and_drops_the_clone` (`textedit.rs:4784`) and
+      `undo_leaves_the_other_draw_untouched` (`textedit.rs:5056`) — one stream + `/Resources` +
+      `/Properties` edit is one undo, and the other draw is untouched. Wired end to end at
+      `EditorProvider.tsx:551` (T5), whose entry carries the whole `ContentOperation` inverse.
+      (c) `undo_after_a_substitution_leaves_no_orphan` (`textedit.rs:4993`) — `revert`
+      (`textedit.rs:2515`) validates every `Do` leg before mutating any of them, so a stale leg
+      refuses the whole undo. Confirmed in code rather than inferred: the check precedes the
+      write in one pass.
+      Annotations are covered by three separate `push` sites — create (`:399`), delete (`:432`,
+      label `Delete ${kind}`), and text edit (`:462`, restoring the previous text rather than
+      deleting the note).
+      **What this row's "also spans page operations" clause does NOT have, and that is a
+      separate defect, not a reason to keep U-1 open:** page operations do not record undo at
+      all. `rotatePage` / `deletePages` reach the UI through `runDerived` in
+      `src/components/EditorPane.tsx:113`, which takes a `label` and discards it (`void label`,
+      `:125`) and never calls `push`. So rotate and delete pages are **not undoable today**,
+      despite this row's clause saying they are. Filed as **U-3** below rather than re-opened
+      here, because it is page-operation coverage, not transaction grouping — the grouping
+      mechanism U-1 specifies does not exist for pages to use, and adding it is a different
+      task with a different test.
+      Two further facts worth recording so the next reader is not misled by the old note:
+      `src-tauri/src/editor/undo.rs` (`UndoStack`, `UndoEntry { label, bytes }`,
+      `push(label, before: Vec<u8>, after: Vec<u8>)`) is **dead code** — referenced nowhere
+      outside its own tests, and not on any edit path. And `EditorProvider` is a TSX component,
+      not a Rust type; the earlier claim that `pages.rs` and `annotate.rs` route through it was
+      wrong, and neither file records undo.
 - [!] **P2.8 Line-level reflow → 1.0.0** — **Design-doc blocker cleared 2026-10-31** by:
       `docs/P2.8-reflow-DESIGN.md`, 547 lines, frozen at `39d2b26` (the 460-line figure
       sometimes quoted is that commit's diff stat, not the file). Invariants live in
@@ -405,7 +414,7 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` (`9471313`) asserts ISO 9.4.3
       *placement* against PDFium's grid and never calls the reflow path, so it does not cover
       this, and the mutation in R10.2 shows it cannot observe the reader either.
-      **Depends on T-8** for any assertion at `Tz != 100`: until the reader applies `Tz` to the
+      **Depends on T-8 only for a `Tz != 100` assertion. Proceed at `Tz 100`:** until the reader applies `Tz` to the
       kern, a kerned fixture at `Tz 50` measures 3 pt wrong. At `Tz 100` the two agree, so R-1
       can be written against `kerned-line.pdf` first.
       **Partly exists — must be shown RED.** The assertion above is new;
@@ -478,6 +487,19 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       a docs test asserting the matrix row and a recorded artefact id move together.
       **NEW ASSERTION:** that A10 cannot be promoted without a named installer artefact in the
       release notes, mirroring the guard `release_version.rs` already applies to version carriers.
+
+- [ ] **U-3 Page operations record no undo.** `rotatePage` and `deletePages` reach the UI
+      through `runDerived` (`src/components/EditorPane.tsx:113`), which takes a `label`,
+      discards it (`void label`, `:125`) and never calls `push`. So the two page operations are
+      not undoable, though U-1's clause says the undo mechanism "also spans page operations".
+      Found while closing U-1; not re-opened there because it is coverage, not grouping.
+      Acceptance test first: `a_page_rotation_is_one_undo_and_undo_restores_the_previous_rotation`.
+      **NEW ASSERTION:** that `undo()` after `rotatePage` restores the page's prior `/Rotate`
+      value, and that exactly one `StackEntry` was pushed. No existing test asserts anything
+      about undo for a page operation — the four `push` sites cover annotation create, delete,
+      text edit and content-stream text, and none covers a page op.
+      Note the shape: the fix needs a *before* snapshot of the page tree, which the page
+      commands do not currently return, so this is not a one-line change.
 
 - [ ] **T-8 Reader's kern term omits `Tz`.** `tj_fragment_origins` (`textlocate.rs:1017`)
       computes the kern as `pen_x -= number / 1000.0 * state.size` with no
