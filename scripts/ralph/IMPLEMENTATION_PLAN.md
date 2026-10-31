@@ -361,16 +361,15 @@ point at which text editing is declared complete. Never reach it by accident.
       `docs/P2.8-reflow-DESIGN.md`, 547 lines, frozen at `39d2b26` (the 460-line figure
       sometimes quoted is that commit's diff stat, not the file). Invariants live in
       `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` §4, not in this file, which has no `## 4`.
-      **Still `[!]`, because `[!]` means "blocked (needs a ruling)" and three rulings are open.
+      **Still `[!]`, because `[!]` means "blocked (needs a ruling)" and two rulings are open.
       It is no longer blocked on a missing design doc.** What blocks it now, in order:
-      **§7.2 — the kerned `measured prefix`. Urgent.** R2 says line origin + measured prefix;
-      for a run whose start is set by a `TJ` adjustment rather than a `Td`, whether the kern's
-      displacement belongs in the prefix is undecided. The doc calls this out as needing a
-      ruling **before the guard is written** — and the guard is now written (`9471313`), on a
-      `TJ`-kerned fixture (`kerned-line.pdf`). So the guard was built on an undecided rule.
-      Either the fixtures happen to sit on the decidable side of it, which is luck and must be
-      said out loud, or its expected positions encode an assumption nobody ruled on.
-      **§7.3 — the R5/R8 refusal strings.** Undecided in the doc. R5's gate exists
+      **§7.2 — RESOLVED 2026-10-31 by R10**, so it is no longer a blocker. The prefix includes
+      the kern for a run kern-positioned inside one `TJ` array; a run whose position also
+      depends on a preceding `Tj` or a mid-array `Td`/`TD` is refused. Ruling it exposed a
+      reader defect (`R10.1`) that is now T-8 below. Answering it also retired the risk that the
+      guard (`9471313`) had been built on an unruled assumption: the rule is now stated, so the
+      guard's expected positions can be checked against it rather than assumed to match.
+      **§7.3 — the R5/R8 refusal strings.** Still undecided in the doc. R5's gate exists
       (`R5StraddlesLevels`). R8's does **not**: the refusal was implemented, no test could
       make it fire, and it was deleted rather than shipped unguarded — a `TJ` array cannot
       express a `Tf`/`BDC`/`Ts` between two strings, so the states R8 rejects are unreachable
@@ -393,16 +392,22 @@ record it as equivalent — do not tick the box.
 Rulings this section obeys: Q7 (1.0.0 is reserved for P2.8), Q9 (no phase `[x]` without a
 confirmed installer), C-2 (line-level only), and the parity plan's §4 invariants.
 
-- [ ] **R-1 Decide §7.2: the kerned `measured prefix`.** This is a ruling, not code — the loop
-      must stop and ask, because the design doc forbids settling it silently.
-      Acceptance test first: extend the guard's expected-position table with a run whose start
-      is set by a `TJ` adjustment, and assert the prefix **includes** that kern's displacement
-      (the position `tj_fragment_origins` already computes). Record the ruling in
-      `docs/P2.8-reflow-DESIGN.md` §7.2 with the date, replacing "not decided".
-      **NEW ASSERTION:** that a run preceded by a kern has `line origin + prefix` equal to its
-      PDFium-observed ink x, where `prefix` covers the kern — no existing test states which side
-      of §7.2 the code is on. `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` (`9471313`)
-      asserts ISO 9.4.3 *placement*, not the reflow *prefix*, so it does not cover this.
+- [ ] **R-1 Implement R10: the kerned `measured prefix`.** §7.2 was **ruled on 2026-10-31**
+      (R10, `docs/P2.8-reflow-DESIGN.md`), so this is now code, not a ruling. The rule: a run
+      kern-positioned inside one `TJ` array has the kern in its prefix; a run whose position
+      also depends on a preceding `Tj` or a mid-array `Td`/`TD` is refused.
+      Acceptance test first: `a_kerned_prefix_includes_the_kern`.
+      Add the refusal arm and the prefix arithmetic to `reflow_tj_array`'s prefix computation.
+      **NEW ASSERTION:** that the prefix `reflow_tj_array` computes for a kern-positioned
+      trailing run equals `line origin + the run's ink x offset`, i.e. that the kern is in it —
+      and that a run kern-positioned *after* a `Tj`, or after a mid-array `Td`, is refused rather
+      than measured. No existing test states which side of §7.2 the code is on.
+      `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` (`9471313`) asserts ISO 9.4.3
+      *placement* against PDFium's grid and never calls the reflow path, so it does not cover
+      this, and the mutation in R10.2 shows it cannot observe the reader either.
+      **Depends on T-8** for any assertion at `Tz != 100`: until the reader applies `Tz` to the
+      kern, a kerned fixture at `Tz 50` measures 3 pt wrong. At `Tz 100` the two agree, so R-1
+      can be written against `kerned-line.pdf` first.
       **Partly exists — must be shown RED.** The assertion above is new;
       `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` and `..._at_tz_50` already pass and
       are not evidence for this entry.
@@ -473,6 +478,29 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       a docs test asserting the matrix row and a recorded artefact id move together.
       **NEW ASSERTION:** that A10 cannot be promoted without a named installer artefact in the
       release notes, mirroring the guard `release_version.rs` already applies to version carriers.
+
+- [ ] **T-8 Reader's kern term omits `Tz`.** `tj_fragment_origins` (`textlocate.rs:1017`)
+      computes the kern as `pen_x -= number / 1000.0 * state.size` with no
+      `horizontal_scale / 100` factor, while `spaced_width` applies that factor to advance and
+      spacing. So on any page at `Tz != 100` every run after a kern is misplaced. Found while
+      ruling R10 and **deliberately not fixed there** (`docs/P2.8-reflow-DESIGN.md` R10.1).
+      Measured, not argued, on `kerned-line-tz.pdf` at `Tz 50` through `locate_runs`: the reader
+      puts `CD` at x=**94.008** where PDFium drew it at x=**91.008** — off by **3.000 pt**,
+      which is `250/1000 x 24 x 0.5`. At `Tz 100` the two agree, which is why the suite is green.
+      Acceptance test first: `a_kerned_runs_origin_matches_the_ink_at_tz_50`.
+      **NEW ASSERTION:** that `locate_runs` on `kerned-line-tz.pdf` reports the second `TJ`
+      fragment within 0.05 pt of its PDFium glyph origin. **No existing test compares the reader
+      to the ink at a non-100 `Tz`.** `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them_at_tz_50`
+      looks like it does and does not: it never calls `tj_fragment_origins`, it compares a
+      hand-computed expectation against PDFium's grid. Verified by mutation — replacing the kern
+      term with `pen_x -= 0.0` leaves **both** kerned-line tests green at `Tz 50` and `Tz 100`,
+      so neither can observe the reader (`R10.2` of the design doc). The fixture, the constants
+      and the expectation all exist; only the comparison against the reader is missing.
+      The assertion is RED today by construction: the measured gap is 3.000 pt against a 0.05 pt
+      tolerance, 60x it. Fix is one factor in one expression. **Blocks nothing in H4**: R-1..R-7
+      are reflow-side, and a reflow that moved a kern-positioned tail would inherit this error
+      (3 pt at `Tz 50`, 0 at `Tz 100`) — which is the reason to land T-8 **before R-4 starts
+      asserting positions**, not before R-1..R-3.
 
 ## Loop hygiene (do every iteration)
 
