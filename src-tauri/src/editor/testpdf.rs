@@ -2709,10 +2709,7 @@ pub fn kerned_line() -> Document {
 /// The same content at a horizontal scaling that is not 100, so the kern term's `Tz` factor is
 /// falsifiable. See [`KERNED_LINE_TZ`].
 pub fn kerned_line_tz() -> Document {
-    document_with_pages(
-        winansi_helvetica(),
-        vec![kerned_line_page(KERNED_LINE_TZ)],
-    )
+    document_with_pages(winansi_helvetica(), vec![kerned_line_page(KERNED_LINE_TZ)])
 }
 
 /// The shared page body. `tz == 0` means the page does not set `Tz` at all, which is why this

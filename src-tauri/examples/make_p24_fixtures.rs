@@ -164,10 +164,7 @@ fn main() {
         // P2.8 §6.2: A10's fixture, and the first committed artefact that exercises the pen
         // walk's kern branch. A `TJ` number between two strings had never appeared in a fixture
         // before, so the branch that reads it was untested.
-        (
-            "kerned-line.pdf",
-            testpdf::bytes(&testpdf::kerned_line()),
-        ),
+        ("kerned-line.pdf", testpdf::bytes(&testpdf::kerned_line())),
         // The same page at `Tz 50`. At `Tz 100` the kern term's missing `Tz/100` factor is
         // invisible, so without this file the defect is unfalsifiable.
         (
