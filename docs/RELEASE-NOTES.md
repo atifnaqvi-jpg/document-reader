@@ -9,134 +9,103 @@ the version in `Cargo.toml` has a section here.
 
 ## 0.9.0
 
-Closing **P2.7.6** — font embedding (MECH-B), plus the A7 skew fix that was found while
-freezing it.
+Closing **P2.7.6** — font embedding (MECH-B), plus the A7 skew fix found while freezing it.
 
-> **DRAFT — not published.** Version carriers moved to 0.9.0 on 2026-09-20, so the tree no
-> longer claims a version whose published artifact lacks its commits. **MECH-B is built as of
-> `559e4c7`**: the subsetting and write path exist, 9 subset tests and a 4-row acceptance
-> matrix pass, and the suite is green at 482 passed / 76 ignored on Linux. Two conditions
-> remain before publishing, and neither is satisfied by a local green suite:
+> **DRAFT — not published, and not taggable as it stands.** This section was rewritten on
+> 2026-10-29 so that every claim is either backed by a named test, backed by a named CI run,
+> or recorded below as unbacked. Two facts keep it a draft:
 >
-> 1. the **PDFium** row-1 check must pass in CI — it fails on a developer machine with
->    `PdfiumUnavailable`, and poppler is a substitute, not the shipping reader;
-> 2. the installer from that tagged run must be hand-confirmed (Q9).
->
-> Do not publish until both hold.
->
-> **Pre-release when it ships.** 1.0.0 (P2.8, reflow) is the point text editing is declared
-> complete.
+> 1. **The suite at the version-bump commit is red in CI.** Run `40688437973` @ `dd8efce`,
+>    job *Rust (fmt, clippy, test)*: `the_declared_msrv_can_build_the_locked_graph` **FAILED**.
+>    It is a false positive — offline CI could not download `android_system_properties
+>    v0.1.6` — and it was fixed later by `10591db`. It is still red *there*, and that commit
+>    is the tree this version describes.
+> 2. **No human has seen this version's changes running.** See *Hand-test provenance* below.
 
-### Triage: claims in this section that are not yet backed
+### What this version contains
 
-**Status: open. Nothing below has been rewritten to match the triage — the claims stand until
-each row's evidence exists.** This block exists so the outstanding work is recorded in the
-repository instead of living in a conversation.
+P2.7.6 is one phase: **MECH-B, embedding a bundled font for a replacement the run's own font
+cannot set.** Measured on the tree at `dd8efce` (the hand-tested commit, 5 commits past the
+MECH-B implementation `559e4c7`):
 
-**Provenance.** A review on 2026-10-28 recorded **nine** unbacked lines in this section. That
-list was never written into the repository and is not recoverable from the tree, the git
-history, or the session notes, so the nine rows below were **re-derived on 2026-10-29** by
-checking every falsifiable claim in this section against the tree and against CI. The count
-happens to agree; the membership is a re-derivation, not a recovery, and a row that was on the
-original list but is not falsifiable (and so is not here) would still be missing.
+- A replacement containing characters outside WinAnsi (`—`, `→`, `’`, Greek) is no longer
+  refused outright. It embeds a subset of a bundled face and writes `/ToUnicode` so copy and
+  search return the real characters. Substitution happens only with the user's consent.
+- A run whose own font covers the replacement **keeps its own font**
+  (`a_subset_that_covers_the_replacement_keeps_the_original_font`).
+- Three refusals stay, deliberately, and they are distinct
+  (`refusal_split.rs`; `row2`, `row3`, and the subset-builder tests):
+  `SUBSTITUTE_REFUSED` (needs a bundled face, substitution not allowed),
+  `SUBSET_BUILD_FAILED` (the face had the glyph, the subset could not be written), and
+  `GLYPHS_NOT_COVERABLE` (no shipped face has the glyph — the bundle is Latin only).
+  **`GLYPHS_NOT_COVERABLE` is not tested for a specific out-of-bundle character.** `row3`
+  covers an uncovered glyph; the claim that `漢` is a permanent gap rather than a retry was
+  never encoded as a test. Stated here as a design intent, not a measurement.
 
-Resolution classes: **needs-installer** (only a Windows installer can settle it),
-**needs-test** (a gate could settle it and none exists), **reword-to-tested** (true, but stated
-more strongly than the evidence permits).
+Type0/CID fonts are **not** embedded by this version. That is P2.7.7, which landed after it.
 
-Each row states its own basis, because the rows do not all rest on the same kind of evidence:
-"tree" is the working tree at `f9c75d5`, "CI run" names a run and its job, and "git" is
-committed history. A row whose basis is a run is not a statement about the tree at `f9c75d5`,
-and reading this column as one would overstate rows 1 and 2 in particular.
+### The A7 skew half, found after 0.8.1 shipped
 
-| # | Line in this section | Claim as written | Basis, and what it showed | Class |
-|---|---|---|---|---|
-| 1 | Draft block, condition 1 | "the PDFium row-1 check must pass in CI" | **CI run** `40908435884` @ `3942c8c`, Windows job, attempt 1: aborted `STATUS_ACCESS_VIOLATION` after 354 of 393 tests; attempt 2 of the same SHA passed. **Not yet satisfied** — it passes only on retry. Undiagnosed. | needs-installer |
-| 2 | Draft block, condition 2 | "the installer from that tagged run must be hand-confirmed" | **Git** (tags) + **CI run**: no 0.9.0 tag exists, so no tagged run has produced an installer; a tag run would also publish a release, which condition 1 forbids. The only installer artifacts come from dispatch runs (`dd8efce`, run `40719287682`), which at the time of writing is **11 commits behind `d5c3f91`** and which this section does not describe. | needs-installer |
-| 3 | Draft block | "the suite is green at 482 passed / 76 ignored on Linux" | **Tree** @ `f9c75d5`: measured **493 passed / 81 ignored / 0 failed**. The quoted pair is true of `559e4c7`; stale for HEAD. | reword-to-tested |
-| 4 | "What is in this release", list of four | "This section covers **four** things" | **Git**: all four named commits exist and none is an ancestor of `v0.8.1` — verified. The count was right when written; it is not four any more, because later commits are also unreleased (row 9). | reword-to-tested |
-| 5 | "MECH-B font embedding", opening | "Twelve Liberation faces now ship in the installer (4,360,440 bytes)" | **Tree**: 12 `.ttf` files totalling 4,360,440 bytes, and `tauri.conf.json` maps them under `resources/fonts/*.ttf`. That is a payload property, not an installer observation. **Not verified in an installer**, because the only installer predates this section. | needs-installer |
-| 6 | "MECH-B font embedding", error codes | `SUBSTITUTE_REFUSED`, `GLYPHS_NOT_COVERABLE`, `SUBSET_BUILD_FAILED` are distinct refusals | **Tree**: all three exist as distinct constants/paths with the stated distinction, and the behaviours are covered by `row2`, `row3` and the subset builder tests. | reword-to-tested |
-| 7 | "MECH-B font embedding" | "A run whose own font covers the replacement keeps its own font" | **Tree**: covered by `a_subset_that_covers_the_replacement_keeps_the_original_font`. | reword-to-tested |
-| 8 | "MECH-B font embedding" | "`GLYPHS_NOT_COVERABLE` … `漢` is a permanent gap, not a retry" | **Tree**: no test asserts the permanent-gap property for a specific out-of-bundle character; `row3` covers an uncovered glyph, not the permanence claim. | needs-test |
-| 9 | 0.9.0 section throughout | The section describes what 0.9.0 *is* | **Git**: unreleased commits are undescribed — the Form XObject walk (`44c9457`, `3ea86f5`), the MSRV guards (`8c29534`), the inline-`/Resources` fix (`f9c75d5`). Shipping 0.9.0 as written would ship incomplete notes. | reword-to-tested |
+This is a behaviour change: a page whose text is sheared (`cm` with a non-zero shear term) or
+scaled anisotropically used to be offered in the picker as editable and then refused on save.
+It now edits. Two defects, one commit (`6685208`):
 
-Rows 1 and 2 are the blocking pair: **neither can be settled without a Windows installer**, and
-row 2 cannot even begin until a tag exists, which condition 1 forbids until the crash in row 1
-is understood. The section stays **DRAFT**.
+1. The write path demanded a uniform scale. The conversion factor must be the length of the
+   **advance axis**, because that is the direction a width runs along. Requiring the up axis
+   to scale equally refused every sheared and every anisotropically scaled run.
+2. A sheared run's quota came from PDFium's **axis-aligned** character boxes, which carry
+   `|shear| × glyph height` in their width, so the quota **grew with the shear angle**. Sheared
+   runs now use the font's own metric.
 
-### What is in this release, and why A7 is not its own version
+Rotation was not affected. `mirrored-text` still refuses. No previously-shipped fixture
+changes verdict, because the fixture set had rotation in both `Tm` and `cm` form but no shear
+— which is why 0.8.1 could ship this. The new guards build their own shear fixtures.
 
-This section covers **four** things that were all unreleased at `v0.8.1`:
+### The bundled payload
 
-1. the **A7 skew fix** (commit `6685208`),
-2. the **CI floor corrections** that its guards required (`ae5a75f`),
-3. the **frozen P2.7.6 design** with its four rulings (`0f51f80`),
-4. the **bundled font payload** with its audited record and licence notice (`2e7fc6d`).
+Twelve Liberation faces, from Debian `fonts-liberation 2.1.5-3`, with a per-face SHA-256 record
+and a notice reachable from *About and notices* with no document open.
 
-Measured: `git merge-base --is-ancestor 6685208 v0.8.1` → **not** an ancestor. The A7 fix was
-committed after `v0.8.1` was tagged, so the published 0.8.1 installer does not contain it, even
-though the tree carried the 0.8.1 label for a while. That is why the carriers moved to 0.9.0
-in one commit rather than being left to drift to the next phase's bump.
+**Measured inside the 0.9.0 installer**, not inferred from the tree: the NSIS payload contains
+`fonts/` holding 12 `.ttf` files totalling **4,360,440 bytes**, plus `FONT-RECORD.md` (7,356)
+and `LICENSE-Liberation.txt` (4,516). The same 12 faces are also compiled into
+`document-reader.exe` via `include_bytes!` (`src-tauri/src/editor/embed.rs:51`); that exe grew
+from 20,630,528 to 25,036,800 bytes between the 0.8.1 release asset and this installer, and
+0.8.1 contains no `LiberationSans` or `glyf` bytes at all while this one contains both
+(`grep -c` over the extracted payload).
 
-**Deviation from B-3, recorded deliberately.** B-3 ruled that A7 is a *separate hotfix
-commit* so it stays revertible without touching the programme. It **is** a separate commit
-(`6685208`, revertible on its own) — but it is **not** a separate *release*. Publishing 0.8.2
-would have required a second installer and a second hand-test cycle (Q9) for one fix, and Q7
-assigns no 0.8.2 to any phase. The commit boundary B-3 asked for is intact; only the release
-boundary is folded.
-
-### Fixed: skewed text is now editable, and measured honestly
-
-A7's skew half, found by measurement after 0.8.1 shipped. **This is a behaviour change you
-will see:** a page whose text is sheared (`cm` with a non-zero shear term) or scaled
-anisotropically used to be offered in the picker as editable and then refused on save. It now
-edits.
-
-Two independent defects, both measured:
-
-1. **The write path demanded a uniform scale.** The conversion factor must be the length of
-   the **advance axis**, because that is the direction a width runs along. Requiring the up
-   axis to scale equally refused every sheared and every anisotropically scaled run. Measured:
-   x-shear 20°/45°, y-shear 20°, and scales 2×1 and 1×2 were all refused; all write now.
-2. **A sheared run's quota came from PDFium's axis-aligned character boxes**, which carry
-   `|shear| × glyph height` in their width. The quota therefore **grew with the shear angle** —
-   124.88pt for a 114.67pt line at 20° — so a replacement that overprinted past the run was
-   accepted. Sheared runs now use the font's own metric, which is exact.
-
-Rotation was *not* affected: 0.8.1 measured rotated text correctly, and its numbers are
-unchanged. `mirrored-text` still refuses.
-
-No previously-shipped fixture changes verdict — the fixture set had rotation in both `Tm` and
-`cm` form but no shear, which is why 0.8.1 could ship this. The new guards build their own
-shear fixtures.
-
-### MECH-B font embedding — the write path is built
-
-Twelve Liberation faces now ship in the installer (4,360,440 bytes), from Debian
-`fonts-liberation 2.1.5-3`, with a per-face SHA-256 record and a notice reachable from
-*About and notices* with no document open. Faces were chosen by the distinct-class rule: a
-face ships only if it owns a style class no other shipped face owns, which is why the four
-Narrow faces are not included.
-
-**Embedding is implemented as of `559e4c7`.** A replacement containing characters outside
-WinAnsi (`—`, `→`, `’`, Greek) used to be refused outright; it now embeds a subset of the
-bundled face, writes `/ToUnicode` so copy and search return the real characters, and
-substitutes only with the user's consent. A run whose own font covers the replacement keeps
-its own font. Two things still refuse, deliberately:
-
-* `SUBSTITUTE_REFUSED` — the replacement needs a bundled face and substitution is not allowed;
-* `GLYPHS_NOT_COVERABLE` — no shipped face has the glyph (the bundle is Latin, so `漢` is a
-  permanent gap, not a retry). Distinct from `SUBSET_BUILD_FAILED`, which means the face had
-  the glyph and the subset could not be written.
-
-Type0/CID fonts are **not** embedded; that is **P2.7.7**, tracked with its own design doc.
+Faces were chosen by the distinct-class rule: a face ships only if it owns a style class no
+other shipped face owns, which is why the four Narrow faces are not included.
 
 Written font names do **not** use the Liberation name: a subset deletes glyphs, which makes it
 a Modified Version under OFL 1.1, and condition 3 forbids a Modified Version from presenting
 the Reserved Font Name as its primary name. The name is `/<PREFIX>+<Family>-<Style>`. The
-reasoning and the mapping are in `src-tauri/resources/fonts/FONT-RECORD.md`, and a test fails
-if any written token contains the reserved name.
+mapping is in `src-tauri/resources/fonts/FONT-RECORD.md`, and a test fails if any written
+token contains the reserved name.
+
+### Measured on this tree
+
+- **Linux, PDFium absent, at `dd8efce`:** `cargo test`, measured locally on 2026-10-29 →
+  **484 passed / 0 failed / 76 ignored** across 21 targets. The CI job's own floor for this
+  commit is `-lt 482` passed and `-ne 76` ignored (`.github/workflows/ci.yml` at `dd8efce`),
+  so the local run clears it. **This number was not printed by CI:** the Linux job died before
+  its summary step, which is why the run is red for an unrelated reason.
+- **Windows, PDFium present, from the release run that built the hand-tested installer**
+  (`40719287682`, job *Build Windows installer*, step 10 *Assert the PDFium tests actually
+  ran*), verbatim:
+  `PDFium tests ran: 559 passed, 0 ignored.`
+- **Installer:** `Document Reader_0.9.0_x64-setup.exe`, **10,330,242 bytes**, artifact
+  `12830611552` from run `40719287682` @ `dd8efce`. The artifact ZIP itself is 10,314,248
+  bytes; the number above is the file inside it.
+
+**The 0.5.0 comparison cannot be made.** No `v0.5.0` tag, no `v0.5.0` release, and no recorded
+0.5.0 installer size exists in this repository or on the releases page — the tags are
+`v0.1.0`, `v0.1.1`, `version-0.4.4`, `v0.6.0`, `v0.8.0`, `v0.8.1`. So "growth over 0.5.0" is
+**not measurable** and is not claimed. What *is* measured is growth over **0.8.1**
+(7,823,255 bytes, release asset): **+2,506,987 bytes**, of which the exe accounts for
++4,406,272 bytes, the `fonts/` directory adds 4,372,312 bytes as files, and `pdfium.dll` is
+unchanged at 7,380,992 bytes. A large part of the exe growth is the same font data compiled
+in, so those two numbers overlap and must not be added.
 
 ### Toolchain: what the build was verified against
 
@@ -144,15 +113,69 @@ The declared minimum is **rust 1.90** (`rust-version` in `src-tauri/Cargo.toml`)
 release build was **verified** on **rust 1.91**, the pinned toolchain in `rust-toolchain.toml`
 and in both workflows.
 
-1.90 is not a preference. It is the highest floor the locked dependency graph declares —
-`tauri 2.12.0`, `tauri-runtime-wry`, `muda` and nine other packages require it — so it is the
-lowest version that can build this tree at all. The previous declaration said 1.77, which had
-been wrong for a while: `cargo metadata --locked` on 1.77 fails before compiling anything
-(`digest 0.11.3` uses the `edition2024` cargo feature), and 123 locked packages require a
-newer compiler. Nothing caught it because every gate runs on 1.91, where an understated floor
-is invisible. `tests/release_version.rs` now enforces both halves: the declared floor must
-cover the highest requirement in the locked graph, and this section must name the floor and
-the toolchain the build was verified on.
+1.90 is not a preference. It is the highest floor the locked dependency graph declares, so it
+is the lowest version that can build this tree at all. The previous declaration said 1.77,
+which had been wrong for a while: `cargo metadata --locked` on 1.77 fails before compiling
+anything (`digest 0.11.3` uses the `edition2024` cargo feature), and 123 locked packages
+require a newer compiler. Nothing caught it because every gate runs on 1.91, where an
+understated floor is invisible. `tests/release_version.rs` now enforces both halves.
+
+**The guard for that floor failed in CI at `dd8efce`** — see the draft block above. The fix is
+`10591db`, which is 6 commits after the commit these notes describe.
+
+### Hand-test provenance
+
+The installer that a human actually ran was built by release run `40719287682` from
+**`dd8efce`**, artifact `12830611552`, 10,330,242 bytes. **The code tree has since moved 16
+commits past it** (`git rev-list --count dd8efce..6caaedd`, the last code commit before this
+section was rewritten), including the recursive Form XObject walk on the PDFium side
+(`44c9457`), its measurement guards (`3ea86f5`), and the inline-`/Resources` fix (`f9c75d5`).
+None of those sixteen commits has a hand-tested installer. Documentation commits after
+`6caaedd` do not change that count.
+
+**So: 0.9.0 tagged at `6caaedd` would contain changes that no human has seen running.** That is
+stated plainly because it is the whole point of Q9. It is worse than the 0.8.1 case, where the
+published installer was a rebuild of hand-tested code and the only source difference was a
+comment; here the difference is executable behaviour on the PDFium picker path and on any form
+carrying an inline `/Resources` dictionary. Neither is covered by an installer that predates
+it.
+
+### What 0.9.0 does not include
+
+- **P2.7.7 — Type0/CID subset embedding.** Landed after this version (`dcffa91`, `da360fc`,
+  `6caaedd`). Not in 0.9.0.
+- **P2.8 — line-level reflow.** Not started. It is 1.0.0 and the last phase of the agreed
+  programme.
+- **The full-parity inventory (B-1).** Approved and deliberately deferred to *after* P2.8.
+
+### Triage: claims in this section that were not backed
+
+**Status: resolved 2026-10-29.** Each row below was either rewritten to what was measured,
+deleted, or kept and marked unbacked in the text itself. The table stays so the next session
+can see the reasoning rather than a clean page.
+
+Provenance of the rows: a review on 2026-10-28 recorded nine unbacked lines. That list was
+never written into the repository and is not recoverable, so the rows were re-derived on
+2026-10-29 by checking every falsifiable claim against the tree and against CI.
+
+Resolution classes used above: *reworded* (the claim now states only what was measured),
+*deleted* (the claim was removed), *kept-unbacked* (retained but labelled as intent), and
+*measured* (the blocker was settled by an artifact rather than by a gate).
+
+| # | Line as originally written | Claim as written | Basis, and what it showed | Resolution |
+|---|---|---|---|---|
+| 1 | Draft block, condition 1 | "the PDFium row-1 check must pass in CI" | **CI run** `40908435884` @ `3942c8c`: aborted `STATUS_ACCESS_VIOLATION` after 354 of 393 tests; a re-run of the same SHA passed. Still undiagnosed. | **reworded** → the draft block now names the *actual* red gate at `dd8efce` (the MSRV guard) and the undiagnosed crash is not restated as a condition this section can satisfy. |
+| 2 | Draft block, condition 2 | "the installer from that tagged run must be hand-confirmed" | **Git**: no 0.9.0 tag exists. The only installer is a dispatch artifact (`dd8efce`, run `40719287682`). | **reworded** → *Hand-test provenance* names that artifact and states the 16-commit gap. The old text implied the installer was behind by 11 commits; measured, it is 16. |
+| 3 | Draft block | "the suite is green at 482 passed / 76 ignored on Linux" | **Measured locally** at `dd8efce`: 484 passed / 0 failed / 76 ignored. 482 was the old baseline; ci.yml's floor at that commit is also 482. | **reworded** → *Measured on this tree* quotes 484 / 76 and names the run and the date. |
+| 4 | "What is in this release", list of four | "This section covers **four** things" | **Git**: the four named commits exist, but later commits are also unreleased. | **deleted** → the numbered list is gone; the section is organised by subject, not by commit count. |
+| 5 | "MECH-B font embedding", opening | "Twelve Liberation faces now ship in the installer (4,360,440 bytes)" | **Measured in the installer**: `fonts/` holds 12 `.ttf` totalling 4,360,440 bytes. Also compiled into the exe via `include_bytes!`. | **measured** → the claim is now backed by artifact `12830611552` and says it was checked inside the payload *and* names the exe growth. |
+| 6 | "MECH-B font embedding", error codes | The three refusals are distinct | **Tree**: distinct constants and paths; covered by `row2`, `row3`, `refusal_split.rs`, subset-builder tests. | **reworded** → names those tests inline. |
+| 7 | "MECH-B font embedding" | "A run whose own font covers the replacement keeps its own font" | **Tree**: `a_subset_that_covers_the_replacement_keeps_the_original_font`. | **reworded** → names the test inline. |
+| 8 | "MECH-B font embedding" | "`GLYPHS_NOT_COVERABLE` … `漢` is a permanent gap, not a retry" | **Tree**: no test asserts permanence for a specific out-of-bundle character. `row3` covers an uncovered glyph only. | **kept-unbacked** → the bullet now says it is a design intent, not a measurement. |
+| 9 | 0.9.0 section throughout | The section describes what 0.9.0 *is* | **Git**: unreleased commits were undescribed — the Form XObject walk (`44c9457`, `3ea86f5`), the MSRV guards (`8c29534`, `10591db`), the inline-`/Resources` fix (`f9c75d5`). | **reworded** → *Hand-test provenance* lists them by SHA and says they are in no hand-tested installer. |
+
+Row 5 is the one that moved class: it was `needs-installer` and is now measured, because the
+artifact it needed existed and had only not been opened.
 
 ---
 
