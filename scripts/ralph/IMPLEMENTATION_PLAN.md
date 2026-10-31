@@ -356,10 +356,11 @@ point at which text editing is declared complete. Never reach it by accident.
       all. `rotatePage` / `deletePages` reach the UI through `runDerived` in
       `src/components/EditorPane.tsx:113`, which takes a `label` and discards it (`void label`,
       `:125`) and never calls `push`. So rotate and delete pages are **not undoable today**,
-      despite this row's clause saying they are. Filed as **U-3** below rather than re-opened
-      here, because it is page-operation coverage, not transaction grouping — the grouping
-      mechanism U-1 specifies does not exist for pages to use, and adding it is a different
-      task with a different test.
+      despite this row's clause saying they are. Filed as **U-3** in
+      `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` under C-6 rather than here, because it is
+      page-operation coverage and not transaction grouping — the grouping mechanism U-1
+      specifies does not exist for pages to use, and adding it is a different task with a
+      different test.
       Two further facts worth recording so the next reader is not misled by the old note:
       `src-tauri/src/editor/undo.rs` (`UndoStack`, `UndoEntry { label, bytes }`,
       `push(label, before: Vec<u8>, after: Vec<u8>)`) is **dead code** — referenced nowhere
@@ -458,12 +459,16 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       The reason it must refuse rather than correct the arithmetic is recorded as R8b.1 in the
       design doc: `line_origin + prefix` cancels to `run.origin.0 + new_width`, so the record
       would report the intended position while the ink sat elsewhere.
-- [ ] **R-2c Pin R5's user-visible string, and give R5 a real-content fixture.** Two small gaps
-      found while ruling §7.3, neither large enough for its own phase. (i) No test asserts the
-      string a user reads for R5 — `message()` (`reflow.rs:67`) is unasserted, and the existing
-      test pins only `name()`. (ii) R5 has never fired on committed content: `xobject-single.pdf`'s
-      page draws only `/X1 Do`, so no fixture puts page text and form text on one baseline, and
-      the gate is proven synthetically only.
+- [ ] **R-2c Pin R5's user-visible string, and give R5 a real-content fixture.** **New work
+      discovered 2026-10-31 while ruling §7.3, not a rename of anything.** Two gaps, named:
+      **(i) the message is unasserted** — no test states the string a user reads for R5;
+      `message()` (`reflow.rs:67`) is pinned nowhere, and `a_line_that_crosses_content_levels_
+      refuses_under_r5` asserts only `name()`, the internal identifier.
+      **(ii) R5 has never fired on real content** — `xobject-single.pdf`'s page draws only
+      `/X1 Do`, so no committed fixture puts page text and form text on one baseline; the gate is
+      proven synthetically only, against a run pair built in the test.
+      Both are defects in a gate **this phase relies on** rather than deferred inventory, which
+      is why they stay in P2.8.
       Acceptance test first: `r5_reports_its_own_message_and_refuses_real_content`.
       **NEW ASSERTION:** that the R5 message is the exact sentence, and that a committed
       `page-and-form-one-line.pdf` (page text at a baseline, plus a form drawing text at the same
@@ -526,41 +531,28 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       **NEW ASSERTION:** that A10 cannot be promoted without a named installer artefact in the
       release notes, mirroring the guard `release_version.rs` already applies to version carriers.
 
-- [ ] **U-3 Page operations record no undo.** `rotatePage` and `deletePages` reach the UI
-      through `runDerived` (`src/components/EditorPane.tsx:113`), which takes a `label`,
-      discards it (`void label`, `:125`) and never calls `push`. So the two page operations are
-      not undoable, though U-1's clause says the undo mechanism "also spans page operations".
-      Found while closing U-1; not re-opened there because it is coverage, not grouping.
-      Acceptance test first: `a_page_rotation_is_one_undo_and_undo_restores_the_previous_rotation`.
-      **NEW ASSERTION:** that `undo()` after `rotatePage` restores the page's prior `/Rotate`
-      value, and that exactly one `StackEntry` was pushed. No existing test asserts anything
-      about undo for a page operation — the four `push` sites cover annotation create, delete,
-      text edit and content-stream text, and none covers a page op.
-      Note the shape: the fix needs a *before* snapshot of the page tree, which the page
-      commands do not currently return, so this is not a one-line change.
-
-- [ ] **T-8 Reader's kern term omits `Tz`.** `tj_fragment_origins` (`textlocate.rs:1017`)
-      computes the kern as `pen_x -= number / 1000.0 * state.size` with no
-      `horizontal_scale / 100` factor, while `spaced_width` applies that factor to advance and
-      spacing. So on any page at `Tz != 100` every run after a kern is misplaced. Found while
-      ruling R10 and **deliberately not fixed there** (`docs/P2.8-reflow-DESIGN.md` R10.1).
-      Measured, not argued, on `kerned-line-tz.pdf` at `Tz 50` through `locate_runs`: the reader
-      puts `CD` at x=**94.008** where PDFium drew it at x=**91.008** — off by **3.000 pt**,
-      which is `250/1000 x 24 x 0.5`. At `Tz 100` the two agree, which is why the suite is green.
-      Acceptance test first: `a_kerned_runs_origin_matches_the_ink_at_tz_50`.
-      **NEW ASSERTION:** that `locate_runs` on `kerned-line-tz.pdf` reports the second `TJ`
-      fragment within 0.05 pt of its PDFium glyph origin. **No existing test compares the reader
-      to the ink at a non-100 `Tz`.** `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them_at_tz_50`
-      looks like it does and does not: it never calls `tj_fragment_origins`, it compares a
-      hand-computed expectation against PDFium's grid. Verified by mutation — replacing the kern
-      term with `pen_x -= 0.0` leaves **both** kerned-line tests green at `Tz 50` and `Tz 100`,
-      so neither can observe the reader (`R10.2` of the design doc). The fixture, the constants
-      and the expectation all exist; only the comparison against the reader is missing.
-      The assertion is RED today by construction: the measured gap is 3.000 pt against a 0.05 pt
-      tolerance, 60x it. Fix is one factor in one expression. **Blocks nothing in H4**: R-1..R-7
-      are reflow-side, and a reflow that moved a kern-positioned tail would inherit this error
-      (3 pt at `Tz 50`, 0 at `Tz 100`) — which is the reason to land T-8 **before R-4 starts
-      asserting positions**, not before R-1..R-3.
+- [ ] **T-8 Reader's kern term omits `Tz`.** `tj_fragment_origins`
+computes the kern as `pen_x -= number / 1000.0 * state.size` with no
+`horizontal_scale / 100` factor, while `spaced_width` applies that factor to advance and
+spacing. So on any page at `Tz != 100` every run after a kern is misplaced. Found while
+ruling R10 and **deliberately not fixed there** (`docs/P2.8-reflow-DESIGN.md` R10.1).
+Measured, not argued, on `kerned-line-tz.pdf` at `Tz 50` through `locate_runs`: the reader
+puts `CD` at x=**94.008** where PDFium drew it at x=**91.008** — off by **3.000 pt**,
+which is `250/1000 x 24 x 0.5`. At `Tz 100` the two agree, which is why the suite is green.
+Acceptance test first: the T-8 assertion below, which does not exist yet.
+**NEW ASSERTION:** that `locate_runs` on `kerned-line-tz.pdf` reports the second `TJ`
+fragment within 0.05 pt of its PDFium glyph origin. **No existing test compares the reader
+to the ink at a non-100 `Tz`.** `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them_at_tz_50`
+looks like it does and does not: it never calls `tj_fragment_origins`, it compares a
+hand-computed expectation against PDFium's grid. Verified by mutation — replacing the kern
+term with `pen_x -= 0.0` leaves **both** kerned-line tests green at `Tz 50` and `Tz 100`,
+so neither can observe the reader (`R10.2` of the design doc). The fixture, the constants
+and the expectation all exist; only the comparison against the reader is missing.
+The assertion is RED today by construction: the measured gap is 3.000 pt against a 0.05 pt
+tolerance, 60x it. Fix is one factor in one expression. **Blocks nothing in H4**: R-1..R-7
+are reflow-side, and a reflow that moved a kern-positioned tail would inherit this error
+(3 pt at `Tz 50`, 0 at `Tz 100`) — which is the reason to land T-8 **before R-4 starts
+asserting positions**, not before R-1..R-3.
 
 ## Loop hygiene (do every iteration)
 
