@@ -31,6 +31,19 @@ Note the asymmetry, and do not "fix" it by adding the flag to the Linux job: Lin
 PDFium, so `--include-ignored` there produces failures, not coverage. The Linux job instead
 asserts the exact ignored count, and the Windows job is where the real run happens.
 
+## Standing rule: never `git add -A`
+
+Stage by explicit path, always. The concurrency tests in `provider::pdf` create runtime copies
+inside the fixture tree with `std::fs::copy` -- `sample-0..8`, `sample-concurrent`,
+`sample-copy`, and `docreader-stress-0..23` -- and those copies are byte-identical to a real
+fixture, so they are indistinguishable from inputs on inspection. `git add -A` sweeps them in
+and they land in a commit that looks like it added 36 fixtures. This happened in `750f5fb`, and
+the only thing that later proved they were artifacts rather than inputs was `git log` on the
+paths. Both patterns are now in `.gitignore`, but that is a backstop for two known names, not a
+rule: any test that writes next to its input recreates the hazard under a name nobody has
+ignored yet. The tests do call `remove_file`, but only on their success paths, so an aborted or
+panicking run leaves the copies in a dirty tree.
+
 ## Standing rule: mutation-verify every guard that reads config text
 
 A guard test that parses a config file (`ci.yml`, `release-windows.yml`, `tauri.conf.json`,
