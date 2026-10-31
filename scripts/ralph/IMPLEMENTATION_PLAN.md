@@ -172,7 +172,7 @@ under P2.7.4.
       `refuses_a_run_rotated_by_the_graphics_matrix`; dropping the `Q` restore fails
       `a_rotation_restored_by_q_does_not_flag_the_run`.
 
-## H2. P2.7.3 XObjects → 0.6.0 — `[~]` gate green, awaiting installer (Q9)
+## H2. P2.7.3 XObjects → 0.6.0 — `[~]` gate green, installer confirmation **unrecorded** (Q9)
 
 Design: `docs/P2.7.3-xobject-DESIGN.md` (frozen v1.0). Rulings: Q1 nesting/cycles, Q2 **per
 draw**, Q3 private `/Resources` only when touched, Q6 grouped inverse from the start, B-7.
@@ -225,6 +225,12 @@ Do the tasks in order; each is one iteration and one commit.
       version strings and `docs/RELEASE-NOTES.md` to 0.6.0. Update the parity matrix row A6
       `Missing → Have` **only after** the installer is confirmed (Q9); until then row A6 stays
       `Missing` and the task closes on a green gate, with the phase marked `[~]`.
+      **A6 therefore stays `Missing` in both places** (`P2.7-STOCK-TAKE.md` and the parity
+      plan), and the reason is now specific rather than general: no 0.6.0 installer
+      confirmation exists in this repository to point at. This is not a claim that the phase is
+      unproven — its gate is green and its X2/X3 acceptance tests run — it is that Q9 names a
+      human step and nothing recorded that the step happened. Promoting A6 on "0.6.0 shipped"
+      would be exactly the inference Q9 exists to prevent.
       **Done.** All seven fixtures are committed (751–2135 bytes, regenerated deterministically
       from the existing builders). Six carriers agree at 0.6.0 — `Cargo.toml`, `Cargo.lock`,
       `package.json`, both `package-lock.json` entries, `tauri.conf.json` — and
@@ -244,7 +250,18 @@ Do the tasks in order; each is one iteration and one commit.
       substituting a bogus name fails `the_design_doc_acceptance_table_names_tests_that_exist`.
       Row A6 stays `Missing` with the reason recorded (Q9), and `P2.7-STOCK-TAKE.md` is
       re-verified at 0.6.0 rather than still dated to 0.5.0.
-      **Phase status: `[~]`** — gate green, installer not yet confirmed.
+      **Phase status: `[~]`** — gate green; Q9's installer confirmation is **not recorded
+      anywhere in this repository**, and the phase cannot be closed on inference.
+      Q9 requires all three of: a green gate; a named installer; and the user having run it.
+      0.6.0 has the first. It has no recorded artefact id, no recorded SHA-256, and no
+      recorded confirmation date. `docs/RELEASE-NOTES.md` §0.6.0 does record its acceptance
+      evidence for 0.8.0 (run `40158689217`, artifact confirmed by the user 2026-10-25) and
+      0.9.0 (run `40719287682`, artifact `12830611552`) — so the convention exists and 0.6.0
+      is the one release that predates it. Three later phases (0.8.0, 0.8.1, 0.9.0) have been
+      built on top of it, which Q9 forbids, so this is a live breach rather than a stale
+      label. **It stays `[~]` until the user states the 0.6.0 installer was run.** Recording
+      that a phase shipped is not the confirmation Q9 asks for, and this row must not be
+      closed by the fact that it is three releases old.
 
 ## H3. Remaining phases
 
@@ -269,8 +286,12 @@ point at which text editing is declared complete. Never reach it by accident.
       `a_bare_stem_from_the_examples_directory_resolves` fails if the scan drops `examples/` —
       without it, widening the exemption would have "fixed" the same false positive while
       leaving the generator uncheckable.
-- [~] **P2.7.4 Transforms → 0.8.1** (Q7 said 0.7.0; 0.8.0 published first, so 0.7.0 would
-  be a semver downgrade) — Design doc frozen (`P2.7.4-transform-DESIGN.md`).
+- [x] **P2.7.4 Transforms → 0.8.1** (Q7 said 0.7.0; 0.8.0 published first, so 0.7.0 would
+  be a semver downgrade) — Design doc frozen (`P2.7.4-transform-DESIGN.md`, committed
+  `f566b58`). **Closed:** both items done, published at `v0.8.1`, and the installer is
+  recorded as hand-confirmed in `docs/RELEASE-NOTES.md` §0.8.1 — artifact `12618531386` from
+  run `40244727545` on `cb8693e`, 7,824,005 bytes, SHA-256 `7a201486…be0a17`. Q9 is satisfied
+  on the record, so this row closes rather than sitting open.
   - [x] **Item 1, composition.** `RawRun::page_origin` (CTM applied to the text-space pen),
         `page_scale`, `advance_axis`, `up_axis`; `pair_run`, `locate_span`'s anchor and
         `assign_object_spans` now compare in page space. Text-space lengths are carried into
@@ -278,20 +299,33 @@ point at which text editing is declared complete. Never reach it by accident.
         Translate/scale/flip runs are editable end-to-end; rotation still refuses, unchanged.
         Three mutations verified (revert composition → 27 failures; unscale the fallback and
         the write path → the two new tests fail).
-  - [ ] **Item 2, unblock rotation.** Replace the `rotated-text` refusal with correct
-        measurement once 1 has landed.
+  - [x] **Item 2, unblock rotation.** Replace the `rotated-text` refusal with correct
+        measurement once 1 has landed. **Done**, in the 0.8.1 train (`a582abd` measured text
+        in its own frame, `509ef24` rewrote the rotation tests, `2ddbb4f` added the acceptance
+        proof). The refusal is gone: `a_rotated_run_is_editable_with_its_own_advance_as_quota`
+        (`textedit.rs:3801`), `a_run_rotated_by_the_graphics_matrix_is_editable` (`:3843`), and
+        `a_rotated_replacement_saves_and_its_inverse_restores_the_bytes`
+        (`tests/textedit_gates.rs:2939`) assert the replacement case, not the refusal.
       H0/T-7 ship the refusal; this phase replaces it with measurement along the run's own
       advance axis. Measurement found a prerequisite defect: `RawRun::origin` is text-space and
       never composed with the CTM, so `translated_by_graphics_matrix` refuses as `run-mismatch`
       end-to-end while `a_run_translated_by_the_graphics_matrix_stays_editable` asserts it is
       editable by testing only the font gates (third vacuous guard in this codebase).
       Includes the rotation hotfix lineage (H0, T-7). Started 2026-10-25.
-- [!] **P2.7.5 CID/Identity-H → 0.8.0** — **Blocked on:** design doc. **C-4 is now ruled:**
-      refuse today; substitute-with-consent once embedding ships. The design doc must state that
-      explicitly.
-- [!] **P2.7.6 Embedding (≡ Stage 2 MECH-B) → 0.9.0** — **C-5 is now ruled:** bundle Liberation
-      (~350 KB) and add the OFL notice to About/notices in the same task. **Priority-raised by
-      C-4:** it is the gate on real-world CID coverage, not a later nicety. Blocked on: design doc.
+- [x] **P2.7.5 CID/Identity-H → 0.8.0** — **Unblocked 2026-10-25** by `docs/P2.7.5-cid-DESIGN.md`
+      (202 lines, committed `f566b58`), which states C-4 explicitly as required. **Shipped in
+      0.8.0**; gate and installer both recorded in `docs/RELEASE-NOTES.md` §0.8.0 (gate: CI run
+      `40157718290` on `2199903`; installer: run `40158689217`, 7,827,785 bytes, hand-tested and
+      accepted by the user 2026-10-25).
+- [~] **P2.7.6 Embedding (≡ Stage 2 MECH-B) → 0.9.0** — **Unblocked 2026-10-26** by
+      `docs/P2.7.6-embed-DESIGN.md` (390 lines, committed `3011108`), which carries C-5 as ruled
+      (bundle Liberation + the OFL notice in the same task). **Shipped in 0.9.0.** Stays `[~]`,
+      not `[x]`: `docs/RELEASE-NOTES.md` §0.9.0 is an explicitly **unpublished draft** whose own
+      *Hand-test provenance* says the hand-tested installer (`40719287682`, artifact
+      `12830611552`) was built from `dd8efce` and the tree has since moved 16 commits, including
+      executable changes on the PDFium picker path (`44c9457`, `3ea86f5`) and the inline
+      `/Resources` fix (`f9c75d5`). Q9 is unmet by the notes' own account, so this row is
+      gate-green-awaiting-confirmation, which is exactly what `[~]` means.
 - [ ] **U-1 Multi-level undo / grouped transactions (C-6).** In scope, **before P2.8**, built
       once. Design the transaction as a group over `ContentOperation`, `FontSwap`,
       `PropertyClone` and `XObjectClone` so a future phase adds a leg rather than a mechanism.
@@ -300,8 +334,145 @@ point at which text editing is declared complete. Never reach it by accident.
       Acceptance: one XObject edit touching stream + `/Resources` + `/Properties` is **one**
       undo; a reflow-shaped multi-operand edit is one undo; the inverse refuses rather than
       partially applying when any leg fails validation.
-- [!] **P2.8 Line-level reflow → 1.0.0** — **Blocked on:** design doc, and on U-1. Invariants
-      are already fixed (see the plan §4).
+      **Most of this was delivered by X3, and this row did not say so. Reconciled 2026-10-31.**
+      X3 (`:207–:246`) rides the existing `also` / `font_swap.also` / `property_clone` group
+      rather than a new mechanism, which is precisely what this row asked for. The three
+      acceptance tests exist and pass in `src-tauri/src/editor/textedit.rs`:
+      (a) `undo_restores_the_do_and_drops_the_clone` (`:4784`) and
+      `undo_leaves_the_other_draw_untouched` (`:5056`) — one stream + `/Resources` +
+      `/Properties` edit is one undo, and the other draw is untouched;
+      (c) `undo_after_a_substitution_leaves_no_orphan` (`:4993`) — the inverse validates every
+      `Do` leg before mutating any of them, so a stale leg refuses the whole undo instead of
+      half-applying it. `revert` enforces this in one pass (`:2515`, "Checking before any
+      mutation").
+      **Genuinely undone: acceptance (b) only.** No reflow-shaped multi-operand edit is one
+      undo, because `ReflowOperation` is recorded by `reflow_tj_array` but never replayed by
+      `revert`. Its `old_ops: Vec<Operation>` / `new_ops: Vec<Operation>` do not fit
+      `ContentOperation`'s `old_bytes: Vec<u8>` without changing a persisted format, which is
+      the choice `docs/P2.8-reflow-DESIGN.md` §7.4 deliberately declined to make.
+      **Recommendation: keep `[ ]` — do not mark done and do not use `[~]`.** `[~]` is defined
+      in this file's legend as gate-green-awaiting-**installer**, and U-1 has no installer and
+      no gate run; borrowing the symbol would make it mean a third thing. Marking it `[x]`
+      would claim (b) is satisfied when no test asserts it — the exact "green suite" inference
+      this plan forbids. It is also not a blocker for P2.8 case (a): the single-`TJ` move needs
+      no grouping, only the record, which exists. The honest state is one open acceptance
+      criterion, and it is item U-2 below.
+- [!] **P2.8 Line-level reflow → 1.0.0** — **Design-doc blocker cleared 2026-10-31** by:
+      `docs/P2.8-reflow-DESIGN.md`, 547 lines, frozen at `39d2b26` (the 460-line figure
+      sometimes quoted is that commit's diff stat, not the file). Invariants live in
+      `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` §4, not in this file, which has no `## 4`.
+      **Still `[!]`, because `[!]` means "blocked (needs a ruling)" and three rulings are open.
+      It is no longer blocked on a missing design doc.** What blocks it now, in order:
+      **§7.2 — the kerned `measured prefix`. Urgent.** R2 says line origin + measured prefix;
+      for a run whose start is set by a `TJ` adjustment rather than a `Td`, whether the kern's
+      displacement belongs in the prefix is undecided. The doc calls this out as needing a
+      ruling **before the guard is written** — and the guard is now written (`9471313`), on a
+      `TJ`-kerned fixture (`kerned-line.pdf`). So the guard was built on an undecided rule.
+      Either the fixtures happen to sit on the decidable side of it, which is luck and must be
+      said out loud, or its expected positions encode an assumption nobody ruled on.
+      **§7.3 — the R5/R8 refusal strings.** Undecided in the doc. R5's gate exists
+      (`R5StraddlesLevels`). R8's does **not**: the refusal was implemented, no test could
+      make it fire, and it was deleted rather than shipped unguarded — a `TJ` array cannot
+      express a `Tf`/`BDC`/`Ts` between two strings, so the states R8 rejects are unreachable
+      from a single array. §2.3.2 of the doc records this. §7.3 must therefore be reworded
+      before it is ruled: the question is not "what string for R8" but "what, if anything, R8
+      refuses on a path that exists."
+      **The undo leg.** U-1 acceptance (b): `ReflowOperation` is recorded but not replayable.
+      Needed for a user-facing undo of a reflow; **not** needed for case (a)'s write, which is
+      landed. Tracked as U-2 below.
+
+## H4. P2.8 case (a) → 1.0.0 — task list
+
+Do these in order. Each is one iteration and one commit. **None is ticked**, and none may be
+ticked on the ground that the suite was already green: where a test partly exists, the entry
+names the **new assertion** and it must be shown **RED** against `b260966` (current HEAD) before
+any implementation. A red run at `39d2b26` is also acceptable for entries whose subject predates
+`b260966`. If an assertion cannot be made red, say so in `LOOP_LOG.md` and either tighten it or
+record it as equivalent — do not tick the box.
+
+Rulings this section obeys: Q7 (1.0.0 is reserved for P2.8), Q9 (no phase `[x]` without a
+confirmed installer), C-2 (line-level only), and the parity plan's §4 invariants.
+
+- [ ] **R-1 Decide §7.2: the kerned `measured prefix`.** This is a ruling, not code — the loop
+      must stop and ask, because the design doc forbids settling it silently.
+      Acceptance test first: extend the guard's expected-position table with a run whose start
+      is set by a `TJ` adjustment, and assert the prefix **includes** that kern's displacement
+      (the position `tj_fragment_origins` already computes). Record the ruling in
+      `docs/P2.8-reflow-DESIGN.md` §7.2 with the date, replacing "not decided".
+      **NEW ASSERTION:** that a run preceded by a kern has `line origin + prefix` equal to its
+      PDFium-observed ink x, where `prefix` covers the kern — no existing test states which side
+      of §7.2 the code is on. `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` (`9471313`)
+      asserts ISO 9.4.3 *placement*, not the reflow *prefix*, so it does not cover this.
+      **Partly exists — must be shown RED.** The assertion above is new;
+      `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them` and `..._at_tz_50` already pass and
+      are not evidence for this entry.
+
+- [ ] **R-2 Reword and decide §7.3: the refusal strings.** Also a ruling. R8 has no reachable
+      path (a `TJ` array cannot carry `Tf`/`BDC`/`Ts` between strings), so §7.3's premise is
+      wrong and must be restated before it can be ruled. R5's string is settled in code.
+      Acceptance test first: `r5_reports_its_own_gate_string` — assert the exact
+      `Gate`/refusal string a user sees, and that it is **not** a reused existing gate name.
+      **NEW ASSERTION:** the user-visible string for R5, asserted literally.
+      `a_line_that_crosses_content_levels_refuses_under_r5` (`b260966`) asserts
+      `ReflowRefusal::R5StraddlesLevels` and `refused.rule.name() == "R5-straddles-levels"`,
+      which is the enum and its internal name — not the string a user reads, and not a pin
+      against someone reusing `run-mismatch` for it.
+      **Partly exists — must be shown RED.**
+
+- [ ] **R-3 The A10 fixture.** `two_run_line()` cannot carry A10 (§6.2: no second line, no `TJ`
+      seam, nothing near the content box). Add a builder beside `too_wide_page()` in
+      `testpdf.rs`, wired into `make_p24_fixtures.rs` with one line.
+      Acceptance test first: `every_fixture_the_design_doc_names_is_committed` — extend the §6.2
+      list so the new fixture is named and must exist on disk.
+      **NEW ASSERTION:** that the A10 fixture is committed and byte-stable, and that it carries
+      two lines, a `TJ` seam and a near-edge variant. `kerned-line.pdf` / `kerned-line-tz.pdf`
+      (`6809678`) are the *guard's* fixtures: two lines and a seam, **no near-edge variant and no
+      replacement-width case**, so they are a different topology.
+      **Partly exists — must be shown RED.** The committed-fixture guard exists (`X4`); the
+      clause naming this fixture does not.
+
+- [ ] **R-4 Row A10's guard: the move itself.** Write the A10 assertions against R-3's fixture.
+      Acceptance test first: `a_wider_replacement_moves_the_rest_of_the_line_and_nothing_else`.
+      **NEW ASSERTION:** after a write of a *wider* replacement, every run on the edited line has
+      moved by exactly the measured width of the replacement, every run on every other line has
+      unmoved ink, **and** the edited run's extracted text equals the requested string.
+      `a_hand_built_td_moves_line_one_and_leaves_line_two_alone` (`9471313`) is the closest and
+      is **not** this: it moves a hand-built `Td` with **no replacement text**, so it asserts
+      nothing about growth, nothing about the run's extracted text, and nothing about the
+      measured-width relation. This is the entry the plan's A10 row is actually waiting on.
+      **Partly exists — must be shown RED against `9471313`/`b260966`.**
+
+- [ ] **R-5 Row A10's refusal case.** Same fixture, near-edge variant.
+      Acceptance test first: `a_replacement_too_wide_for_the_content_box_refuses_and_writes_nothing`.
+      **NEW ASSERTION:** the refusal goes through the content box's `fits-width` path (§4 R3) —
+      not R4's caller-supplied `limit_x` — **and** the stream is byte-unchanged after the
+      refusal. `a_replacement_past_the_limit_refuses_under_r4` (`b260966`) asserts R4 with a
+      `limit_x` handed in by the caller, and never inspects the content stream afterwards, so it
+      covers neither half of this.
+
+- [ ] **R-6 Give `reflow_tj_array` a caller in the edit path.** Today it is reachable only from
+      tests — §5.3 accepts that the *guard* has no caller, but the reflow itself must be wired
+      before A10 can pass on a real document.
+      Acceptance test first: `a_reflow_edit_reaches_the_document_and_its_inverse_restores_it`.
+      **NEW ASSERTION:** the reflow write goes through the same path a user edit takes (so the
+      edited copy, not the original, is what changes — D-2), and its inverse restores the exact
+      pre-edit bytes. No existing test invokes `reflow_tj_array` outside its own module.
+
+- [ ] **U-2 Replay `ReflowOperation`.** U-1 acceptance (b), the only criterion X3 did not deliver.
+      Depends on the §7.4 ruling (share the persisted record, or a sibling leg).
+      Acceptance test first: `a_reflow_shaped_multi_operand_edit_is_one_undo`.
+      **NEW ASSERTION:** one undo restores the pre-reflow stream after a write that inserted a
+      `Td`, as a single entry — i.e. the `TJ` + `Td` + `TJ` vector is restored in one step, not
+      one step per operator. `undo_restores_the_do_and_drops_the_clone` covers a *different*
+      kind of grouped write (`Do` + clone), so it is not evidence for this.
+
+- [ ] **R-7 Row A10 `Missing → Have`, and the 1.0.0 bump.** Last, and only after a confirmed
+      installer (Q9). Bumping to 1.0.0 before that is forbidden by Q7's intent even though Q7
+      assigns P2.8 to 1.0.0, because a version string names a build a human has run.
+      Acceptance test first: `the_parity_matrix_promotes_a10_only_with_a_recorded_installer` —
+      a docs test asserting the matrix row and a recorded artefact id move together.
+      **NEW ASSERTION:** that A10 cannot be promoted without a named installer artefact in the
+      release notes, mirroring the guard `release_version.rs` already applies to version carriers.
 
 ## Loop hygiene (do every iteration)
 
