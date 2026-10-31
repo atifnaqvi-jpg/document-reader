@@ -21,14 +21,20 @@ previous iterations**; everything you need is in the files named below. Read the
    Run it and confirm it fails for the right reason. If it cannot be written yet, say why and
    stop — do not proceed on tests that already pass.
 3. Implement the smallest change that makes it pass. No drive-by refactors.
-4. Run the full gate. All four commands must pass:
+4. Run the full gate. All five commands must pass, and the two `cargo test` shapes are
+   **separate** — running only the first one silently skips the 89 PDFium-backed ink tests,
+   which are the only tests that compare the renderer to the ink:
 
    ```
-   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 509 passed, 89 ignored
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 598 passed, 0 ignored
    cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo clippy --all-targets
    npx tsc --noEmit
    npx vitest run
    ```
+
+   The counts are **pins**. If either moves, stop and report it as a count change, not as a
+   green suite — a test that stopped running is not a test that passes.
 
 5. If the gate is red, fix it. If it cannot be fixed within this task's scope, revert your
    change, record the failure in `LOOP_LOG.md`, and leave the task unchecked. Do not commit red.
@@ -40,7 +46,8 @@ previous iterations**; everything you need is in the files named below. Read the
    - Task: <one line>
    - Test: <name> (red before: yes/no — if no, explain)
    - Files: <paths>
-   - Gate: cargo test <n> passed, clippy clean, tsc clean, vitest <n> passed
+   - Gate: cargo test <n> passed / <n> ignored, AND --include-ignored <n> passed / <n> ignored,
+     clippy clean, tsc clean, vitest <n> passed (both shapes, both counts — one count is not a gate)
    - Commit: <sha or "none">
    - Learned: <anything the next iteration must know>
    ```
