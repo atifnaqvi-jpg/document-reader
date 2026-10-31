@@ -610,3 +610,38 @@ when `ink_y` is reverted to `run.origin.1`.
     0.6.0 installer (Q9 — H2 is `[~]`, and an unconfirmed phase must not be built upon).
     The loop should stop and ask the user to confirm the 0.6.0 installer, or to rule a design
     doc for the next phase.
+
+## Iteration 15 — 2026-10-31 — R-1a (R10: the kerned measured prefix) — green
+
+- Task: R-1a — include the `TJ` kern in the prefix `reflow_tj_array` computes, so the reported
+  tail origin is where the ink lands rather than where the arithmetic intended it to land.
+- Test: `a_kerned_prefix_includes_the_kern` (red before: **yes** — `moved_to` = 130.704 against
+  the fixture's true tail ink at 136.704, short by exactly the 6 pt kern, with a precondition
+  assertion that `CD` really is kern-positioned so the test cannot pass on a kern-less fixture).
+- Files: `src-tauri/src/editor/reflow.rs`, `docs/P2.8-reflow-DESIGN.md` (new §R10.3),
+  `.github/workflows/ci.yml`, `src-tauri/tests/ci_workflow.rs`, `scripts/ralph/loop.sh`,
+  `scripts/ralph/PROMPT.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`.
+- Gate: cargo test **509 passed / 90 ignored**, AND `--include-ignored` **599 passed / 0 ignored**,
+  clippy clean (0 warnings), tsc clean, vitest **69 passed**. Both counts moved by exactly one and
+  both were re-measured, not incremented: the new test is `#[ignore]`d because it compares against
+  PDFium ink, which takes ignored 89→90 and the include-ignored total 598→599 while `passed`
+  without PDFium stays 509. The `ne 89` pin in `ci.yml`, its mirror in `tests/ci_workflow.rs` and
+  the three ralph pins were updated in the same commit.
+- Commit: see `git log` (the log is in the commit it describes, so recording its own sha here
+  would amend it).
+- Learned:
+  - **The kern belongs in the reported prefix and NOT in the `Td` offset.** The `TJ` number stays
+    in the tail's array and is applied there when the tail shows. Writing `line_origin + new_width
+    + kern` into both put it in twice and was measured at 142.704 against the correct 136.704 —
+    a test-visible error, not a reasoning one. Recorded as R10.3 in the design doc; the two
+    quantities are deliberately unequal and must not be "simplified" back together.
+  - **`shift` stays the growth alone.** The tail's old position carried the same kern, so
+    `shift = moved_to - (old origin + old_width + kern) == new_width - old_width`. The three
+    relations are asserted separately so a future collapse fails on a number.
+  - Mutation-verified in the guarded file, per the standing rule: replacing the kern term with
+    `0.0` in `reflow.rs` → `scripts/mutate.sh` exit 0 **CAUGHT**; restored → green. The ci.yml pin
+    mutation was likewise applied to `ci.yml` itself (`ne 90`→`ne 91`), failed `ci_workflow`, and
+    was restored.
+  - **R-1b is now the next startable task** and is *not* done: `reflow_tj_array` still accepts
+    every `TJ` array whose target has a later fragment, so a run positioned by a preceding `Tj`
+    or a mid-array `Td` is measured rather than refused. The design doc now says so in R10.3.

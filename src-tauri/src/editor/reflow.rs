@@ -290,11 +290,30 @@ pub fn reflow_tj_array(
         .iter()
         .map(|candidate| candidate.origin.0)
         .fold(f32::INFINITY, f32::min);
+    // R10: a `TJ` number between the target's string and the tail's is in the tail's prefix, so it
+    // moves the tail in the original line and must move with the replacement. Omitting it makes
+    // `moved_to` an intention rather than the position the ink lands on — the R8b.1 failure in a
+    // different disguise. The numbers are thousandths of an em and are subtracted (ISO 32000-1
+    // 9.4.3). Everything here is unscaled text space: `Tz` does not enter, and this module is at
+    // `Tz 100` until the reader's own `Tz` factor lands (design R10.1, plan T-8).
+    let kern_after_target = -items[fragment_index + 1..]
+        .iter()
+        .take_while(|item| !matches!(item, Object::String(_, _)))
+        .filter_map(|item| item.as_float().ok())
+        .map(|number| number / 1000.0 * run.font_size)
+        .sum::<f32>();
     let prefix_before_target = run.origin.0 - line_origin;
-    let prefix = prefix_before_target + new_width;
-    let offset = td_offset(line_origin, prefix);
-    let moved_to = line_origin + prefix;
-    let shift = moved_to - (run.origin.0 + old_width);
+    // Where the `Td` must put the pen: the tail's start **before** its kern. The number stays in
+    // the tail array and is applied there, so adding it to the offset as well would apply it
+    // twice — measured as 142.704 against the correct 136.704.
+    let tail_pen = prefix_before_target + new_width;
+    // The measured prefix — the distance from the line origin to where the tail's ink actually
+    // starts — includes the kern (R10). This is the number a caller compares against ink.
+    let moved_to = line_origin + tail_pen + kern_after_target;
+    let offset = td_offset(line_origin, tail_pen);
+    // The tail sat at the old prefix, which carried the same kern, so the displacement is exactly
+    // the growth: a `shift` that added the kern would overstate the move.
+    let shift = moved_to - (run.origin.0 + old_width + kern_after_target);
 
     // Split the array at the tail: everything up to and including the target in one `TJ`, an
     // inserted `Td`, then the rest in a second `TJ`. Splitting rather than shifting a `TJ` number
@@ -618,6 +637,84 @@ mod tests {
             (w_after - w_before).abs() < 0.05,
             "the control line moved {:.3} pt",
             w_after - w_before
+        );
+    }
+
+    /// R10: the measured prefix of a run positioned by a kern inside one `TJ` array includes
+    /// that kern, so the position `reflow_tj_array` reports is the position the ink lands on.
+    ///
+    /// `kerned-line.pdf` line 1 is `Td 72 700; [(AB) -250 (CD)] TJ` at `Tf 24`. `CD` therefore
+    /// starts the width of `AB` **plus** `-(-250)/1000 x 24 = 6 pt` from the line origin, and
+    /// that 6 pt belongs to its prefix. Excluding it leaves `moved_to` short by exactly the
+    /// kern: the reported number becomes an intention rather than the fact, which is the
+    /// defect R8b.1 refuses over in a different disguise.
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn a_kerned_prefix_includes_the_kern() {
+        // Helvetica at 24 pt, thousandths of an em: `A` = `B` = 667, `a` = `b` = 556.
+        const OLD_WIDTH: f32 = (667.0 + 667.0) / 1000.0 * FONT_SIZE; // 32.016
+        const NEW_WIDTH: f32 = (667.0 + 667.0 + 556.0 + 556.0) / 1000.0 * FONT_SIZE; // 58.704
+        const LINE_ORIGIN: f32 = 72.0;
+        const FONT_SIZE: f32 = 24.0;
+        // `-KERNED_LINE_KERN / 1000 x Tf`, at `Tz 100` where the reader and 9.4.3 agree (T-8).
+        // Taken from the fixture's own constant rather than transcribed, so a fixture that changed
+        // its kern would move the expectation with it instead of passing on a stale 6.
+        const KERN: f32 = -(crate::editor::testpdf::KERNED_LINE_KERN as f32) / 1000.0 * FONT_SIZE;
+
+        let source = fixture("kerned-line.pdf");
+        let mut document = Document::load(&source).expect("fixture loads");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+        let target = runs
+            .iter()
+            .find(|run| run.text == "AB")
+            .expect("the AB run");
+        assert!(
+            (target.advance - OLD_WIDTH).abs() < 1e-3,
+            "the reader measures `AB` at {}; the AFM sum is {OLD_WIDTH}",
+            target.advance
+        );
+
+        let before = ink(&source);
+        let c_before = at(&before, 'C', 700.0);
+        // Precondition: on a fixture that lost its kern nothing below can fail, so say so here
+        // rather than passing vacuously.
+        assert!(
+            (c_before - (LINE_ORIGIN + OLD_WIDTH + KERN)).abs() < 0.05,
+            "`CD` is not kern-positioned: it drew at {c_before:.3}, and {} + {OLD_WIDTH} + {KERN} \
+             is {:.3}",
+            LINE_ORIGIN,
+            LINE_ORIGIN + OLD_WIDTH + KERN
+        );
+
+        let (content, applied) =
+            reflow_tj_array(&document, 0, page, &runs, &target.id, "ABab", 1000.0)
+                .expect("a wider replacement in one array is case (a)");
+
+        assert!(
+            (applied.moved_to - (LINE_ORIGIN + NEW_WIDTH + KERN)).abs() < 0.05,
+            "the prefix ends at {:.3}; the tail's ink origin is {} + {NEW_WIDTH} + {KERN} = {:.3}",
+            applied.moved_to,
+            LINE_ORIGIN,
+            LINE_ORIGIN + NEW_WIDTH + KERN
+        );
+        assert!(
+            (applied.shift - (NEW_WIDTH - OLD_WIDTH)).abs() < 0.01,
+            "the tail moved {} pt; only the growth ({}) should move it",
+            applied.shift,
+            NEW_WIDTH - OLD_WIDTH
+        );
+
+        write_level(&mut document, page, &[], &content).expect("write page");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let edited = directory.path().join("kerned-prefix.pdf");
+        document.save(&edited).expect("save");
+
+        let c_after = at(&ink(&edited), 'C', 700.0);
+        assert!(
+            (c_after - applied.moved_to).abs() < 0.05,
+            "the write reports its tail at {:.3}; the renderer drew it at {c_after:.3}",
+            applied.moved_to
         );
     }
 

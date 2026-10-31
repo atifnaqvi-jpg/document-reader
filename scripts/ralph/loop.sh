@@ -44,8 +44,8 @@ fail() { printf '\n[ralph] FAILED: %s\n' "$*" >&2; }
 # an explicit decision, because the failure they exist to catch is a test that stopped running
 # rather than a test that started failing.
 PIN_PLAIN_PASSED=509
-PIN_PLAIN_IGNORED=89
-PIN_IGNORED_PASSED=598
+PIN_PLAIN_IGNORED=90
+PIN_IGNORED_PASSED=599
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

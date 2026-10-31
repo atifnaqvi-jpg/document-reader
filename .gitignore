@@ -29,3 +29,7 @@ Maastricht Data Science Program Feb 2022 - Brochure.pdf
 
 # Built installers (large binaries, delivered out-of-band)
 artifacts/
+
+# Test-generated fixture copies (created at runtime by the PDFium concurrency tests)
+src-tauri/tests/fixtures/sample-*.pdf
+src-tauri/tests/fixtures/docreader-stress-*.pdf

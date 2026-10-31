@@ -105,11 +105,14 @@ jobs:
           #
           # Measured at 89, not 87: two more with P2.8 case (a), both reflow writes whose oracle
           # is per-glyph ink for the same reason, and both ignored here rather than left to fail.
+          #
+          # Measured at 90, not 89: R-1a's `a_kerned_prefix_includes_the_kern` compares the
+          # reflow's reported tail origin against rendered ink, so it needs PDFium too.
           # The other tests case (a) brought -- the `Td`-offset arithmetic and the R1/R4/R5/R6
           # refusals -- assert over `measure` and synthesized runs, need no library, and are
           # counted in `passed` below.
-          if [ "$ignored" -ne 89 ]; then
-            echo "::error::$ignored tests ignored; 89 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          if [ "$ignored" -ne 90 ]; then
+            echo "::error::$ignored tests ignored; 90 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV

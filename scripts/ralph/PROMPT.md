@@ -22,12 +22,12 @@ previous iterations**; everything you need is in the files named below. Read the
    stop — do not proceed on tests that already pass.
 3. Implement the smallest change that makes it pass. No drive-by refactors.
 4. Run the full gate. All five commands must pass, and the two `cargo test` shapes are
-   **separate** — running only the first one silently skips the 89 PDFium-backed ink tests,
+   **separate** — running only the first one silently skips the 90 PDFium-backed ink tests,
    which are the only tests that compare the renderer to the ink:
 
    ```
-   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 509 passed, 89 ignored
-   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 598 passed, 0 ignored
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 509 passed, 90 ignored
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 599 passed, 0 ignored
    cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo clippy --all-targets
    npx tsc --noEmit
    npx vitest run

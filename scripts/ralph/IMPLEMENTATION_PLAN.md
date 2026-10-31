@@ -402,7 +402,7 @@ record it as equivalent — do not tick the box.
 Rulings this section obeys: Q7 (1.0.0 is reserved for P2.8), Q9 (no phase `[x]` without a
 confirmed installer), C-2 (line-level only), and the parity plan's §4 invariants.
 
-- [ ] **R-1a Implement R10: the kerned `measured prefix`.** §7.2 was **ruled on 2026-10-31**
+- [x] **R-1a Implement R10: the kerned `measured prefix`.** §7.2 was **ruled on 2026-10-31**
       (R10, `docs/P2.8-reflow-DESIGN.md`), so this is code, not a ruling. The rule: a run
       kern-positioned inside one `TJ` array has the kern in its prefix.
       Acceptance test first: `a_kerned_prefix_includes_the_kern`.
@@ -423,6 +423,16 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       **Partly exists — must be shown RED.** `a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them`
       (`9471313`) asserts ISO 9.4.3 *placement* against PDFium's grid and never calls the reflow
       path, so it is not evidence; the R10.2 mutation shows it cannot observe the reader either.
+      **Done — one iteration, commit `feat(p2.8): include the TJ kern in the measured prefix`.**
+      RED confirmed before the change: `moved_to` = 130.704 against the fixture's true tail ink at
+      136.704, i.e. short by exactly the 6 pt kern. Mutation-verified afterwards by replacing the
+      kern term in `reflow.rs` with `0.0`: `scripts/mutate.sh` reported **CAUGHT** (exit 0), and
+      restoring the term returned the suite to green.
+      **The finding this task existed to produce:** the kern belongs in `moved_to` but **not** in
+      the `Td` offset — the number stays in the tail's `TJ` array and is applied there. Writing
+      "the prefix" once in both places applied it twice, measured at 142.704. Recorded as **R10.3**
+      in the design doc, because the two quantities are now deliberately unequal and a reader who
+      "simplifies" them back into one will be wrong by the kern.
 
 - [ ] **R-1b Refuse a kern the walk cannot attribute.** Same ruling's other half: a run whose
       position also depends on a preceding `Tj`, or on a `Td`/`TD` issued after the array began,
