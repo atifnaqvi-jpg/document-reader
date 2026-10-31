@@ -2672,6 +2672,93 @@ pub fn char_spacing_tj() -> Document {
     )
 }
 
+/// The kern, in thousandths of an em, between `AB` and `CD` on the fixtures below.
+///
+/// A `TJ` number shifts the pen by `-number/1000 x Tf` in text space (ISO 32000-1 9.4.3), so a
+/// positive value moves the pen *left*, pulling the second string back into the first. `-250`
+/// therefore *widens* the gap by `0.25 em` — a displacement large enough to be unmistakable in
+/// ink, and wrong by a visible amount on whichever side forgets it.
+pub const KERNED_LINE_KERN: i64 = -250;
+
+/// The horizontal scaling `kerned-line-tz.pdf` sets, in percent.
+///
+/// Deliberately not 100. Every other fixture in the tree is at `Tz 100`, where the kern term's
+/// `Tz/100` factor is arithmetically invisible: `x / 100 * 100 == x`. At `Tz 50` the factor is
+/// 0.5, so a walk that omits it places the second string exactly twice as far from the first as
+/// the renderer drew it.
+pub const KERNED_LINE_TZ: i64 = 50;
+
+/// The kerned line: one `Td`, one `TJ`, two strings with a kerning number between them, over an
+/// unedited control line.
+///
+/// This is P2.8's A10 fixture and the first test of the pen walk's kern term. Earlier `TJ`
+/// fixtures put two strings side by side with **no** number between them — `char_spacing_tj`
+/// carries `Tc 5` and two adjacent strings — so the kern branch of the walk had never been
+/// exercised by a committed artefact.
+///
+/// Line 1 is a single `TJ` array with **one** `Td` before it, so moving `CD` requires *inserting*
+/// a positioning operator rather than editing an existing one: the case
+/// `P2.8-reflow-DESIGN.md` §2.2 exists to express.
+///
+/// Both lines share the font and size, so a comparison between them cannot be excused by a
+/// difference in metrics.
+pub fn kerned_line() -> Document {
+    document_with_pages(winansi_helvetica(), vec![kerned_line_page(0)])
+}
+
+/// The same content at a horizontal scaling that is not 100, so the kern term's `Tz` factor is
+/// falsifiable. See [`KERNED_LINE_TZ`].
+pub fn kerned_line_tz() -> Document {
+    document_with_pages(
+        winansi_helvetica(),
+        vec![kerned_line_page(KERNED_LINE_TZ)],
+    )
+}
+
+/// The shared page body. `tz == 0` means the page does not set `Tz` at all, which is why this
+/// takes a value rather than always emitting `Tz 100`: the un-`Tz`'d file is the baseline a
+/// reviewer diffs the other against, and `Tz 100` is not the same stream as no `Tz`.
+fn kerned_line_page(tz: i64) -> Vec<Operation> {
+    let mut operations = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+    ];
+    if tz != 0 {
+        operations.push(Operation::new("Tz", vec![tz.into()]));
+    }
+    operations.extend([
+        // Line 1, the kerned line: `AB`, a `-250` kern, `CD`.
+        Operation::new("Td", vec![72.into(), 700.into()]),
+        Operation::new(
+            "TJ",
+            vec![Object::Array(vec![
+                Object::string_literal("AB"),
+                Object::Integer(KERNED_LINE_KERN),
+                Object::string_literal("CD"),
+            ])],
+        ),
+        // Line 2, the unedited control. Positioned by its own `Tm`, so it does not inherit any
+        // pen state line 1 left behind and must sit still whatever a reflow does to line 1.
+        Operation::new(
+            "Tm",
+            vec![
+                1.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                72.into(),
+                600.into(),
+            ],
+        ),
+        Operation::new(
+            "TJ",
+            vec![Object::Array(vec![Object::string_literal("WXYZ")])],
+        ),
+        Operation::new("ET", vec![]),
+    ]);
+    operations
+}
+
 /// A `BDC` whose properties are **named** but carry only an `MCID`: no `ActualText` at all.
 /// This is the overwhelmingly common InDesign shape, and the write path must not report a
 /// divergence for it (P2.7.1 T30).
