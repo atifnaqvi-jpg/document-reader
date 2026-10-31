@@ -214,13 +214,11 @@ pub fn reflow_tj_array(
         return Err(ReflowRefused::new(ReflowRefusal::R5StraddlesLevels, target));
     }
 
-    // R8 needs no check here, and that is a *measured* conclusion rather than an omission — see
-    // `docs/P2.8-reflow-DESIGN.md` §R8.1. A `TJ` array's elements are strings and numbers only,
-    // so between two of its own fragments no `Tf`, `BDC` or `Ts` can appear: they cannot carry
-    // different tags, faces or sizes. A fragment on a different baseline is filtered out by
-    // `on_baseline` above and is never moved. R8 is therefore structurally satisfied for case
-    // (a) rather than refused by it, and the invariant that makes it true is asserted by
-    // `one_tj_array_cannot_carry_two_tagged_units`.
+    // R8 as written is superseded (docs/P2.8-reflow-DESIGN.md §4, R8b): a single-array write
+    // cannot cross an `MCID` because that boundary is a separate operator. R8b is NOT implemented
+    // here yet and is the next task: `on_baseline` filters on `baseline()` alone, which carries no
+    // tag term, so a same-baseline run in another `MCID` and further left still corrupts the
+    // `line_origin` that `Td` is computed from. Do not read this comment as a check that passed.
 
     // R6: a sheared or anisotropically scaled matrix makes "the rest of the line" a
     // non-horizontal concept. `page_scale` cannot answer this — it reports the advance axis only,
