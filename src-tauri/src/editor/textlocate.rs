@@ -4212,4 +4212,306 @@ mod tests {
         assert_eq!(run.font_key, b"F1");
         assert_eq!(run.font_size, 24.0);
     }
+
+    // --- P2.8 §5: the expectation reader, proved without reflow ----------------------
+    //
+    // These tests exist to give the reflow guard an oracle that is **not** the writer's own
+    // arithmetic. The rule they establish is the one that matters: expected positions are read
+    // from PDFium's ink, never from `runmetrics::measure`, whose `bounds.width()` is a *sum* of
+    // advances and kerning -- the same quantity the writer computes. Comparing `measure` to a
+    // computed position would be the row 6c defect in a new costume.
+    //
+    // They live here, in the crate, rather than in `tests/`, for one reason: assertion (c) needs
+    // `write_level`, which is `pub(crate)`. Widening it to `pub` would put a content-rewriting
+    // primitive on the library's public surface purely for a test. A `#[cfg(test)]` module can
+    // reach it as it stands.
+    //
+    // What is proved here is the *reader*. No reflow code exists yet, and none is used: the
+    // "hand-built edit" in (c) inserts a `Td` into the decoded operator list and re-encodes,
+    // which is what the design says a reflow will eventually do, minus the decision of *where*.
+
+    /// The kern and `Tz` the fixtures were built with, mirrored here so the expectation is
+    /// computed from named constants rather than transcribed numbers.
+    use crate::editor::testpdf::{KERNED_LINE_KERN, KERNED_LINE_TZ};
+
+    use std::path::Path;
+
+    /// Helvetica `A`-`D` and `W`-`Z` widths, in thousandths of an em, from the AFM table this
+    /// build already ships (`editor::afm`). `A`=667 `B`=667 `C`=722 `D`=722,
+    /// `W`=944 `X`=667 `Y`=667 `Z`=611.
+    ///
+    /// Transcribed rather than looked up on purpose: a guard that asked `afm` for the width
+    /// would be asking the writer, which is the whole defect these tests avoid. If the AFM table
+    /// ever disagrees with this, that disagreement is itself the finding.
+    const ADVANCE_A: f32 = 667.0;
+    const ADVANCE_B: f32 = 667.0;
+    const ADVANCE_C: f32 = 722.0;
+    const ADVANCE_D: f32 = 722.0;
+
+    const FIXTURE_FONT_SIZE: f32 = 24.0;
+    const FIXTURE_TD_X: f32 = 72.0;
+    /// Line 2's `Tm` translation. See `kerned_line_page`.
+    const FIXTURE_LINE2_X: f32 = 72.0;
+
+    /// A glyph's pen origin, in page space, with the character it draws.
+    ///
+    /// `x`/`y` are PDFium's `origin()`, which is the **pen** origin — the quantity a positioning
+    /// operator actually moves — not the loose or ink box, whose left edge carries a side
+    /// bearing that varies by glyph.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct GlyphOrigin {
+        char: char,
+        x: f32,
+        y: f32,
+    }
+
+    /// Reads per-glyph pen origins out of one committed fixture.
+    ///
+    /// This is the expectation reader itself: it opens the file with PDFium, takes the character
+    /// grid, and returns each character's origin. It **never** calls `measure` — the whole point
+    /// is that its answer comes from what the renderer drew, not from what the writer adds up.
+    ///
+    /// Generated characters are dropped: PDFium synthesises a line break or a word space at a
+    /// kerning seam, and those occupy grid slots without being drawn by any run's bytes. Keeping
+    /// them would put a phantom glyph in the middle of every kern.
+    fn glyph_origins(path: &Path, page: u32) -> Vec<GlyphOrigin> {
+        let grid = crate::provider::DocumentHandles::new()
+            .with_document(path, None, |document| {
+                crate::editor::runmetrics::char_grid(document, page, path)
+            })
+            .expect("PDFium char grid extraction failed");
+
+        grid.chars
+            .iter()
+            .filter(|character| !character.generated)
+            .filter_map(|character| {
+                character.unicode.map(|glyph| GlyphOrigin {
+                    char: glyph,
+                    x: character.origin_x,
+                    y: character.origin_y,
+                })
+            })
+            .collect()
+    }
+
+    /// One `TJ` fragment: its per-character AFM widths and the kern that follows it.
+    struct Fragment {
+        widths: &'static [f32],
+        kern_after: f32,
+    }
+
+    /// The pen x of every fragment, from 9.4.3 plus 9.4.4.
+    ///
+    /// `kern_after` is the raw `TJ` number. It is subtracted, so a negative number widens the
+    /// gap — the sign the repo states in `push_tj_array` and the one the fixtures rely on.
+    fn expected_fragment_origins(
+        start: f32,
+        fragments: &[Fragment],
+        size: f32,
+        tz: f32,
+    ) -> Vec<f32> {
+        let scale = tz / 100.0;
+        let mut pen = 0.0_f32;
+        let mut out = Vec::new();
+        for fragment in fragments {
+            out.push(start + pen * scale);
+            let thousandths: f32 = fragment.widths.iter().sum();
+            pen += thousandths * size / 1000.0;
+            pen -= fragment.kern_after / 1000.0 * size;
+        }
+        out
+    }
+
+    fn kerned_fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    /// The `AB`-then-`CD` line, as 9.4.3 describes it.
+    fn kerned_line_fragments() -> [Fragment; 2] {
+        [
+            Fragment {
+                widths: &[ADVANCE_A, ADVANCE_B],
+                kern_after: KERNED_LINE_KERN as f32,
+            },
+            Fragment {
+                widths: &[ADVANCE_C, ADVANCE_D],
+                kern_after: 0.0,
+            },
+        ]
+    }
+
+    /// Assertion (a): line 1's glyph origins are where its own operators put them.
+    ///
+    /// Tolerance is `0.05 pt`. PDFium reports through an `f32` and rounds its own layout, so an
+    /// exact comparison would fail on representation rather than on a missing factor. The
+    /// distinction that matters is scale: the defect under test moves `C` by `16.5 pt` at
+    /// `Tz 50`, which is 330x the tolerance.
+    fn assert_line_one_origins(name: &str, tz: f32) {
+        let path = kerned_fixture_path(name);
+        let glyphs = glyph_origins(&path, 0);
+
+        let expected = expected_fragment_origins(
+            FIXTURE_TD_X,
+            &kerned_line_fragments(),
+            FIXTURE_FONT_SIZE,
+            tz,
+        );
+
+        let a = glyphs
+            .iter()
+            .find(|glyph| glyph.char == 'A')
+            .unwrap_or_else(|| panic!("{name}: no `A` in the grid: {glyphs:?}"));
+        let c = glyphs
+            .iter()
+            .find(|glyph| glyph.char == 'C')
+            .unwrap_or_else(|| panic!("{name}: no `C` in the grid: {glyphs:?}"));
+
+        assert!(
+            (a.x - expected[0]).abs() < 0.05,
+            "{name}: `A` drew at x={:.3}, 9.4.3 says {:.3}",
+            a.x,
+            expected[0]
+        );
+        assert!(
+            (c.x - expected[1]).abs() < 0.05,
+            "{name}: `C` drew at x={:.3}, 9.4.3 says {:.3} (kern {} at Tz {tz})",
+            c.x,
+            expected[1],
+            KERNED_LINE_KERN
+        );
+    }
+
+    /// Assertion (b): the control line's glyphs are where its own `Tm` puts them.
+    fn assert_line_two_origins(name: &str) {
+        let path = kerned_fixture_path(name);
+        let glyphs = glyph_origins(&path, 0);
+
+        let w = glyphs
+            .iter()
+            .find(|glyph| glyph.char == 'W')
+            .unwrap_or_else(|| panic!("{name}: no `W` in the grid: {glyphs:?}"));
+
+        assert!(
+            (w.x - FIXTURE_LINE2_X).abs() < 0.05,
+            "{name}: control `W` drew at x={:.3}, its `Tm` says {:.3}",
+            w.x,
+            FIXTURE_LINE2_X
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them() {
+        assert_line_one_origins("kerned-line.pdf", 100.0);
+    }
+
+    /// Assertion (a) at a horizontal scaling that is not 100.
+    ///
+    /// At `Tz 100` the walk's kern term is correct by accident: it omits the `Tz/100` factor, and
+    /// `x / 100 * 100 == x`. This fixture is what makes that omission falsifiable.
+    ///
+    /// Note what the expectation does **not** do: it does not consult the reader's pen walk. The
+    /// `Tz/100` is applied here to a hand-computed text-space sum, so the two implementations
+    /// are independent and either can be wrong without the other agreeing.
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them_at_tz_50() {
+        assert_line_one_origins("kerned-line-tz.pdf", KERNED_LINE_TZ as f32);
+    }
+
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn the_control_line_is_where_its_tm_puts_it() {
+        assert_line_two_origins("kerned-line.pdf");
+    }
+
+    /// Assertion (c): a hand-built operator edit moves line 1 and leaves line 2 alone.
+    ///
+    /// The edit is exactly what a reflow will eventually build and nothing more: decode the
+    /// page's operators, insert one `Td` between the two `TJ` strings — splitting the array so
+    /// `CD` is shown from a new pen origin — re-encode through `write_level`, save, and re-read
+    /// the ink.
+    ///
+    /// Why a split rather than a shifted `TJ` number: a kern number displaces the pen inside the
+    /// array and cannot move `CD` *rightwards* past its own glyph advances without also changing
+    /// the text. A `Td` between two arrays is the general form, and it is the shape §2.2 of the
+    /// design says the inverse model must be able to emit.
+    ///
+    /// The assertions are the two halves of an edit's contract:
+    ///   * line 1's `C` moves by exactly the `Td` delta;
+    ///   * line 2's `W` does not move at all.
+    ///
+    /// Both are read from PDFium ink after a round trip through a file, so this also proves the
+    /// write path is not silently dropping the second array or the control line's `Tm`.
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn a_hand_built_td_moves_line_one_and_leaves_line_two_alone() {
+        const SHIFT: f32 = 40.0;
+
+        let source = kerned_fixture_path("kerned-line.pdf");
+        let mut document = Document::load(&source).expect("fixture loads");
+        let page_id = page_id(&document, 0).expect("page 0");
+
+        let before = glyph_origins(&source, 0);
+        let c_before = before.iter().find(|glyph| glyph.char == 'C').expect("C");
+        let w_before = before.iter().find(|glyph| glyph.char == 'W').expect("W");
+
+        // The hand-built edit, on the decoded operator list.
+        let mut content = read_level(&document, page_id, &[]).expect("page content");
+        let array_index = content
+            .operations
+            .iter()
+            .position(|operation| operation.operator == "TJ")
+            .expect("a TJ array on line 1");
+        let Operation { operands, .. } = content.operations.remove(array_index);
+        let Object::Array(items) = operands.into_iter().next().expect("an array operand") else {
+            panic!("TJ operand was not an array");
+        };
+        // Rebuild as two arrays with a `Td` between them. `CD` keeps its kern-implied start: the
+        // `Td` supplies the whole displacement, so the kern must not be applied twice.
+        let ab = items.first().cloned().expect("AB");
+        let cd = items.get(2).cloned().expect("CD");
+        // `Td` translates the **line matrix**, not the pen: `tm` and `tlm` are set to
+        // `translate(tx,ty) x tlm` (ISO 32000-1 9.4.2). So a `Td` inserted after `AB` discards the
+        // advance `AB` just made, and the offset must be measured from the *line* origin, not
+        // from the pen. Getting this wrong is exactly how a reflow loses the preceding run's
+        // width, so the fixture-level expectation below is derived from the line origin.
+        let text_space_cd = expected_fragment_origins(
+            FIXTURE_TD_X,
+            &kerned_line_fragments(),
+            FIXTURE_FONT_SIZE,
+            100.0,
+        )[1];
+        let td_x = (text_space_cd - FIXTURE_TD_X) + SHIFT;
+
+        let rebuilt = vec![
+            Operation::new("TJ", vec![Object::Array(vec![ab])]),
+            Operation::new("Td", vec![td_x.into(), 0.into()]),
+            Operation::new("TJ", vec![Object::Array(vec![cd])]),
+        ];
+        content.operations.splice(array_index..array_index, rebuilt);
+        write_level(&mut document, page_id, &[], &content).expect("write page content");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let edited = dir.path().join("kerned-line-edited.pdf");
+        document.save(&edited).expect("save edited document");
+
+        let after = glyph_origins(&edited, 0);
+        let c_after = after.iter().find(|glyph| glyph.char == 'C').expect("C");
+        let w_after = after.iter().find(|glyph| glyph.char == 'W').expect("W");
+
+        assert!(
+            (c_after.x - (c_before.x + SHIFT)).abs() < 0.05,
+            "line 1's `C` moved {:.3} pt, the `Td` asked for {SHIFT}",
+            c_after.x - c_before.x
+        );
+        assert!(
+            (w_after.x - w_before.x).abs() < 0.05,
+            "line 2's `W` moved {:.3} pt, but nothing edited it",
+            w_after.x - w_before.x
+        );
+    }
 }
