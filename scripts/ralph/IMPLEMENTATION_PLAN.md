@@ -486,24 +486,39 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       `/MCID` fails the scope assertion, and the kern-less `[(AB) (CD)]` array was chosen over
       `[(AB) -250 (CD)]` so a later `Tz` bug (T-8) cannot move the tail's expected ink.
 
-- [ ] **R-2b Refuse a line whose runs leave its merge scope (R8b).** §7.3 was **ruled on
-      2026-10-31**, so this is code. `reflow_tj_array` takes `line_origin` as the minimum
+- [x] **R-2b Refuse a line whose runs leave its merge scope (R8b).** §7.3 was **ruled on
+      2026-10-31**, so this is code. `reflow_tj_array` took `line_origin` as the minimum
       `origin.0` over every run on the baseline, and `on_baseline` filters on `baseline()`
       (`origin.1 + rise`) alone, with **no scope term**. A same-baseline run in another `MCID`,
       further left, makes `line_origin` too small and the `Td` offset correspondingly too large.
       **Depends on R-2a** for its fixture.
       Acceptance test first: `a_same_baseline_run_in_another_mcid_does_not_dislocate_the_tail`.
       **NEW ASSERTION:** that the edit refuses with `R8b-scope-left-of-line` rather than computing
-      a wrong `line_origin`. **Nothing exists** — no variant, no gate, no test. Red against R-2a's
-      fixture because `on_baseline` carries no tag term.
-      The reason it must refuse rather than correct the arithmetic is recorded as R8b.1 in the
-      design doc: `line_origin + prefix` cancels to `run.origin.0 + new_width`, so the record
-      would report the intended position while the ink sat elsewhere.
+      a wrong `line_origin`.
+      **Done.** `ReflowRefusal::R8bScopeLeftOfLine` (`R8b-scope-left-of-line`); `line_origin` and
+      `line_right` both come from `in_scope` (same-baseline runs with the target's
+      `merge_scope()`), and a run outside it lying left of the line start refuses.
+      Two things were found rather than assumed, and both are recorded in design §R8b.2:
+      (1) **R8b had to move before R10b or it is dead code.** R10b refuses *any* same-baseline run
+      at a different `op_index`, and no constructible two-unit line can avoid one (a `BDC`/`EMC`
+      pair is an operator pair; a `TJ` array's elements are strings and numbers only, so one array
+      cannot hold two scopes — the invariant `one_tj_array_cannot_carry_two_tagged_units` asserts).
+      Measured: with the check after R10b the fixture refused `R10b-unattributed-kern`.
+      (2) **R10b then had to be scoped to `in_scope`**, or R8b's `line_right` exclusion is dead
+      code in the other direction: a right-hand neighbour would be refused as unattributable.
+      The new `a_run_outside_the_scope_does_not_set_the_line_extent` is what makes that half
+      observable, and it is written against the committed fixture **plus one injected run**
+      because a wholly synthetic pair never reaches R4 — an empty document fails at the content
+      read first, so the synthetic version of the test was mutation-SURVIVED.
+      Both refusal arms and the extent exclusion were mutation-verified in the guarded file
+      (`scripts/mutate.sh --lib`): each mutant caught, each restore green.
 - [ ] **R-2c Pin R5's user-visible string, and give R5 a real-content fixture.** **New work
       discovered 2026-10-31 while ruling §7.3, not a rename of anything.** Two gaps, named:
       **(i) the message is unasserted** — no test states the string a user reads for R5;
-      `message()` (`reflow.rs:67`) is pinned nowhere, and `a_line_that_crosses_content_levels_
-      refuses_under_r5` asserts only `name()`, the internal identifier.
+      `ReflowRefusal::message()` is pinned nowhere, and
+      `a_line_that_crosses_content_levels_refuses_under_r5` asserts only `name()`, the internal
+      identifier. The same gap now exists for R8b's message, which R-2b's tests also leave
+      unasserted — R-2c's `message` guard should cover every variant, not just R5.
       **(ii) R5 has never fired on real content** — `xobject-single.pdf`'s page draws only
       `/X1 Do`, so no committed fixture puts page text and form text on one baseline; the gate is
       proven synthetically only, against a run pair built in the test.
@@ -623,6 +638,19 @@ tolerance, 60x it. Fix is one factor in one expression. **Blocks nothing in H4**
 are reflow-side, and a reflow that moved a kern-positioned tail would inherit this error
 (3 pt at `Tz 50`, 0 at `Tz 100`) — which is the reason to land T-8 **before R-4 starts
 asserting positions**, not before R-1..R-3.
+
+- [ ] **R-H2 Add `cargo fmt --check` to the gate.** **New work discovered 2026-11-01.** The
+      gate script runs `cargo test` (both shapes), `cargo clippy`, `tsc` and `vitest`, and CI runs
+      `cargo fmt --check`; the *local* gate does not. Measured: after R-2a landed, the committed
+      tree at `f01c792` was **not** `cargo fmt`-clean (`cargo fmt --check` named two `Tm`
+      operator vectors in `testpdf.rs`), and nothing in the loop reported it. R-2b's own run
+      formatted them as a side effect, which is how the drift was found rather than avoided.
+      A gate that is a strict subset of CI's is a gate that can report green on a tree CI rejects.
+      Acceptance test first: `the_gate_runs_every_check_ci_runs` — compare the `run:` commands in
+      `ci.yml` against the commands in `scripts/ralph/gate.sh` and fail on a check present in one
+      and absent from the other, with an explicit allow-list for steps that cannot run locally.
+      **NEW ASSERTION:** that the comparison is by command, not by step name, and that the
+      allow-list is non-empty-and-claimed rather than a wildcard.
 
 ## Loop hygiene (do every iteration)
 

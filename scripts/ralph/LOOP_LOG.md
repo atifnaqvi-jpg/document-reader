@@ -759,3 +759,57 @@ when `ink_y` is reverted to `run.origin.1`.
     salt/IV each run), so it shows up dirty after every regeneration. `git checkout --` it before
     staging — do not commit it, and do not "fix" the nondeterminism here.
   - Next startable: **R-2b** (`R8b-scope-left-of-line`), now unblocked with its fixture; then R-2c.
+
+## Iteration 18 — 2026-11-01 — R-2b (R8b: refuse a line whose origin another unit owns) — green
+
+- Task: R-2b — compute `line_origin` and `line_right` only from the runs in the target's
+  `merge_scope`, and refuse with `R8b-scope-left-of-line` when a same-baseline run in another
+  tagged unit lies left of this line's start.
+- Test: `a_same_baseline_run_in_another_mcid_does_not_dislocate_the_tail` (red before: **yes** —
+  against the committed fixture it reported `R10b-unattributed-kern` where R8b was expected, which
+  is the ordering finding below, not the intended refusal). Second guard
+  `a_run_outside_the_scope_does_not_set_the_line_extent` pins the other half of the ruling.
+- Files: `src-tauri/src/editor/reflow.rs`, `docs/P2.8-reflow-DESIGN.md` (§R8b.2 new, §7 item 3),
+  `src-tauri/src/editor/testpdf.rs` (fmt only), `.github/workflows/ci.yml`,
+  `src-tauri/tests/ci_workflow.rs`, `scripts/ralph/gate.sh`, `scripts/ralph/PROMPT.md`,
+  `scripts/ralph/IMPLEMENTATION_PLAN.md`, `scripts/ralph/LOOP_LOG.md`.
+- Gate: cargo test **513 passed / 90 ignored**, AND `--include-ignored` **603 passed / 0 ignored**,
+  clippy clean (0 warnings), tsc clean, vitest **69 passed**. Both cargo counts moved by exactly
+  two and were re-measured, not incremented: both new guards parse the committed fixture and need
+  no PDFium, so `passed` 511→513 and include-ignored 601→603 while `ignored` stays 90. The
+  `-lt 511` floor in `ci.yml`, its mirror in `tests/ci_workflow.rs` and the two ralph pins (both
+  shapes) were updated in the same commit; the floor mutation (`513`→`514` in `ci.yml`) failed the
+  guard and restoring `513` passed.
+- Commit: see `git log` (the log is in the commit it describes, so recording its own sha here
+  would amend it).
+- Learned:
+  - **A rule that is correct can still be unreachable, and that looks identical to done.** R8b
+    written after R10b passes its own test only because R10b fires first with a *different*
+    message; the acceptance assertion is what surfaced it, because it named the rule it wanted.
+    No constructible two-unit line can reach R8b second: a `BDC`/`EMC` pair is an operator pair
+    and a `TJ` array's elements are strings and numbers only, so one array cannot hold two scopes
+    (the invariant `one_tj_array_cannot_carry_two_tagged_units` already asserts exactly this).
+    Both rules refuse, so the ordering decides *which remedy is named*, and R10b's message names
+    the wrong one for the R8b shape. Recorded as design §R8b.2 so a future reader does not
+    "simplify" the two checks together.
+  - **Moving R8b first was only half the fix: R10b then had to be scoped too.** R10b on
+    `on_baseline` refuses a right-hand neighbour as unattributable, which makes R8b's `line_right`
+    exclusion dead code — mutating `line_right` back to the full set changed nothing observable.
+    Scoping R10b to the same `in_scope` set is what makes the ruling's "or `line_right`" clause
+    real rather than commented.
+  - **A test can pass for the shape it does not reach.** The first version of the extent test was
+    synthetic (an empty `Document`), and it was mutation-**SURVIVED**: the extent check sits after
+    the document read, so an empty page fails at `decoded_content` and never reaches R4. The test
+    that works is the committed fixture plus one injected run — and the injected run must carry a
+    *distinct* `block` id, because `MergeScope::Block` compares `ObjectId`s and the first draft
+    reused the fixture's own `(6, 0)`, so the "foreign" run was in the same scope.
+  - Mutation discipline held both ways, in the guarded file: deleting the R8b arm → CAUGHT;
+    `line_right` back to `on_baseline` → CAUGHT (after the test was fixed); and the over-broad
+    variant (any out-of-scope run refuses) → CAUGHT, which is what proves the refusal is not
+    simply "refuse every two-unit line". Each restore returned the suite to green.
+  - **The local gate was not a superset of CI's.** `cargo fmt --check` runs in CI and not in
+    `scripts/ralph/gate.sh`, and the tree at `f01c792` was already fmt-dirty in `testpdf.rs` from
+    R-2a. This iteration's `cargo fmt` cleaned it as a side effect; the gap is filed as **R-H2**
+    rather than fixed here, because adding a gate step is its own task with its own guard.
+  - Next startable: **R-2c** (pin R5's message, give R5 a real-content fixture). It now also owns
+    R8b's message, which this iteration deliberately left unasserted — the task text says so.

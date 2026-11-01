@@ -131,8 +131,12 @@ jobs:
           # NOT `#[ignore]`d: it builds runs and needs no PDFium, so it moves this floor and
           # leaves the ignored count at 90. R-2a's fixture guard (510 -> 511) is the same shape:
           # it parses a committed fixture's operator list and needs no library either.
-          if [ "$passed" -lt 511 ]; then
-            echo "::error::only $passed tests ran; 511 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # Measured at 513, not 511: R-2b's two guards (511 -> 513) also parse the committed
+          # fixture rather than opening a document through PDFium, so they move this floor and
+          # leave the ignored count at 90.
+          if [ "$passed" -lt 513 ]; then
+            echo "::error::only $passed tests ran; 513 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

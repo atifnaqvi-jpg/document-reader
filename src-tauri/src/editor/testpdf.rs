@@ -2066,7 +2066,14 @@ pub fn two_mcid_one_baseline() -> Document {
         ),
         Operation::new(
             "Tm",
-            vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()],
+            vec![
+                1.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                72.into(),
+                700.into(),
+            ],
         ),
         Operation::new("Tj", vec![Object::string_literal("HI")]),
         Operation::new("EMC", vec![]),
@@ -2076,7 +2083,14 @@ pub fn two_mcid_one_baseline() -> Document {
         ),
         Operation::new(
             "Tm",
-            vec![1.into(), 0.into(), 0.into(), 1.into(), 200.into(), 700.into()],
+            vec![
+                1.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                200.into(),
+                700.into(),
+            ],
         ),
         Operation::new(
             "TJ",

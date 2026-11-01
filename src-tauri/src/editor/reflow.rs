@@ -9,7 +9,7 @@
 //! * the array's trailing fragments moved by an **inserted `Td`** computed as *line origin +
 //!   measured prefix* (R2.1), never as a pen delta;
 //! * no spacing adjustment (R1), no wrapping (R4), no cross-level line (R5), no non-uniform
-//!   transform (R6), no structure-boundary crossing (R8).
+//!   transform (R6), no run in another tagged unit left of the line start (R8b).
 //!
 //! Refusing here is not a stub: each refusal names the rule, because a guard must be able to
 //! tell a refusal from a wrong answer, and silent skips are banned in this repository.
@@ -35,6 +35,9 @@ pub enum ReflowRefusal {
     R5StraddlesLevels,
     /// R6: the drawing matrix is non-uniform, so "the rest of the line" is not horizontal.
     R6NonUniformTransform,
+    /// R8b: another tagged unit has a run on this baseline, left of this line's own start, so the
+    /// line origin the `Td` is measured from is not this line's.
+    R8bScopeLeftOfLine,
     /// R10b: the text before this run is positioned by an operator outside the run's `TJ` array,
     /// so the array's own walk cannot say where the rest of the line starts.
     R10bUnattributedPrefix,
@@ -51,6 +54,7 @@ impl ReflowRefusal {
             Self::R4Wrap => "R4-wrap",
             Self::R5StraddlesLevels => "R5-straddles-levels",
             Self::R6NonUniformTransform => "R6-non-uniform-transform",
+            Self::R8bScopeLeftOfLine => "R8b-scope-left-of-line",
             Self::R10bUnattributedPrefix => "R10b-unattributed-kern",
             Self::NotOneArray => "not-one-array",
         }
@@ -74,6 +78,10 @@ impl ReflowRefusal {
             Self::R6NonUniformTransform => {
                 "this text is drawn through a non-uniform transform, so the rest of its line is \
                  not horizontal"
+            }
+            Self::R8bScopeLeftOfLine => {
+                "text from another tagged or structure unit lies to the left of this line, so \
+                 the rest of the line cannot be moved as one"
             }
             Self::R10bUnattributedPrefix => {
                 "another run on this line is positioned outside this TJ array, so reflow cannot \
@@ -222,18 +230,48 @@ pub fn reflow_tj_array(
         return Err(ReflowRefused::new(ReflowRefusal::R5StraddlesLevels, target));
     }
 
-    // R8 as written is superseded (docs/P2.8-reflow-DESIGN.md §4, R8b): a single-array write
-    // cannot cross an `MCID` because that boundary is a separate operator. R8b is NOT implemented
-    // here yet and is the next task: `on_baseline` filters on `baseline()` alone, which carries no
-    // tag term, so a same-baseline run in another `MCID` and further left still corrupts the
-    // `line_origin` that `Td` is computed from. Do not read this comment as a check that passed.
-
     // R6: a sheared or anisotropically scaled matrix makes "the rest of the line" a
     // non-horizontal concept. `page_scale` cannot answer this — it reports the advance axis only,
     // and a shear keeps a usable advance length — so the test is orthogonality itself.
     if !run.frame.is_orthogonal() {
         return Err(ReflowRefused::new(
             ReflowRefusal::R6NonUniformTransform,
+            target,
+        ));
+    }
+
+    // R8b: a same-baseline run in **another tagged unit** is not on this line. `baseline()` is
+    // `origin.1 + rise` and carries no tag term, so `merge_scope()` is the only thing that can
+    // tell a table cell from the caption beside it. Both quantities the move depends on come from
+    // the runs that would merge with the target: the line's extent (`line_right`, R4) and its
+    // origin (`line_origin`, R2.1). A run outside the scope lying left of the line start makes
+    // `line_origin` too small, and because `Td` is relative to the line matrix the tail is then
+    // drawn right of where it belongs — displaced by `true tlm - line_origin`, which no value in
+    // the returned record can contradict (design R8b.1). So that shape is refused.
+    //
+    // Checked **before** R10b, and the ordering is load-bearing rather than stylistic. R10b
+    // refuses a same-baseline run at a different `op_index`, and no constructible two-unit line
+    // can avoid one: a `BDC`/`EMC` pair is an operator pair, and a `TJ` array's elements are
+    // strings and numbers only, so two fragments of one array cannot differ in scope (asserted by
+    // `one_tj_array_cannot_carry_two_tagged_units`). Left after R10b, R8b would be unreachable.
+    // Both rules refuse, so the precedence changes which remedy is named and nothing else — and
+    // R10b's message would name the wrong one here: "positioned outside this TJ array" when the
+    // user's route out is to edit within one tagged unit.
+    let in_scope: Vec<&RawRun> = on_baseline
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.merge_scope() == run.merge_scope())
+        .collect();
+    // `run` is in `on_baseline` and so in `in_scope`, which makes the fold's identity unreachable.
+    let line_origin = in_scope
+        .iter()
+        .map(|candidate| candidate.origin.0)
+        .fold(f32::INFINITY, f32::min);
+    if on_baseline.iter().any(|candidate| {
+        candidate.merge_scope() != run.merge_scope() && candidate.origin.0 < line_origin
+    }) {
+        return Err(ReflowRefused::new(
+            ReflowRefusal::R8bScopeLeftOfLine,
             target,
         ));
     }
@@ -249,7 +287,12 @@ pub fn reflow_tj_array(
     // `run.origin.0 + new_width` whatever `line_origin` is, so the record cannot show the
     // mistake. A `Td` *inside* an array is not a separate case — an array's elements are strings
     // and numbers only, so it is not expressible.
-    if on_baseline
+    //
+    // Scoped to `in_scope`, not to `on_baseline`, and the scope is what R8b needs: a run in
+    // another tagged unit that lies to the **right** of this line is not part of this line's
+    // prefix, and refusing it here would make R8b's `line_right` exclusion dead code. Only the
+    // runs that could enter this line's arithmetic can make it unattributable.
+    if in_scope
         .iter()
         .any(|candidate| candidate.id.op_index != target.op_index)
     {
@@ -297,9 +340,10 @@ pub fn reflow_tj_array(
     }
 
     // R4: the widened line must still fit. If its right edge would pass `limit_x` there is
-    // nowhere on this baseline to go, so refuse rather than wrap (R4 is out of scope).
+    // nowhere on this baseline to go, so refuse rather than wrap (R4 is out of scope). The edge is
+    // this line's own: a run in another tagged unit is not room this line can use (R8b).
     let growth = new_width - old_width;
-    let line_right = on_baseline
+    let line_right = in_scope
         .iter()
         .map(|candidate| candidate.page_origin.0 + candidate.advance)
         .fold(f32::NEG_INFINITY, f32::max);
@@ -311,14 +355,10 @@ pub fn reflow_tj_array(
     // everything on the line before the trailing run, re-measured — here, the widened target's
     // own advance, because the target is what grew and it sits immediately before the tail.
     //
-    // `run.origin.0` is the target's own pen origin, which is the line origin when the target is
-    // the first fragment of its array. Any earlier run on the same baseline would be a separate
-    // operation, and R5/R8 do not forbid one, so the line origin is taken from the leftmost run
-    // on the baseline, not from the target.
-    let line_origin = on_baseline
-        .iter()
-        .map(|candidate| candidate.origin.0)
-        .fold(f32::INFINITY, f32::min);
+    // `line_origin` is the leftmost run **in the target's merge scope** (R8b): a run on the same
+    // baseline in another tagged unit is another line's text, and R8b refuses the one shape where
+    // using it would go unnoticed.
+    //
     // R10: a `TJ` number between the target's string and the tail's is in the tail's prefix, so it
     // moves the tail in the original line and must move with the replacement. Omitting it makes
     // `moved_to` an intention rather than the position the ink lands on — the R8b.1 failure in a
@@ -625,6 +665,126 @@ mod tests {
              {} vs {}",
             left.origin.0,
             target.origin.0
+        );
+    }
+
+    /// R8b: a same-baseline run in another tagged unit must not set the line origin, and where it
+    /// lies to the left of the target's own line start the move is refused rather than measured.
+    ///
+    /// `line_origin` is the minimum `origin.0` over the runs `on_baseline` keeps, and
+    /// `on_baseline` filters on `baseline()` alone — `origin.1 + rise`, with no scope term — so
+    /// `two-mcid-one-baseline.pdf`'s `HI` (another `/P` unit, 128 pt further left) makes the
+    /// computed origin too small by exactly that difference. `Td` is relative to the line matrix,
+    /// so the tail would be drawn 128 pt right of where it belongs.
+    ///
+    /// The refusal is the ruling's, not a stronger one: R8b.1 shows `moved_to` reduces to
+    /// `run.origin.0 + new_width` whatever `line_origin` is, so the record agrees with itself
+    /// while the ink is displaced. Correcting the origin would leave that reporting defect in
+    /// place, and a caller comparing the record to the ink would go on being told they agree.
+    #[test]
+    fn a_same_baseline_run_in_another_mcid_does_not_dislocate_the_tail() {
+        let source = fixture("two-mcid-one-baseline.pdf");
+        let document = Document::load(&source).expect("the R8b fixture is committed");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+        let target = runs.iter().find(|run| run.text == "AB").expect("AB");
+        let left = runs.iter().find(|run| run.text == "HI").expect("HI");
+
+        // Preconditions: the shape below cannot fail on a fixture that lost one of its units, so
+        // say which half is missing instead of passing vacuously.
+        assert!(
+            (left.baseline() - target.baseline()).abs() < 1e-3,
+            "the other unit must share the target's baseline: {} vs {}",
+            left.baseline(),
+            target.baseline()
+        );
+        assert!(
+            left.origin.0 < target.origin.0,
+            "the other unit must lie to the left, or a scope-blind line origin is too *large* and \
+             no displacement follows: {} vs {}",
+            left.origin.0,
+            target.origin.0
+        );
+        assert_ne!(
+            left.merge_scope(),
+            target.merge_scope(),
+            "the two units must be in different merge scopes"
+        );
+
+        let refused = reflow_tj_array(&document, 0, page, &runs, &target.id, "ABab", 1000.0)
+            .expect_err("a line whose origin another tagged unit owns cannot be moved");
+        assert_eq!(
+            refused.rule.name(),
+            "R8b-scope-left-of-line",
+            "the out-of-scope run must be refused by R8b; a `Td` computed from it would put the \
+             tail 128.0 pt right of its line"
+        );
+    }
+
+    /// The other half of R8b: a run in another tagged unit does not set this line's extent either,
+    /// so one that lies to the **right** is excluded rather than refused.
+    ///
+    /// Written against the committed fixture *plus* one injected run, not against synthesized
+    /// runs alone, because the extent check sits after the document read: a wholly synthetic pair
+    /// fails at the content read on an empty document and never reaches R4, so it would pass
+    /// whatever `line_right` counted. Measured by mutation — swapping `line_right` back to
+    /// `on_baseline` left the synthetic version green.
+    ///
+    /// The foreign run is placed at x=400, past any limit that lets this line grow, so counting it
+    /// refuses under R4 while excluding it lets the move through. That difference is the only
+    /// observation of the extent half there is; the fixture's own other unit is to the left.
+    #[test]
+    fn a_run_outside_the_scope_does_not_set_the_line_extent() {
+        use crate::editor::textlocate::MarkedContent;
+
+        let source = fixture("two-mcid-one-baseline.pdf");
+        let document = Document::load(&source).expect("the R8b fixture is committed");
+        let page = page_id(&document, 0).expect("page 0");
+        // The fixture's own second unit (`HI`) lies left of this line, which is R8b's *refusal*
+        // case; it is dropped here so the only out-of-scope run is the injected right-hand one.
+        let runs: Vec<RawRun> = locate_runs(&document, page)
+            .expect("runs")
+            .into_iter()
+            .filter(|run| run.text != "HI")
+            .collect();
+        let target = runs.iter().find(|run| run.text == "AB").expect("AB");
+        let tail = runs.iter().find(|run| run.text == "CD").expect("CD");
+        assert_eq!(target.merge_scope(), tail.merge_scope());
+        let line_right = tail.page_origin.0 + tail.advance;
+
+        // A neighbour in another unit, on this baseline, clear of this line's own text.
+        let mut neighbour = synthetic(address(3, vec![1, 0]), 400.0, "XY");
+        neighbour.marked_content = vec![MarkedContent {
+            tag: "P".to_string(),
+            mcid: Some(7),
+            actual_text: None,
+            block: Some((9, 0)),
+        }];
+        assert_ne!(neighbour.merge_scope(), target.merge_scope());
+        assert!(
+            neighbour.page_origin.0 > line_right,
+            "the neighbour must sit right of this line, or it is the R8b refusal case instead"
+        );
+
+        let mut with_neighbour = runs.clone();
+        with_neighbour.push(neighbour);
+        // Room for the growth (26.688) on this line, and none for the neighbour.
+        let limit = line_right + 27.0;
+        let (_, applied) = reflow_tj_array(
+            &document,
+            0,
+            page,
+            &with_neighbour,
+            &target.id,
+            "ABab",
+            limit,
+        )
+        .expect("this line fits its own limit; the neighbour's text is not its extent");
+        assert!(
+            (applied.shift - 26.688).abs() < 0.01,
+            "the tail moved by {:.3} pt; only the growth moves it, so the other unit's text did \
+             not enter this line's arithmetic",
+            applied.shift
         );
     }
 
@@ -936,4 +1096,3 @@ mod tests {
         assert_eq!(refused.rule, ReflowRefusal::R4Wrap);
     }
 }
-

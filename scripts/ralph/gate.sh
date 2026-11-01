@@ -35,9 +35,9 @@ fi
 # Expected counts for each shape. These are pins, not observations: a count that moves must be
 # an explicit decision, because the failure they exist to catch is a test that stopped running
 # rather than a test that started failing.
-PIN_PLAIN_PASSED=511
+PIN_PLAIN_PASSED=513
 PIN_PLAIN_IGNORED=90
-PIN_IGNORED_PASSED=601
+PIN_IGNORED_PASSED=603
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
