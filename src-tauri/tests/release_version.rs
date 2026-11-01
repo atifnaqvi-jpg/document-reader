@@ -459,6 +459,32 @@ fn the_0_8_1_notes_record_why_the_version_is_not_0_7_0() {
     );
 }
 
+/// Renders a markdown blockquote as one searchable line: drops the per-line `>` marker,
+/// joins, and collapses whitespace runs to a single space.
+///
+/// The `>` stripping is the point. Joining raw lines produces `the > deferral point is`,
+/// which makes every phrase that straddles a wrap unfindable -- the guard then fails on a
+/// paragraph that says exactly the right thing, and passes or fails depending on where
+/// somebody's editor happened to break the line. `cac87b2` reflowed this note without
+/// changing a word and turned the test red.
+///
+/// The whitespace collapse keeps the comparison independent of double spaces introduced by
+/// that same reflow, so "after  P2.8" and "after P2.8" cannot disagree.
+fn blockquote_text(lines: &[&str]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        let stripped = line.trim_start().trim_start_matches('>').trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(stripped);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The programme boundary is P2.8, not P2.7.6: the deferred full-parity inventory is
 /// produced **after reflow ships**, and the plan must say so where the next reader looks —
 /// in the boundary note and in the sequencing note after the phase table.
@@ -476,13 +502,12 @@ fn the_0_8_1_notes_record_why_the_version_is_not_0_7_0() {
 fn the_plan_defers_the_full_parity_inventory_to_after_p2_8() {
     let plan = read(&repo_root().join("docs/P2.7-TEXT-EDITING-PARITY-PLAN.md"));
 
-    let boundary = plan
+    let boundary_lines: Vec<&str> = plan
         .lines()
         .skip_while(|line| !line.contains("**Programme boundary (B-1"))
         .take_while(|line| line.trim_start().starts_with('>'))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let boundary = boundary.to_lowercase();
+        .collect();
+    let boundary = blockquote_text(&boundary_lines).to_lowercase();
     assert!(
         !boundary.is_empty(),
         "the plan has no '**Programme boundary (B-1' note; the deferral point is unstated"
@@ -503,7 +528,19 @@ fn the_plan_defers_the_full_parity_inventory_to_after_p2_8() {
         "the deferral point must read 'after P2.8 ... not after P2.7.6'; sentence: {deferral:?}"
     );
 
-    for needle in ["0.9.0", "1.0.0", "must not be produced"] {
+    // Re-derived 2026-11-01. The previous needles ("0.9.0", "must not be produced") described
+    // the pre-amendment ruling, in which producing the inventory early was forbidden. The
+    // 2026-11-01 ruling sanctions early production and points at the two documents that now
+    // hold it, so those needles asserted prose the note is required *not* to say any more.
+    // Nothing here was mutation-tested against an amended ruling, which is why the coupling
+    // survived: the guard was written against one draft of the text and never re-checked
+    // when the text changed.
+    for needle in [
+        "docs/p3-gap-analysis.md",
+        "docs/p3-plan.md",
+        "p2.8",
+        "1.0.0",
+    ] {
         assert!(
             boundary.contains(needle),
             "the programme-boundary note never says {needle:?}: {boundary}"
