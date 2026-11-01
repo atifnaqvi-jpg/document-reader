@@ -26,8 +26,8 @@ previous iterations**; everything you need is in the files named below. Read the
    which are the only tests that compare the renderer to the ink:
 
    ```
-   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 509 passed, 90 ignored
-   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 599 passed, 0 ignored
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 510 passed, 90 ignored
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 600 passed, 0 ignored
    cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo clippy --all-targets
    npx tsc --noEmit
    npx vitest run

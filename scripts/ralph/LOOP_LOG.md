@@ -645,3 +645,47 @@ when `ink_y` is reverted to `run.origin.1`.
   - **R-1b is now the next startable task** and is *not* done: `reflow_tj_array` still accepts
     every `TJ` array whose target has a later fragment, so a run positioned by a preceding `Tj`
     or a mid-array `Td` is measured rather than refused. The design doc now says so in R10.3.
+
+## Iteration 16 — 2026-11-01 — R-1b (refuse a prefix the TJ walk cannot attribute) — green
+
+- Task: R-1b — refuse a run whose baseline prefix is set by an operator outside its own `TJ`
+  array, rather than measure a prefix the array walk never saw.
+- Test: `a_kern_that_spans_a_tj_or_mid_array_td_refuses` (red before: **yes** — with the check
+  removed, both shapes fell through the R6 arm to `not-one-array`, i.e. the unattributed prefix
+  was measured; the test reported `left: "not-one-array", right: "R10b-unattributed-kern"`).
+- Files: `src-tauri/src/editor/reflow.rs`, `docs/P2.8-reflow-DESIGN.md` (§R10.4 new, R10.3 scope
+  corrected), `.github/workflows/ci.yml`, `src-tauri/tests/ci_workflow.rs`, `scripts/ralph/loop.sh`,
+  `scripts/ralph/PROMPT.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`, `scripts/ralph/LOOP_LOG.md`.
+- Gate: cargo test **510 passed / 90 ignored**, AND `--include-ignored` **600 passed / 0 ignored**,
+  clippy clean (0 warnings), tsc clean, vitest **69 passed**. Both pins moved by exactly one and
+  were re-measured rather than incremented: the new test is *not* `#[ignore]`d (it builds runs and
+  needs no PDFium), so plain `passed` 509→510 and the include-ignored total 599→600 while the
+  ignored count stays 90. The `-lt 509` floor in `ci.yml`, its mirror in `tests/ci_workflow.rs` and
+  the two ralph pins were updated in the same commit.
+- Commit: see `git log` (the log is in the commit it describes, so recording its own sha here
+  would amend it).
+- Learned:
+  - **The ruling's two shapes are one property of the run set.** The plan and R10 both name "a
+    preceding `Tj`" and "a mid-array `Td`". No operator can occur inside a `TJ` array (elements are
+    strings and numbers only — the same fact that removed R8's refusal in §2.3.2), so the second
+    shape's only constructible form is *a second array on the same baseline, started by its own
+    `Td`*. Both reduce to "every same-baseline run must share the target's `op_index`", and that is
+    the check — one arm, not two.
+  - **The check belongs in the run set, not in the array walk.** `TextMatrixWalk::step` is a
+    deliberate no-op for a show operator, so after `Tj (WXYZ)` the next array's fragments are
+    reported at the *line matrix* origin while the ink starts an advance further right. A check
+    placed inside `tj_fragment_origins` would be validating a value that is already wrong.
+  - **Refuse rather than correct**, for the same reason as R8b.1: `moved_to` reduces to
+    `run.origin.0 + new_width` whatever `line_origin` is, so a wrong `line_origin` produces a
+    record that agrees with itself and disagrees only with the ink.
+  - **`scripts/mutate.sh --test NAME` is not a test filter.** It exits 3 (`MEASUREMENT_ERROR`, no
+    summary line) because `--test` selects an integration *target*, and this test is in the lib.
+    The harness behaved correctly — it refused to read an absent summary as an absent failure —
+    and the right invocation is `--lib NAME`. Worth remembering: two of the ralph pins live in
+    `scripts/` and `.github/`, so a mutation of `ci.yml` is `MUTATE_RUNTIME_READ` territory only
+    when the guard reads it at run time; `tests/ci_workflow.rs` reads it with `fs::read_to_string`
+    inside the test body, which is the runtime-read class, and the rebuild check still applies
+    because the *guard binary* is Rust. Both directions were run: `-lt 510`→`511` in `ci.yml`
+    failed the guard; restoring `510` passed it.
+  - Next startable: **R-2a** (the R8b fixture `two-mcid-one-baseline.pdf`), then R-2b, R-2c, R-3.
+    R-4 (the A10 move) is where T-8's `Tz` defect starts to matter, and T-8 remains unstarted.

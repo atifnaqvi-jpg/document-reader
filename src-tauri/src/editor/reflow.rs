@@ -35,6 +35,9 @@ pub enum ReflowRefusal {
     R5StraddlesLevels,
     /// R6: the drawing matrix is non-uniform, so "the rest of the line" is not horizontal.
     R6NonUniformTransform,
+    /// R10b: the text before this run is positioned by an operator outside the run's `TJ` array,
+    /// so the array's own walk cannot say where the rest of the line starts.
+    R10bUnattributedPrefix,
     /// The run is not a fragment of a multi-fragment `TJ` array with something after it. Not a
     /// numbered ruling: it is the shape with no trailing run to move.
     NotOneArray,
@@ -48,6 +51,7 @@ impl ReflowRefusal {
             Self::R4Wrap => "R4-wrap",
             Self::R5StraddlesLevels => "R5-straddles-levels",
             Self::R6NonUniformTransform => "R6-non-uniform-transform",
+            Self::R10bUnattributedPrefix => "R10b-unattributed-kern",
             Self::NotOneArray => "not-one-array",
         }
     }
@@ -70,6 +74,10 @@ impl ReflowRefusal {
             Self::R6NonUniformTransform => {
                 "this text is drawn through a non-uniform transform, so the rest of its line is \
                  not horizontal"
+            }
+            Self::R10bUnattributedPrefix => {
+                "another run on this line is positioned outside this TJ array, so reflow cannot \
+                 tell where the rest of the line starts"
             }
             Self::NotOneArray => {
                 "this text has no following run in the same TJ array, which is the only shape \
@@ -226,6 +234,27 @@ pub fn reflow_tj_array(
     if !run.frame.is_orthogonal() {
         return Err(ReflowRefused::new(
             ReflowRefusal::R6NonUniformTransform,
+            target,
+        ));
+    }
+
+    // R10b: the measured prefix belongs to **one** `TJ` array. `tj_fragment_origins` advances the
+    // pen only between the elements of an array, and `TextMatrixWalk::step` is a deliberate no-op
+    // for a show operator, so any text on this baseline that came from a different operation was
+    // positioned by something the array walk never saw — a preceding `Tj`, or a `Td`/`TD` that
+    // began this array. Including that text's displacement in the prefix would make `moved_to`
+    // an intention rather than the place the ink lands (design R10, R8b.1's failure class).
+    //
+    // Refused rather than corrected for the same reason R8b refuses: `moved_to` reduces to
+    // `run.origin.0 + new_width` whatever `line_origin` is, so the record cannot show the
+    // mistake. A `Td` *inside* an array is not a separate case — an array's elements are strings
+    // and numbers only, so it is not expressible.
+    if on_baseline
+        .iter()
+        .any(|candidate| candidate.id.op_index != target.op_index)
+    {
+        return Err(ReflowRefused::new(
+            ReflowRefusal::R10bUnattributedPrefix,
             target,
         ));
     }
@@ -519,6 +548,89 @@ mod tests {
         );
         // And the move it *did* make is the one R2.1 predicts, so the test is not vacuous.
         assert!(applied.shift > 0.0);
+    }
+
+    /// R10b: the measured prefix belongs to **one** `TJ` array. A run whose position also
+    /// depends on an operator outside that array — a show operator before it, or a `Td` that
+    /// started a second array on the same baseline — is refused, because the array's own walk
+    /// cannot see the displacement and the reported tail origin would be an intention.
+    ///
+    /// Both shapes are built as run pairs rather than found as files: the reader advances the
+    /// pen only *inside* an array (`TextMatrixWalk::step` is a no-op for `Tj`), so a preceding
+    /// show leaves the array's reported origin equal to its line matrix origin while the ink
+    /// starts an advance further right. No committed fixture has that shape.
+    #[test]
+    fn a_kern_that_spans_a_tj_or_mid_array_td_refuses() {
+        let document = Document::new();
+        let page = (1, 0);
+
+        // Shape 1 — a `Tj` before the array. The reader reports both runs at x=72 because a
+        // show does not move `tm`, so the target's prefix looks like zero when the ink says
+        // otherwise.
+        let before = address(3, vec![0]);
+        let mut preceding = synthetic(before, 72.0, "WXYZ");
+        preceding.operator = "Tj".to_string();
+        let target = address(4, vec![0, 0]);
+        let mut arrayed = synthetic(target.clone(), 72.0, "AB");
+        arrayed.operator = "TJ".to_string();
+        let refused = reflow_tj_array(
+            &document,
+            0,
+            page,
+            &[preceding.clone(), arrayed.clone()],
+            &target,
+            "ABab",
+            1000.0,
+        )
+        .expect_err("a prefix the array walk cannot see must be refused, not measured");
+        assert_eq!(
+            refused.rule.name(),
+            "R10b-unattributed-kern",
+            "shape 1 (a `Tj` before the array) refused as {:?}",
+            refused.rule.name()
+        );
+
+        // Shape 2 — a `Td` that began a second array on the same baseline, further left. A `Td`
+        // cannot occur inside an array (its elements are strings and numbers only), so this is
+        // the shape the ruling describes.
+        let earlier = synthetic(address(3, vec![0, 0]), 40.0, "AB");
+        let later = address(6, vec![0, 0]);
+        let mut positioned = synthetic(later.clone(), 120.0, "CD");
+        positioned.operator = "TJ".to_string();
+        let refused = reflow_tj_array(
+            &document,
+            0,
+            page,
+            &[earlier, positioned],
+            &later,
+            "CDcd",
+            1000.0,
+        )
+        .expect_err(
+            "a run positioned by its own `Td` leaves the earlier line's prefix unattributed",
+        );
+        assert_eq!(
+            refused.rule.name(),
+            "R10b-unattributed-kern",
+            "shape 2 (a second array started by `Td`) refused as {:?}",
+            refused.rule.name()
+        );
+
+        // Non-vacuity control: one clean array reaches the *document* read and fails there. If
+        // R10b had fired on it, this would be the R10b refusal instead — so the rule is not a
+        // refusal of every run pair.
+        let clean = address(3, vec![0, 0]);
+        let control = reflow_tj_array(
+            &document,
+            0,
+            page,
+            &[synthetic(clean.clone(), 72.0, "AB")],
+            &clean,
+            "ABab",
+            1000.0,
+        )
+        .expect_err("an empty document has no page content to read");
+        assert_eq!(control.rule.name(), "not-one-array");
     }
 
     /// The other half of R8: two fragments inside one `TJ` still cannot carry different tags,

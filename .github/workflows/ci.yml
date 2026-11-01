@@ -123,13 +123,15 @@ jobs:
           # one. Raising this to the measured value rather than leaving headroom is what
           # makes a test that stops being collected fail here instead of passing quietly.
           #
-          # Measured at 509, not 489: this file's floor had drifted below the tree, and P2.8
+          # Measured at 510, not 489: this file's floor had drifted below the tree, and P2.8
           # case (a) added six non-ignored tests (the `Td`-offset arithmetic, the R1/R4/R5/R6
           # refusals, and the `TJ`-array tag invariant that stands in for R8). The floor was
           # re-measured from the tree rather than incremented, per the same rule that sets the
-          # ignored count.
-          if [ "$passed" -lt 509 ]; then
-            echo "::error::only $passed tests ran; 509 is the non-PDFium baseline. A test stopped being collected."
+          # ignored count. R-1b's `R10b` refusal (509 -> 510) is the latest of those, and it is
+          # NOT `#[ignore]`d: it builds runs and needs no PDFium, so it moves this floor and
+          # leaves the ignored count at 90.
+          if [ "$passed" -lt 510 ]; then
+            echo "::error::only $passed tests ran; 510 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

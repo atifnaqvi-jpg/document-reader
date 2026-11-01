@@ -434,7 +434,7 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       in the design doc, because the two quantities are now deliberately unequal and a reader who
       "simplifies" them back into one will be wrong by the kern.
 
-- [ ] **R-1b Refuse a kern the walk cannot attribute.** Same ruling's other half: a run whose
+- [x] **R-1b Refuse a kern the walk cannot attribute.** Same ruling's other half: a run whose
       position also depends on a preceding `Tj`, or on a `Td`/`TD` issued after the array began,
       is **refused** rather than measured. **Depends on R-1a** for the arithmetic it declines to
       compute without — a refusal that guards arithmetic which does not exist yet guards nothing.
@@ -443,7 +443,23 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       refused with the R10b arm rather than measured. **Synthetic run pair, no new fixture** — the
       states are unreachable from the committed fixtures by construction, which is exactly why
       they must be built as runs rather than found as files.
-      **Nothing exists — this is new code.** No refusal arm, no enum variant, no test.
+      **Done — one iteration, commit `feat(p2.8): refuse a prefix the TJ walk cannot attribute`.**
+      RED confirmed before the change: with the check removed both shapes fell through to
+      `not-one-array`, i.e. nothing refused the unattributed prefix. Mutation-verified afterwards
+      by gating the check behind `false &&`: `scripts/mutate.sh` reported **CAUGHT** (exit 0), and
+      restoring it returned the suite to green.
+      **Both halves of the ruling are one property of the run set, not two.** No operator can
+      appear inside a `TJ` array (its elements are strings and numbers only), so a "mid-array
+      `Td`" is not expressible; its reachable form is a **second array on the same baseline,
+      started by its own `Td`**. And a preceding `Tj` leaves no trace in the reported origin,
+      because `TextMatrixWalk::step` is a no-op for a show operator. Both reduce to *every
+      same-baseline run must come from the target's own `op_index`*, which is the check.
+      Recorded as **R10.4** in the design doc, with the ruling's own wording left unchanged
+      because it describes the property and not the constructible shape.
+      **A `--test NAME` argument is not a filter.** `scripts/mutate.sh --test
+      a_kern_that_spans…` exits 3 (`MEASUREMENT_ERROR`, no summary line) because `--test` names
+      an integration target and the test is in the lib. The harness did its job — it refused to
+      read "no summary line" as "no failure" — and the correct invocation is `--lib NAME`.
 
 - [ ] **R-2a The R8b fixture.** `two-mcid-one-baseline.pdf`: page content with two `BDC`/`EMC`
       units on one baseline, the edit target in the second, a run from the first lying further
