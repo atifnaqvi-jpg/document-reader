@@ -440,6 +440,61 @@ pub fn too_wide_page() -> Document {
     page_with_run("HI", winansi_helvetica())
 }
 
+/// P2.8 §6.2: the fixture row A10 needs, and why `two_run_line()` cannot be it.
+///
+/// `two_run_line()` is one line of two `Tj` with no seam and no neighbour, so the row's "and
+/// nothing else" half has nothing to observe and R3's refusal has nothing to refuse. This
+/// builder adds the missing topology:
+///
+/// 1. line 1 is **one** `TJ` array behind a **single** `Td`, so moving its tail must *insert* a
+///    positioning operator rather than edit an existing one;
+/// 2. a second line below, placed by its own `Tm` so it cannot inherit line 1's pen — it must sit
+///    still whatever reflow does to line 1;
+/// 3. a `-120` `TJ` seam, the spacing term `two_run_line` never carries;
+/// 4. `near_edge` moves line 1 right so it ends 9.064 pt from the 612 pt box, which is what makes
+///    R3's `fits-width` refusal reachable.
+///
+/// At `Tf 24` in Helvetica, `ALPHA ` is 3.557 em (3557 thousandths), `BETA` is 2.612 em (2612)
+/// and the `-120` kern adds 0.120 em, so line 1 is 6.289 em = **150.936 pt** long.
+pub fn reflow_line(near_edge: bool) -> Document {
+    // 612 - 150.936 = 461.064 for an exact fit; 452 leaves 9.064 pt of room.
+    let x: i64 = if near_edge { 452 } else { 72 };
+    document_with_pages(
+        winansi_helvetica(),
+        vec![vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 24.into()]),
+            Operation::new("Td", vec![x.into(), 700.into()]),
+            Operation::new(
+                "TJ",
+                vec![Object::Array(vec![
+                    Object::string_literal("ALPHA "),
+                    Object::Integer(-120),
+                    Object::string_literal("BETA"),
+                ])],
+            ),
+            // Line 2 is placed by its own `Tm`, so it inherits nothing from line 1's pen and
+            // must sit still whatever a reflow does above it.
+            Operation::new(
+                "Tm",
+                vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    72.into(),
+                    640.into(),
+                ],
+            ),
+            Operation::new(
+                "TJ",
+                vec![Object::Array(vec![Object::string_literal("WXYZ")])],
+            ),
+            Operation::new("ET", vec![]),
+        ]],
+    )
+}
+
 /// F2: a page whose `/Contents` is an array of two streams, each with its own run.
 pub fn multi_stream() -> Document {
     let mut document = blank_page();
@@ -3229,4 +3284,53 @@ pub fn type0_page_with_subset(
     document.trailer.set("Root", catalog_id);
     document.renumber_objects();
     document
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P2.8 §6.2: the committed A10 fixtures are the builder's own output.
+    ///
+    /// Two failure modes, and a `contains` check sees neither: a fixture that was never
+    /// regenerated after a builder change (the file describes an older document, while every
+    /// test that reads its *shape* still passes), and a builder that is not deterministic (a
+    /// committed blob nobody can reproduce). Both are why the comparison is on bytes, here,
+    /// where `testpdf` is reachable — the integration guard asserts the shape, not the bytes.
+    #[test]
+    fn the_committed_reflow_fixtures_are_the_builders_own_bytes() {
+        for (name, near_edge) in [
+            ("reflow-line.pdf", false),
+            ("reflow-line-near-edge.pdf", true),
+        ] {
+            let first = bytes(&reflow_line(near_edge));
+            let second = bytes(&reflow_line(near_edge));
+            assert_eq!(
+                first, second,
+                "{name}: two builds differ, so the committed blob cannot be reproduced"
+            );
+
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join(name);
+            let committed = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("{} is not committed: {e}", path.display()));
+            assert_eq!(
+                committed, first,
+                "{name} is stale: it was not regenerated after its builder changed, so the \
+                 file a reviewer opens is not the document the tests describe"
+            );
+        }
+    }
+
+    /// The two variants must differ, or "near edge" is a name rather than a shape.
+    #[test]
+    fn the_near_edge_variant_is_not_the_ordinary_one() {
+        assert_ne!(
+            bytes(&reflow_line(false)),
+            bytes(&reflow_line(true)),
+            "the near-edge fixture is a byte-for-byte copy of the ordinary one"
+        );
+    }
 }

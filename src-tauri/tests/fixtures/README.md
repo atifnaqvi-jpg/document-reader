@@ -25,6 +25,8 @@ tests read.
 | `too-wide.pdf` | (d) width | One very short run (`HI`), so a plausible replacement overflows the advance width → `TEXT_RUN_NOT_EDITABLE`, gate `fits-width`, quoting both measured widths. The gate is evaluated at edit time from PDFium-measured widths; the fixture only has to provide a genuinely narrow run. |
 | `encrypted-aes.pdf` | T7 / T8 | AES-128, user password `secret`. Opens read-only; every edit refuses `ENCRYPTED_READ_ONLY`; "Decrypt a copy" produces `{stem} (unprotected).pdf`. |
 | `multi-stream-page.pdf` | F2 collapse | `/Contents` is an array of two streams. lopdf concatenates them, so runs from both are located and the edited page collapses to one stream (legal; D2 copy semantics leave the original's layout alone). |
+| `reflow-line.pdf` | P2.8 §6.2, row A10 | Line 1 is one `TJ` array — `ALPHA `, a `-120` kern, `BETA` — behind a **single** `Td`, so moving its tail must *insert* a positioning operator; line 2 (`WXYZ`) is placed by its own `Tm` and must not move. Ends 389 pt clear of the 612 pt box. |
+| `reflow-line-near-edge.pdf` | P2.8 §6.2, R3 refusal | The same two lines starting at x=452, so line 1 ends **9.064 pt** from the box — less than one replacement's worth of room, which is what `fits-width` needs in order to refuse. |
 | `bomb.pdf` | (e) / F3 cap | A 16 MiB stream that compresses to a few KB, beyond the 8 MiB `CONTENT_LIMIT` → `CONTENT_TOO_LARGE`. |
 
 ## Honest limitations

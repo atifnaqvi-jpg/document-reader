@@ -146,12 +146,19 @@ jobs:
           # `git` and `std::fs` on the working tree, so neither needs PDFium and the ignored
           # count stays 90.
           #
+          #
+          # Measured at 526, not 520: R-3 added six guards (520 -> 526) -- four in
+          # `tests/reflow_fixtures.rs` (the §6.2 table parser and its crafted defect shapes, the
+          # committed-file check, the A10 topology, and the near-edge room) and two in
+          # `testpdf`'s own test module (the committed bytes equal the builder's, and the two
+          # variants differ). All six parse a `.pdf` or a `.md` with `std::fs`, so none needs
+          # PDFium and the ignored count stays 90.
           # Measured at 520, not 518: R-G1 added two guards (518 -> 520) -- the gate/CI parity
           # comparison and the crafted sample that proves its parser can see a defect. Both read
           # `.github/workflows/ci.yml` and `scripts/ralph/gate.sh` with `std::fs`, so neither
           # needs PDFium and the ignored count stays 90.
-          if [ "$passed" -lt 520 ]; then
-            echo "::error::only $passed tests ran; 520 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 526 ]; then
+            echo "::error::only $passed tests ran; 526 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

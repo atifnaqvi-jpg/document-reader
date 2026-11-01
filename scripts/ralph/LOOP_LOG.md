@@ -1093,3 +1093,63 @@ open defect: the Windows suite crashes intermittently*.
   - Next startable: **R-3** (the A10 fixture), then **R-4**. **T-8** is still worth landing before
     R-4 asserts positions: a reflow that moves a kern-positioned tail inherits its 3 pt error at
     `Tz 50`.
+
+## Iteration 23 — 2026-11-01 — R-3 (the A10 fixture) — green
+- Task: Commit the two fixtures row A10 needs, plus the guards that keep them honest.
+- Test: `every_fixture_the_reflow_design_names_is_committed` (red before: yes — it panicked with
+  `§6.2 names fixtures that are not committed: ["reflow-line.pdf", "reflow-line-near-edge.pdf"]`),
+  `the_reflow_fixture_carries_the_a10_topology` (red: `IO error` loading the absent file),
+  `the_near_edge_variant_has_almost_no_room_left` (red, same reason),
+  `the_fixture_table_parser_sees_its_own_source_and_the_defect_shape`,
+  `the_committed_reflow_fixtures_are_the_builders_own_bytes` (red: `reflow-line.pdf is not
+  committed: No such file or directory` after the two files were moved aside),
+  `the_near_edge_variant_is_not_the_ordinary_one`.
+- Files: `src-tauri/src/editor/testpdf.rs` (`reflow_line(near_edge)`, plus a `#[cfg(test)]` module),
+  `src-tauri/examples/make_p24_fixtures.rs`, `src-tauri/tests/reflow_fixtures.rs` (new),
+  `src-tauri/tests/fixtures/reflow-line.pdf`, `src-tauri/tests/fixtures/reflow-line-near-edge.pdf`,
+  `src-tauri/tests/fixtures/README.md`, `docs/P2.8-reflow-DESIGN.md` (§6.2 table plus three status
+  rows), `.github/workflows/ci.yml`, `src-tauri/tests/ci_workflow.rs`, `scripts/ralph/gate.sh`,
+  `scripts/ralph/PROMPT.md`.
+- Gate: cargo test 526 passed / 90 ignored, AND --include-ignored 616 passed / 0 ignored,
+  clippy clean, tsc clean, vitest 69 passed (both shapes, both counts — one count is not a gate).
+  The old pins were 520/610; the +6 is **measured**, not incremented, and all four carriers moved
+  in the same commit.
+- Commit: (this commit)
+- Learned:
+  - **The fixture topology, measured.** Line 1 at `Tf 24` Helvetica is `ALPHA ` 3557 + `BETA`
+    2612 + kern −120 = 6289 thousandths = **150.936 pt**. At x=72 it ends at 222.936, leaving
+    389.064 pt of room; at x=452 it ends at 602.936, leaving **9.064 pt**. The 452 was chosen as
+    the largest integer x that leaves a positive remainder under 10 pt — 461.064 is an exact fit,
+    so 462 would have overflowed and made the file describe an already-broken document.
+  - **Why a second file, not a second page.** R-5's assertion is "the stream is byte-unchanged
+    after the refusal". With two pages in one file that sentence means "page 0's stream", which a
+    partial write elsewhere would satisfy. A separate file makes it "the file on disk", which is
+    the property the row actually names.
+  - **`every_fixture_the_design_doc_names_is_committed` was not reused.** The existing guard of
+    that name in `xobject_fixtures.rs` parses `P2.7.2`'s table; §6.2 is a different section of a
+    different document. The name is shared deliberately (the plan named it) but the parser is a
+    second one, and it got its own craft-sample test because a parser that returns `[]` would
+    make the committed-file check pass over nothing — the "absence of evidence" shape.
+  - **Three mutations, the guarded file each time, each a pair.**
+    (1) `Tm` → `Td` for line 2 in the builder, then regenerated: `the_reflow_fixture_carries_the_a10_topology`
+    FAILED with `["BT","Tf","Td","TJ","Td","TJ","ET"]` and `left: 2, right: 1`. `cmp -l` against
+    the pre-mutation blob was non-empty (618 bytes vs 626, differing at offset 211), so the
+    mutant landed. Restored: `cmp` identical.
+    (2) near-edge x 452 → 400, then regenerated: `the_near_edge_variant_has_almost_no_room_left`
+    FAILED with `61.063965 pt left`. `cmp -l` non-empty (offsets 236/237). Restored: identical.
+    (3) dropped the `-120` seam, then regenerated: `the_reflow_fixture_carries_the_a10_topology`
+    FAILED at the seam assertion, `found [(ALPHA ), (BETA)]`. Restored: identical.
+    (4) the doc guard: changed the §6.2 table to name `reflow-line-edge-variant.pdf`;
+    `every_fixture_the_reflow_design_names_is_committed` FAILED naming that file. Restored green.
+    (5) the pin: `ci.yml` `-lt 526` → `-lt 527`;
+    `the_linux_job_pins_the_measured_passed_floor` FAILED. Restored green.
+  - **The regenerated tree is not reproducible for one file.** `make-p24-fixtures.sh` rewrites
+    `encrypted-aes.pdf` with a fresh salt/IV every run; `git checkout --` it after every
+    regeneration, never commit it. The two new fixtures *are* byte-stable, which is exactly what
+    `the_committed_reflow_fixtures_are_the_builders_own_bytes` now pins.
+  - **Untracked fixtures fail a *different* guard first.** `tests/fixture_tree.rs` asserts nothing
+    under `tests/fixtures/` is untracked, so the new files must be `git add`ed before the full
+    suite can be green — the plain `cargo test` count is meaningless until they are staged.
+  - Next startable: **R-4** (row A10's guard — the move itself), then **R-5** (the near-edge
+    refusal). Both now have their fixture. T-8 (`Tz`-scaled kern) is still worth landing before
+    R-4 asserts positions.

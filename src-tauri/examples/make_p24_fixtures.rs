@@ -36,6 +36,17 @@ fn main() {
             testpdf::bytes(&testpdf::roundtrip_fail_page()),
         ),
         ("too-wide.pdf", testpdf::bytes(&testpdf::too_wide_page())),
+        // P2.8 §6.2: row A10's fixtures. A committed file with one `Td` and a `TJ` seam over a
+        // second, unedited line -- the topology `two-run-line.pdf` does not have -- and a
+        // near-edge variant so R3's `fits-width` refusal has something to refuse.
+        (
+            "reflow-line.pdf",
+            testpdf::bytes(&testpdf::reflow_line(false)),
+        ),
+        (
+            "reflow-line-near-edge.pdf",
+            testpdf::bytes(&testpdf::reflow_line(true)),
+        ),
         (
             "encrypted-aes.pdf",
             testpdf::bytes(&testpdf::encrypted_aes()),

@@ -668,7 +668,20 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       exempted, so the two historical drifts cannot be re-blessed as decisions. The `executed`
       floor is the measured value (2), not headroom.
 
-- [ ] **R-3 The A10 fixture.** `two_run_line()` cannot carry A10 (§6.2: no second line, no `TJ`
+- [x] **R-3 The A10 fixture.** Landed 2026-11-01 (`reflow_line` in `testpdf.rs`).
+      `reflow-line.pdf` and `reflow-line-near-edge.pdf`, guarded by
+      `every_fixture_the_reflow_design_names_is_committed`, `the_reflow_fixture_carries_the_a10_topology`
+      and `the_near_edge_variant_has_almost_no_room_left` in `tests/reflow_fixtures.rs`, plus
+      `the_committed_reflow_fixtures_are_the_builders_own_bytes` for byte stability.
+      Counts moved 520 -> 526 and 610 -> 616 (**measured, not incremented**) across all four
+      pin carriers. Two departures from the task text, both deliberate: (a) the fixture table
+      lives in its own `### 6.2` section rather than reusing the XObject doc's guard, because
+      that guard parses a different document and would have needed a second path anyway; (b)
+      the near-edge variant is a **second file**, not a second page, so R-5 can assert "the
+      stream is byte-unchanged" of the whole file.
+      Original text follows.
+
+      `two_run_line()` cannot carry A10 `two_run_line()` cannot carry A10 (§6.2: no second line, no `TJ`
       seam, nothing near the content box). Add a builder beside `too_wide_page()` in
       `testpdf.rs`, wired into `make_p24_fixtures.rs` with one line.
       Acceptance test first: `every_fixture_the_design_doc_names_is_committed` — extend the §6.2
