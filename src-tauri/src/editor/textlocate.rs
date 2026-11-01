@@ -1011,10 +1011,15 @@ fn tj_fragment_origins(
                         .unwrap_or(0.0);
                     pen_x += width;
                 }
-                // A kerning number is in thousandths of an em, subtracted from the pen.
+                // A kerning number is in thousandths of an em, subtracted from the pen, and
+                // then scaled by `Tz/100` along with every other advance on the line
+                // (ISO 32000-1 9.4.3 for the array adjustment, 9.4.4 for the text-state
+                // scaling). Omitting the factor is arithmetically invisible at `Tz 100` and
+                // 3 pt wrong at `Tz 50` — see `spaced_width`, which applies it to the other
+                // two terms (T-8).
                 other => {
                     if let Ok(number) = other.as_float() {
-                        pen_x -= number / 1000.0 * state.size;
+                        pen_x -= number / 1000.0 * state.size * state.horizontal_scale / 100.0;
                     }
                 }
             }
@@ -4420,6 +4425,123 @@ mod tests {
     #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
     fn a_kerned_lines_glyphs_are_where_iso_9_4_3_puts_them_at_tz_50() {
         assert_line_one_origins("kerned-line-tz.pdf", KERNED_LINE_TZ as f32);
+    }
+
+    /// T-8: the reader's own pen against the ink, at a scaling that is not 100.
+    ///
+    /// R10.2 measured that deleting the walk's kern term outright leaves every existing
+    /// kerned-line test green: they compare hand-computed §9.4.3 arithmetic against PDFium's
+    /// grid and never ask `tj_fragment_origins`. This is the missing comparison, and it is the
+    /// only place the walk's `Tz` factor can fail — at `Tz 100` the factor is arithmetically
+    /// invisible (`x / 100 * 100 == x`), which is why the suite was green with it missing.
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn the_reader_puts_a_kerned_tail_where_pdfium_drew_it_at_tz_50() {
+        let path = kerned_fixture_path("kerned-line-tz.pdf");
+        let document = Document::load(&path).expect("fixture loads");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+        let cd = runs.iter().find(|run| run.text == "CD").unwrap_or_else(|| {
+            panic!(
+                "no `CD` run: {:?}",
+                runs.iter().map(|run| &run.text).collect::<Vec<_>>()
+            )
+        });
+
+        let glyphs = glyph_origins(&path, 0);
+        let c = glyphs
+            .iter()
+            .find(|glyph| glyph.char == 'C')
+            .unwrap_or_else(|| panic!("no `C` in the grid: {glyphs:?}"));
+
+        let fragments = kerned_line_fragments();
+        let scaled = expected_fragment_origins(
+            FIXTURE_TD_X,
+            &fragments,
+            FIXTURE_FONT_SIZE,
+            KERNED_LINE_TZ as f32,
+        )[1];
+        let unscaled =
+            expected_fragment_origins(FIXTURE_TD_X, &fragments, FIXTURE_FONT_SIZE, 100.0)[1];
+
+        // Precondition, in R10.2's shape: if the scaling moved `CD` by less than the tolerance,
+        // a reader that omitted the factor would pass here exactly as it passes everywhere else.
+        assert!(
+            (scaled - unscaled).abs() > 0.05,
+            "`Tz {KERNED_LINE_TZ}` moves `CD` only {:.3} pt from its un-scaled position, inside \
+             the tolerance — this fixture could not tell the two readings apart",
+            scaled - unscaled
+        );
+        assert!(
+            (c.x - scaled).abs() < 0.05,
+            "PDFium drew `C` at x={:.3}; §9.4.3 at `Tz {KERNED_LINE_TZ}` says {scaled:.3}",
+            c.x
+        );
+
+        assert!(
+            (cd.page_origin.0 - c.x).abs() < 0.05,
+            "the reader puts `CD` at x={:.3} (text space {:.3}), PDFium drew it at {:.3} — off \
+             by {:.3} pt, {}x the 0.05 pt tolerance",
+            cd.page_origin.0,
+            cd.origin.0,
+            c.x,
+            cd.page_origin.0 - c.x,
+            (cd.page_origin.0 - c.x).abs() / 0.05
+        );
+    }
+
+    /// T-8 at unit level: the walk's kern term carries `Tz`.
+    ///
+    /// The PDFium sibling above is the acceptance test the plan names, but it is `#[ignore]`d and
+    /// therefore absent from the Linux job — and this is a defect in the *reader*, which every
+    /// consumer of [`tj_fragment_origins`] inherits, not in the reflow. So the same property is
+    /// asserted here against a hand-built array and text state, where it is cheap and always
+    /// runs.
+    ///
+    /// The numbers are the fixture's own: `AB` at 24 pt with a `-250` kern, at `Tz 50`. The
+    /// factor is falsifiable only because the scaling is not 100 — at `Tz 100` both readings
+    /// return the same number, which is why the defect survived until now.
+    #[test]
+    fn the_kern_term_carries_the_horizontal_scale() {
+        let mut state = TextMatrixWalk::new();
+        for operation in [
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), FIXTURE_FONT_SIZE.into()]),
+            Operation::new("Tz", vec![KERNED_LINE_TZ.into()]),
+            Operation::new("Td", vec![FIXTURE_TD_X.into(), 700.into()]),
+        ] {
+            state.step(&operation);
+        }
+        let array = Operation::new(
+            "TJ",
+            vec![Object::Array(vec![
+                Object::string_literal("AB"),
+                Object::Integer(KERNED_LINE_KERN),
+                Object::string_literal("CD"),
+            ])],
+        );
+        let metrics = crate::editor::substitute::FontMetrics::resolve_with(
+            &Document::new(),
+            &Dictionary::new(),
+            Some("Helvetica"),
+        );
+        let decode = |bytes: &[u8]| Some(String::from_utf8_lossy(bytes).into_owned());
+
+        let origins = tj_fragment_origins(&array, &state, &metrics, &decode);
+        assert_eq!(origins.len(), 2, "one origin per string in the array");
+
+        // 72 + (667 + 667) x 24/1000 x 0.5, then the kern *subtracted* — so a negative number
+        // widens the gap by 250/1000 x 24 x 0.5 = 3.000, giving 91.008.
+        let scale = KERNED_LINE_TZ as f32 / 100.0;
+        let expected = FIXTURE_TD_X + (ADVANCE_A + ADVANCE_B) * FIXTURE_FONT_SIZE / 1000.0 * scale
+            - (KERNED_LINE_KERN as f32 / 1000.0) * FIXTURE_FONT_SIZE * scale;
+        assert!(
+            (origins[1].1 .0 - expected).abs() < 1e-3,
+            "the tail starts at {:.3}; the scaled kern puts it at {expected:.3} — an unscaled \
+             kern would report {:.3}",
+            origins[1].1 .0,
+            expected + (KERNED_LINE_KERN as f32 / 1000.0) * FIXTURE_FONT_SIZE * (1.0 - scale)
+        );
     }
 
     #[test]

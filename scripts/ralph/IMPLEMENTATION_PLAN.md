@@ -736,7 +736,7 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       **NEW ASSERTION:** that A10 cannot be promoted without a named installer artefact in the
       release notes, mirroring the guard `release_version.rs` already applies to version carriers.
 
-- [ ] **T-8 Reader's kern term omits `Tz`.** `tj_fragment_origins`
+- [x] **T-8 Reader's kern term omitted `Tz`.** Landed 2026-11-01. `tj_fragment_origins`
 computes the kern as `pen_x -= number / 1000.0 * state.size` with no
 `horizontal_scale / 100` factor, while `spaced_width` applies that factor to advance and
 spacing. So on any page at `Tz != 100` every run after a kern is misplaced. Found while
@@ -758,6 +758,36 @@ tolerance, 60x it. Fix is one factor in one expression. **Blocks nothing in H4**
 are reflow-side, and a reflow that moved a kern-positioned tail would inherit this error
 (3 pt at `Tz 50`, 0 at `Tz 100`) — which is the reason to land T-8 **before R-4 starts
 asserting positions**, not before R-1..R-3.
+
+      **Done.** The reader now reads `pen_x -= number / 1000.0 * state.size *
+      state.horizontal_scale / 100.0`, and two guards hold it:
+      `the_reader_puts_a_kerned_tail_where_pdfium_drew_it_at_tz_50` (the acceptance test, red
+      before at the measured 94.008 against PDFium's 91.008) and
+      `the_kern_term_carries_the_horizontal_scale` (a hand-built text state, so the property is
+      also covered by the plain suite — the PDFium one is `#[ignore]`d and absent from Linux CI).
+      Both were mutation-verified with the factor removed, and both fail. Counts moved
+      526 -> 527 and 616 -> 618, ignored 90 -> 91, **measured across all four carriers**.
+      Two facts measured while landing this, both recorded rather than fixed here:
+      (a) the reflow's own kern term (`reflow.rs`, `kern_after_target`) also omits the factor and
+      its comment says so — it is now a *separate* defect, filed as **T-8b** below, because
+      fixing it changes `moved_to` for `Tz != 100` pages and no R-4 guard exists yet to hold it;
+      (b) at `Tz 50` the reflow still reports `moved_to = 136.704` for `ABab`, which is correct
+      only because `shift` compares two quantities that carry the same unscaled kern.
+
+- [ ] **T-8b Reflow's kern term omits `Tz` too.** Discovered 2026-11-01 while landing T-8.
+      `reflow_tj_array` computes `kern_after_target` as `number / 1000.0 * run.font_size` with no
+      `horizontal_scale / 100` factor, and its own comment records the omission ("Everything here
+      is unscaled text space: `Tz` does not enter"). That was true only while the reader shared
+      the assumption; the reader is now scaled, so on a `Tz != 100` page `moved_to` is off by
+      `n/1000 x Tf x (1 - Tz/100)` — 3 pt at `Tz 50`.
+      Measured, not argued: `reflow_tj_array` on `kerned-line-tz.pdf` with `AB -> ABab` reports
+      `moved_to = 136.704`, the `Tz 100` answer, on a page at `Tz 50`.
+      Acceptance test first: `a_reflows_reported_tail_origin_matches_the_ink_at_tz_50` — compare
+      `applied.moved_to` against PDFium's glyph origin on `kerned-line-tz.pdf`, with the
+      `Tz 100` reading asserted different first so a fixture that lost its `Tz` cannot pass.
+      **NEW ASSERTION:** that `moved_to`, not merely `shift`, is the quantity compared to ink.
+      `a_kerned_prefix_includes_the_kern` compares `moved_to` to a *hand-computed* expectation
+      and would go on agreeing with itself. Not blocking R-4, which is at `Tz 100`.
 
 - [ ] **R-H2 Add `cargo fmt --check` to the gate.** **New work discovered 2026-11-01.** The
       gate script runs `cargo test` (both shapes), `cargo clippy`, `tsc` and `vitest`, and CI runs

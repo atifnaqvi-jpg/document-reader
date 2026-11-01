@@ -1153,3 +1153,58 @@ open defect: the Windows suite crashes intermittently*.
   - Next startable: **R-4** (row A10's guard — the move itself), then **R-5** (the near-edge
     refusal). Both now have their fixture. T-8 (`Tz`-scaled kern) is still worth landing before
     R-4 asserts positions.
+
+## Iteration 24 — 2026-11-01 — T-8 (the reader's kern term) — green
+
+- Task: T-8 — give `tj_fragment_origins`'s kern term the `Tz/100` factor that `spaced_width`
+  already applies to glyph advance and spacing, and prove it against the ink rather than against
+  its own arithmetic.
+- Test: `the_reader_puts_a_kerned_tail_where_pdfium_drew_it_at_tz_50` (red before: **yes** —
+  "the reader puts `CD` at x=94.008 … PDFium drew it at 91.008 — off by 3.000 pt, 60x the 0.05 pt
+  tolerance", exactly the `250/1000 x 24 x 0.5` the plan predicted) and
+  `the_kern_term_carries_the_horizontal_scale` (red before: yes, at `85.008` against the expected
+  `91.008` while the mutant was in place; note its first draft had the sign inverted and was red
+  for that reason, which is why it was re-measured rather than assumed fixed).
+- Files: `src-tauri/src/editor/textlocate.rs` (the factor, two tests),
+  `docs/P2.8-reflow-DESIGN.md` (R10.1/R10.2 status), `.github/workflows/ci.yml` (both pins plus
+  the comment that records why), `src-tauri/tests/ci_workflow.rs` (both pin assertions),
+  `scripts/ralph/{gate.sh,PROMPT.md,IMPLEMENTATION_PLAN.md,LOOP_LOG.md}` (all four count carriers).
+- Gate: cargo test **527 passed / 91 ignored**, AND `--include-ignored` **618 passed / 0
+  ignored**, clippy clean (`-D warnings`), tsc clean, vitest 69 passed, `cargo fmt --check` clean.
+  Both counts moved by the measured amount: 526→527 and 616→618, ignored 90→91. **Measured, not
+  incremented** — `--no-fail-fast` with libtest's own totals summed.
+- Commit: see `git log` (this entry is in the commit it describes).
+- Learned:
+  - **The plan's own measurement reproduced to the digit.** 94.008 against 91.008 is 3.000 pt,
+    and `(-250)/1000 x 24 x (1 - 0.5) = 3.000`. That is worth recording because it means the
+    assertion was written from a number someone else had already measured, and it still had to
+    be run to know the *test* could see it — the two are different claims.
+  - **Two guards, not one, and the reason is the CI asymmetry.** The acceptance test the plan
+    names is `#[ignore]`d, so Linux never runs it; the defect is in the reader, which every
+    consumer of `tj_fragment_origins` inherits, so a property covered only on Windows would be
+    a coverage hole on the branch everyone runs. The hand-built sibling needs no library and
+    keeps it in the plain suite. Both were mutation-verified with the factor deleted from
+    `tj_fragment_origins` (the guarded file — `git diff --stat` named it), each caught, each a
+    pair: restored, both pass.
+  - **The reflow has the same omission, and fixing it was the wrong call here.** `reflow.rs`
+    computes `kern_after_target` unscaled and its comment says so in as many words ("Everything
+    here is unscaled text space: `Tz` does not enter"). That comment was true only while the
+    reader shared the assumption. Measured after the reader fix, `reflow_tj_array` on
+    `kerned-line-tz.pdf` with `AB -> ABab` still reports `moved_to = 136.704` — the `Tz 100`
+    answer, on a `Tz 50` page. Filed as **T-8b** in the plan rather than fixed: R-4 is at
+    `Tz 100`, nothing yet asserts a reflow position at any other scaling, and the change would
+    move a number with nothing watching it. `shift` stays correct at `Tz != 100` by accident —
+    it subtracts two quantities that carry the same unscaled kern — which is exactly the kind of
+    agreement that stops being true when the other half is fixed.
+  - **`scripts/mutate.sh` refused the second mutant run with exit 4, correctly.** The first
+    mutation run had left the mutant compiled into the binary, so the PDFium test's second run
+    executed a stale build. `touch`ing the file and re-running produced a real CAUGHT. Without
+    exit 4 that green-adjacent summary would have been read as a survivor.
+  - **The `-lt` floor was mutated upward as well as downward.** `527 -> 528` caught; `91 -> 90`
+    caught. A floor only catches values below it, so a survivor at 528 would have been a
+    direction-blind guard passed off as coverage (AGENTS.md's rule about equality vs floor).
+  - **`cargo fmt --check` caught the new assertion before CI did**, in the exact shape R-H2
+    records: the wrapped `let expected = …` was not rustfmt-clean. This is the third iteration
+    in a row where fmt-first was load-bearing.
+  - Next startable: **R-4** (row A10's guard — the move itself), then **R-5**. R-4 no longer has
+    T-8 as a predecessor. **T-8b** and **R-H2** remain open and are not blocking R-4.

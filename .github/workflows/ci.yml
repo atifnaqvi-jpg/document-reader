@@ -106,13 +106,19 @@ jobs:
           # Measured at 89, not 87: two more with P2.8 case (a), both reflow writes whose oracle
           # is per-glyph ink for the same reason, and both ignored here rather than left to fail.
           #
+          # Measured at 91, not 90: T-8's `the_reader_puts_a_kerned_tail_where_pdfium_drew_it_at_tz_50`
+          # reads PDFium's glyph grid to check the reader's own pen against the ink at `Tz 50`, so
+          # it is `#[ignore]`d here like the rest. T-8's other guard
+          # (`the_kern_term_carries_the_horizontal_scale`) builds its text state by hand and needs
+          # no library, so it moves `passed` and is counted below.
+          #
           # Measured at 90, not 89: R-1a's `a_kerned_prefix_includes_the_kern` compares the
           # reflow's reported tail origin against rendered ink, so it needs PDFium too.
           # The other tests case (a) brought -- the `Td`-offset arithmetic and the R1/R4/R5/R6
           # refusals -- assert over `measure` and synthesized runs, need no library, and are
           # counted in `passed` below.
-          if [ "$ignored" -ne 90 ]; then
-            echo "::error::$ignored tests ignored; 90 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          if [ "$ignored" -ne 91 ]; then
+            echo "::error::$ignored tests ignored; 91 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -147,6 +153,9 @@ jobs:
           # count stays 90.
           #
           #
+          # Measured at 527, not 526: T-8 added one non-PDFium guard (526 -> 527), the hand-built
+          # `Tz 50` pen walk. It needs no library and its PDFium sibling is the ignored one above.
+          #
           # Measured at 526, not 520: R-3 added six guards (520 -> 526) -- four in
           # `tests/reflow_fixtures.rs` (the §6.2 table parser and its crafted defect shapes, the
           # committed-file check, the A10 topology, and the near-edge room) and two in
@@ -157,8 +166,8 @@ jobs:
           # comparison and the crafted sample that proves its parser can see a defect. Both read
           # `.github/workflows/ci.yml` and `scripts/ralph/gate.sh` with `std::fs`, so neither
           # needs PDFium and the ignored count stays 90.
-          if [ "$passed" -lt 526 ]; then
-            echo "::error::only $passed tests ran; 526 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 527 ]; then
+            echo "::error::only $passed tests ran; 527 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
