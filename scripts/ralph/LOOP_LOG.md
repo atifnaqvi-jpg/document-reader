@@ -969,3 +969,72 @@ open defect: the Windows suite crashes intermittently*.
     defect in R-H1.
   - Next startable: **nothing** until R-H3 is ruled. R-H1 cannot be committed under a red gate
     and will be rewritten once it is unblocked.
+
+---
+
+## Iteration 21 — 2026-11-01 — R-H1 (no untracked fixture files) — green
+
+- Task: R-H1 — assert that nothing under `src-tauri/tests/fixtures/` exists which git does not
+  track, so a concurrency test's leftover copy (or a stray swept in by `git add -A`) fails the
+  suite instead of sitting in the tree and looking exactly like an input.
+- Test: `the_fixture_tree_holds_no_untracked_files` (red before: **yes** — a
+  `kerned-line-stray.pdf` copy in the fixtures directory made it fail naming that exact path,
+  then removing the file made it pass). Supporting guard
+  `the_untracked_reader_splits_on_nul_and_not_on_newlines` (crafted samples, including both
+  defect shapes: a path with an embedded newline, and a newline-separated listing read by a
+  NUL splitter).
+- Files: `src-tauri/tests/fixture_tree.rs` (new, two tests), `.github/workflows/ci.yml`,
+  `src-tauri/tests/ci_workflow.rs`, `scripts/ralph/{gate.sh,PROMPT.md,IMPLEMENTATION_PLAN.md,LOOP_LOG.md}`.
+- Gate: cargo test **518 passed / 90 ignored**, AND `--include-ignored` **608 passed / 0
+  ignored**, clippy clean (`-D warnings`), tsc clean, vitest **69 passed**, `cargo fmt --check`
+  clean. Both counts moved by exactly two and were **measured, not incremented**: 516→518 and
+  606→608, `ignored` unchanged at 90, because both new guards call `git`/`std::fs` on the
+  working tree and neither opens a document through PDFium. The `-lt 516` floor in `ci.yml`, its
+  mirror in `tests/ci_workflow.rs` and both ralph pins moved in the same commit.
+- Commit: see `git log` (this entry is in the commit it describes).
+- Learned:
+  - **An untracked file is not a `git diff`, and that makes this mutant the one shape the
+    harness cannot certify.** `scripts/mutate.sh` establishes freshness for a runtime-read
+    target by requiring the mutated path to differ from `HEAD`. Here the mutant *is* a file git
+    has never seen, so it can never differ from `HEAD`, and both ways of manufacturing a diff
+    destroy the defect: `git add -N` makes the stray **tracked**, after which
+    `git ls-files --others` reports nothing and the harness returns `SURVIVED` (measured —
+    exit 1), and editing a tracked neighbour leaves the stray itself undiffed (also measured:
+    the harness correctly refused with "the runtime-read target is not modified relative to
+    HEAD", exit 4). The catch was therefore measured with a direct `cargo test` pair rather
+    than through the harness, and this entry is the record of why. Do not read the absence of
+    a mutation-log CAUGHT record for this test as an unproven guard; read it as a harness
+    bound, and check the pair by hand if it is ever doubted.
+  - **`MUTATE_RUNTIME_READ` is repo-root-relative but `cd`s into `src-tauri`.** The first
+    harness run failed with "names a path that does not exist" because the value was given as
+    `tests/fixtures/...`; the same string resolves under `src-tauri/` after the `cd`. Both
+    `MUTATE_RUNTIME_READ` and `MUTATE_TARGET` take a path from the repository root.
+  - **The floor is what makes the NUL reader safe, and the reader's own test says so.** A
+    splitter that is correct cannot distinguish "no untracked files" from "the query returned
+    nothing because the pathspec was wrong"; only a count floor on the *tracked* side can. So
+    the guard asserts both: `on_disk >= 54` **and** `tracked >= 54`. Iteration 20 measured a
+    draft that passed `-z` after `--` (where git reads it as a pathspec) and reported 54 paths
+    as **1**; the floor turned that silent misread into a named failure both times.
+  - **Mutated the guarded file, not the guard.** `ci.yml`'s floor was moved 518→517 (and
+    separately 518→519) with `git diff --stat` naming `.github/workflows/ci.yml` in both runs;
+    `the_linux_job_pins_the_measured_passed_floor` failed both times, and restoring 518 passed.
+    Both directions matter here because 517 also sits *below* a floor — this pin is an
+    equality-shaped `contains`, so it is direction-free, unlike a bare `-lt` comparison.
+  - **`cargo fmt --check` caught the new file before CI did.** The first draft was not
+    rustfmt-clean (one wrapped `read_dir` call and one long `git(...)` call). That is exactly
+    the drift **R-H2** records, and it is why fmt is first in the gate: it is the cheapest
+    step and the one whose absence let `714f2a9` pass locally and fail CI.
+  - **The guard cannot see an ignored name, by construction and on purpose.** Renaming the
+    stray to `sample-99.pdf` leaves the test **green**, because `--exclude-standard` hides
+    anything matching `.gitignore`. That is recorded in the assertion message itself so the
+    next reader does not mistake a pass for coverage of those two prefixes. `AGENTS.md`'s
+    "never `git add -A`, stage by explicit path" remains the primary control.
+  - **R-H3 is closed and was not mine to close, so it is recorded rather than re-decided.**
+    It was resolved by `429540b` before this iteration started, by moving all six carriers to
+    0.9.1 with a release-notes section that says plainly it is unverified and unpublished.
+    Measured at the start of this iteration on the untouched tree: plain **516 passed / 90
+    ignored / 0 failed**, `--include-ignored` **608 / 0 / 0** after the change — i.e. the
+    version guard is green again with the guard text unchanged. The plan now marks it `[x]`.
+  - Next startable: **R-3** (the A10 fixture) and then **R-4** (row A10's guard). T-8 is
+    flagged in the plan as worth landing **before R-4 starts asserting positions**, because a
+    reflow that moves a kern-positioned tail would inherit its 3 pt error at `Tz 50`.

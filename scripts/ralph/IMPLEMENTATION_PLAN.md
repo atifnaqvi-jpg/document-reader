@@ -538,7 +538,7 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       feeds that reader a crafted sample including the defect shape. Counts 513/603 -> 516/606,
       ignored unchanged at 90, so no CI `#[ignore]` pin moved.
 
-- [ ] **R-H1 Assert the fixture tree holds no untracked files.** **New work discovered
+- [x] **R-H1 Assert the fixture tree holds no untracked files.** **New work discovered
       2026-11-01.** `750f5fb` committed 36 test-generated copies because `git add -A` swept them
       in, and nothing noticed for two commits: the concurrency tests create them with
       `std::fs::copy` beside a real fixture, they are byte-identical to an input, and their
@@ -567,14 +567,22 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       the test, confirm it fails naming that path, then delete it and confirm green. A second
       mutation renames the stray to `sample-99.pdf`, confirms the gitignore backstop hides it, and
       records that the test is not a substitute for staging by explicit path.
-      **Implemented and mutation-proven on 2026-11-01 (iteration 20), but NOT committed: the
-      gate went red during the iteration for a reason outside this task.** See **R-H3**. The
-      test is `src-tauri/tests/fixture_tree.rs` (`the_fixture_tree_holds_no_untracked_files` plus
-      `the_untracked_reader_splits_on_nul_and_not_on_newlines`); both were run, both mutations
-      were run and restored, and the file was reverted rather than committed because the prompt
-      forbids committing a red gate. It is re-applied unchanged once R-H3 is ruled.
+      **Landed 2026-11-01 (iteration 21)** once `429540b` cleared the version-invariant red
+      (**R-H3**, resolved by moving the carriers to 0.9.1). The test is
+      `src-tauri/tests/fixture_tree.rs` -- `the_fixture_tree_holds_no_untracked_files` plus
+      `the_untracked_reader_splits_on_nul_and_not_on_newlines`. Rewritten, not re-applied:
+      iteration 20's copy was never committed and no copy survived (see `67c9655`).
+      Mutation evidence, and the one place the harness could not certify it: **an untracked
+      file is not a `git diff`**, so `scripts/mutate.sh` cannot see this mutant at all. Its
+      freshness witness demands the mutated path be modified relative to `HEAD`, and the two
+      ways to satisfy that both destroy the defect -- `git add -N` makes the stray *tracked*
+      (measured: the guard then reports nothing and the harness reports `SURVIVED`), and editing
+      a tracked neighbour leaves the stray itself undiffed. The catch was therefore measured
+      with a direct `cargo test` pair instead: with `kerned-line-stray.pdf` present the guard
+      failed naming that exact path; removing it passed. Counts 516/606 -> **518/608**, ignored
+      unchanged at 90.
 
-- [!] **R-H3 The carriers are stale now that `v0.9.0` is tagged — needs a ruling.** **Discovered
+- [x] **R-H3 The carriers are stale now that `v0.9.0` is tagged — RESOLVED by a version bump.** **Discovered
       2026-11-01 (iteration 20), pre-existing and unrelated to that iteration's task.**
       `the_tree_version_is_ahead_of_every_published_tag` (`src-tauri/tests/release_version.rs:178`)
       **fails at `94d2d34` on a clean worktree**, so the local gate has been red since `v0.9.0`
@@ -606,6 +614,15 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       04:26:26, commit `324c131` landed 14 seconds before it, and the two commits after it
       (`03e231d`, `94d2d34`) are docs-only — and why the local gate and CI now disagree in the
       direction that matters (local red, CI green).
+      **Resolved 2026-11-01 in `429540b`** (the ruling taken was: an in-flight phase carries a
+      patch bump). All six carriers moved to **0.9.1**, with a `## 0.9.1` release-notes section
+      that says in its own words that it is a development version, that no build was hand-run
+      and none published. It names `rust 1.90` (the MSRV) and `rust 1.91.0` (the toolchain the
+      local gate ran) in the adjacent-line shape
+      `the_release_notes_name_the_toolchain_the_build_was_verified_on` parses. A `-dev` suffix
+      was measured and is not available: `parse_semver` splits on `.` and requires three plain
+      numbers. The guard is green again and **unchanged** -- the tree moved, not the invariant.
+      Cadence question **A-6** stays Open for the next phase, but it no longer blocks the loop.
 
 - [ ] **R-G1 Assert the gate's command list against `ci.yml`.** **New work discovered
       2026-11-01.** `scripts/ralph/gate.sh` and `.github/workflows/ci.yml` are two hand-kept
