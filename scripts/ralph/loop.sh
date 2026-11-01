@@ -40,66 +40,15 @@ fi
 log()  { printf '\n[ralph] %s\n' "$*"; }
 fail() { printf '\n[ralph] FAILED: %s\n' "$*" >&2; }
 
-# Expected counts for each shape. These are pins, not observations: a count that moves must be
-# an explicit decision, because the failure they exist to catch is a test that stopped running
-# rather than a test that started failing.
-PIN_PLAIN_PASSED=510
-PIN_PLAIN_IGNORED=90
-PIN_IGNORED_PASSED=600
-PIN_IGNORED_IGNORED=0
-
-# Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
-# even when the run fails, because "0 passed" and "509 passed" are different problems and the
-# log must say which one happened.
-assert_shape() {
-  local shape="$1" want_passed="$2" want_ignored="$3"
-  shift 3
-  local out got_passed got_ignored rc=0
-
-  log "gate: cargo test ($shape)"
-  out="$( cd src-tauri && PDFIUM_LIBRARY_PATH="$PWD/resources/libpdfium.so" cargo test "$@" 2>&1 )" || rc=$?
-  printf '%s\n' "$out" | grep -E '^(test result|error|warning: unused)' | sed 's/^/    /'
-
-  got_passed="$(printf '%s\n' "$out" | awk '/^test result/ {p+=$4} END {print p+0}')"
-  got_ignored="$(printf '%s\n' "$out" | awk '/^test result/ {i+=$8} END {print i+0}')"
-
-  if [ "$rc" -ne 0 ]; then
-    fail "$shape: cargo test exited $rc (ran $got_passed passed, $got_ignored ignored)"
-    return 1
-  fi
-  if [ "$got_passed" -ne "$want_passed" ]; then
-    fail "$shape: expected $want_passed passed, got $got_passed — a test appeared, vanished or \
-stopped running. This is a count change, not a green suite; decide it before proceeding."
-    return 1
-  fi
-  if [ "$got_ignored" -ne "$want_ignored" ]; then
-    fail "$shape: expected $want_ignored ignored, got $got_ignored — tests are being skipped \
-silently. A skip is not a pass."
-    return 1
-  fi
-  log "gate: $shape ok — $got_passed passed, $got_ignored ignored (pinned)"
-  return 0
-}
-
+# The gate is a separate process, re-executed after each iteration's commit. It used to be a
+# function defined here, which meant bash parsed the pins once at loop start: an iteration that
+# added a test moved a count and updated the pin in its own commit, and the gate then compared
+# the new count against the pre-change pin, reporting a false red on correct work. Rejected
+# alternative: re-`source` the pin values between iterations. That still trusts the working tree
+# rather than the commit, and it silently keeps every other function definition from the old
+# parse. A fresh process reads the whole gate as committed or not at all.
 run_gate() {
-  local status=0
-
-  # Both shapes, always. The plain shape catches a test that stopped compiling or was deleted;
-  # the --include-ignored shape is the only one that runs the PDFium-backed ink tests. Running
-  # one and calling it green is how 89 skips stayed hidden for fifteen iterations.
-  assert_shape "plain" "$PIN_PLAIN_PASSED" "$PIN_PLAIN_IGNORED" || status=1
-  assert_shape "--include-ignored" "$PIN_IGNORED_PASSED" "$PIN_IGNORED_IGNORED" -- --include-ignored || status=1
-
-  log "gate: cargo clippy"
-  ( cd src-tauri && PDFIUM_LIBRARY_PATH="$PWD/resources/libpdfium.so" cargo clippy --all-targets ) || status=1
-
-  log "gate: tsc"
-  npx tsc --noEmit || status=1
-
-  log "gate: vitest"
-  npx vitest run || status=1
-
-  return $status
+  scripts/ralph/gate.sh
 }
 
 # Refuse to start on a dirty tree: an iteration must build on a committed base, otherwise a
