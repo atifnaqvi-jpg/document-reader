@@ -461,7 +461,7 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       an integration target and the test is in the lib. The harness did its job — it refused to
       read "no summary line" as "no failure" — and the correct invocation is `--lib NAME`.
 
-- [ ] **R-2a The R8b fixture.** `two-mcid-one-baseline.pdf`: page content with two `BDC`/`EMC`
+- [x] **R-2a The R8b fixture.** `two-mcid-one-baseline.pdf`: page content with two `BDC`/`EMC`
       units on one baseline, the edit target in the second, a run from the first lying further
       left. Operators: `BDC` `/P` `/MCID 0`, `Tm 72 700`, `Tj` a short run, `EMC`; then `BDC`
       `/P` `/MCID 1`, `Tm 200 700` (same `y`), `TJ` of two strings, `EMC`. Both units are `/P` so
@@ -472,6 +472,20 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       operator list rather than on bytes**, that two `BDC`/`EMC` pairs exist, that their `/MCID`
       values differ, and that the two runs' baselines are equal. A byte-level assertion would
       pass on a stream that is textually right and semantically wrong.
+      **Done — commit `feat(p2.8): commit the two-MCID one-baseline fixture (R8b)`.** The
+      measured document is `HI` at `(72, 700)` in `Untyped`-free scope, and `AB`/`CD` at
+      `(200, 700)`/`(232.016, 700)`; all three resolve to `MergeScope::Block`, because the
+      builder writes a real `/StructTreeRoot` → `/ParentTree` → per-page array of two `/P`
+      elements. **The structure tree is load-bearing, not decoration**: without it both units
+      fall back to `MergeScope::Untyped(Some(mcid))`, which is a *finer* boundary and would let
+      R-2b pass on the conservative reading while the coarse one — the one the doc names — was
+      never exercised. The guard asserts `Block` explicitly for that reason.
+      Mutation: changing both `/P` elements to `/Span` (an inline role) fails the `Block`
+      assertion; restoring them passes. Deleting the fixture file fails the guard's own load.
+      Two other mutations were tried and discarded as non-mutations: giving both `BDC`s the same
+      `/MCID` fails the scope assertion, and the kern-less `[(AB) (CD)]` array was chosen over
+      `[(AB) -250 (CD)]` so a later `Tz` bug (T-8) cannot move the tail's expected ink.
+
 - [ ] **R-2b Refuse a line whose runs leave its merge scope (R8b).** §7.3 was **ruled on
       2026-10-31**, so this is code. `reflow_tj_array` takes `line_origin` as the minimum
       `origin.0` over every run on the baseline, and `on_baseline` filters on `baseline()`

@@ -165,6 +165,12 @@ fn main() {
         // walk's kern branch. A `TJ` number between two strings had never appeared in a fixture
         // before, so the branch that reads it was untested.
         ("kerned-line.pdf", testpdf::bytes(&testpdf::kerned_line())),
+        // P2.8 R8b: two tagged units on one baseline, so a scope-blind `line_origin` is
+        // falsifiable on a committed file rather than only on synthesized runs.
+        (
+            "two-mcid-one-baseline.pdf",
+            testpdf::bytes(&testpdf::two_mcid_one_baseline()),
+        ),
         // The same page at `Tz 50`. At `Tz 100` the kern term's missing `Tz/100` factor is
         // invisible, so without this file the defect is unfalsifiable.
         (

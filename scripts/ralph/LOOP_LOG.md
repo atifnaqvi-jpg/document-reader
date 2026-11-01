@@ -689,3 +689,48 @@ when `ink_y` is reverted to `run.origin.1`.
     failed the guard; restoring `510` passed it.
   - Next startable: **R-2a** (the R8b fixture `two-mcid-one-baseline.pdf`), then R-2b, R-2c, R-3.
     R-4 (the A10 move) is where T-8's `Tz` defect starts to matter, and T-8 remains unstarted.
+
+## Iteration 17 — 2026-11-01 — R-2a (the R8b fixture) — green
+
+- Task: R-2a — commit `two-mcid-one-baseline.pdf`, two `/P` tagged units on one baseline with the
+  edit target in the second, and guard the fixture's own shape on the parsed operator list.
+- Test: `the_r8b_fixture_has_two_units_on_one_baseline` (red before: **yes**, three ways, and all
+  three were run rather than reasoned about: (1) with the file absent it fails on its own load;
+  (2) with both `BDC`s given `MCID 0` it fails `assert_ne!` on the two scope values; (3) with the
+  two `/P` structure elements rewritten to `/Span` it fails the `Block` assertion at
+  `reflow.rs:609`. Restoring each returned it to green.)
+- Files: `src-tauri/src/editor/testpdf.rs`, `src-tauri/examples/make_p24_fixtures.rs`,
+  `src-tauri/src/editor/reflow.rs`, `src-tauri/tests/fixtures/two-mcid-one-baseline.pdf`,
+  `docs/P2.8-reflow-DESIGN.md` (§7 item 3 records the fixture landing),
+  `.github/workflows/ci.yml`, `src-tauri/tests/ci_workflow.rs`, `scripts/ralph/gate.sh`,
+  `scripts/ralph/PROMPT.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`.
+- Gate: cargo test **511 passed / 90 ignored**, AND `--include-ignored` **601 passed / 0 ignored**,
+  clippy clean (0 warnings), tsc clean, vitest **69 passed**. Both cargo counts moved by exactly
+  one and were re-measured, not incremented: the new test parses a committed fixture with no
+  PDFium, so plain `passed` 510→511 and include-ignored 600→601 while `ignored` stays 90. The
+  `-lt 510` floor in `ci.yml`, its mirror in `tests/ci_workflow.rs` and the two ralph pins were
+  updated in the same commit, and the floor mutation (`511`→`512` in `ci.yml`) was run: the guard
+  failed, restoring `511` passed.
+- Commit: `feat(p2.8): commit the two-MCID one-baseline fixture (R8b)`
+- Learned:
+  - **The structure tree is load-bearing, not decoration.** The plan says the units must differ by
+    `Block`, "not merely by `Untyped`". A page with two `BDC`s and no `/StructTreeRoot` still gives
+    two different `merge_scope()`s — but both are `Untyped(Some(mcid))`, the *finer, conservative*
+    boundary. R-2b written against that fixture would pass on the fallback reading while the coarse
+    reading the doc names was never exercised. So the builder writes a real
+    `/StructTreeRoot` → `/ParentTree` (`Nums` → per-page array of two `/P` elements) and the guard
+    asserts `MergeScope::Block` explicitly. `/P` is itself a block role, so the `/P` walk stops on
+    the element instead of climbing.
+  - **No kern in the fixture's `TJ` array, deliberately.** The first draft carried
+    `[(AB) -250 (CD)]` — the `kerned-line.pdf` shape — which would have made R-4's expected tail
+    ink depend on T-8's missing `Tz` factor once anything set `Tz != 100`. `[(AB) (CD)]` keeps the
+    tail at `200 + advance(AB)` with no second term to inherit a reader bug.
+  - **The fixture guard's assertion had to be on the parsed operations, not the bytes.** The plan
+    says so and it is right for a concrete reason: a `BDC` closed in the wrong place re-encodes to
+    the same tokens in a different order, so a `contains` check would pass on a stream whose
+    semantics are wrong. The guard parses with `decoded_content`, counts `BDC`/`EMC`, and compares
+    the `/MCID` operands.
+  - The generator rewrites every fixture, and `encrypted-aes.pdf` is **not** byte-stable (new
+    salt/IV each run), so it shows up dirty after every regeneration. `git checkout --` it before
+    staging — do not commit it, and do not "fix" the nondeterminism here.
+  - Next startable: **R-2b** (`R8b-scope-left-of-line`), now unblocked with its fixture; then R-2c.

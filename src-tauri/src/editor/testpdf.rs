@@ -2034,6 +2034,109 @@ pub fn two_run_line() -> Document {
     )
 }
 
+/// P2.8 R8b: two tagged units on **one baseline**, the second holding the edit target.
+///
+/// `reflow_tj_array` takes `line_origin` as the minimum `origin.0` over every run whose
+/// `baseline()` matches, and `baseline()` is `origin.1 + rise` — no scope term. So the run in
+/// the first unit, lying 128 pt to the left, makes `line_origin` too small and the `Td` offset
+/// correspondingly too large: the tail is drawn 128 pt right of where it belongs, and the
+/// record still reports the intended position (design R8b, R8b.1).
+///
+/// Both `BDC`s are `/P`, and the page carries a `/StructTreeRoot` whose `/ParentTree` resolves
+/// each `MCID` to its own `/P` element — so the scopes differ by
+/// [`crate::editor::textlocate::MergeScope::Block`], the coarse and correct boundary, rather than
+/// by the raw-`MCID` fallback. The tag alone would not do: [`super::textlocate::MarkedContent`]
+/// records the tag "for diagnostics" and never consults it (T27).
+///
+/// Geometry, at `Tf 24` in Helvetica: unit 0 draws `HI` at x=72, the target unit draws
+/// `[(AB) (CD)]` at x=200, so `CD` sits at 200 + 32.016 = 232.016.
+pub fn two_mcid_one_baseline() -> Document {
+    let mut document = Document::with_version("1.4");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(winansi_helvetica());
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let content_id = document.add_object(page_body(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 24.into()]),
+        Operation::new(
+            "BDC",
+            vec!["P".into(), Object::Dictionary(dictionary! { "MCID" => 0 })],
+        ),
+        Operation::new(
+            "Tm",
+            vec![1.into(), 0.into(), 0.into(), 1.into(), 72.into(), 700.into()],
+        ),
+        Operation::new("Tj", vec![Object::string_literal("HI")]),
+        Operation::new("EMC", vec![]),
+        Operation::new(
+            "BDC",
+            vec!["P".into(), Object::Dictionary(dictionary! { "MCID" => 1 })],
+        ),
+        Operation::new(
+            "Tm",
+            vec![1.into(), 0.into(), 0.into(), 1.into(), 200.into(), 700.into()],
+        ),
+        Operation::new(
+            "TJ",
+            vec![Object::Array(vec![
+                Object::string_literal("AB"),
+                Object::string_literal("CD"),
+            ])],
+        ),
+        Operation::new("EMC", vec![]),
+        Operation::new("ET", vec![]),
+    ]));
+
+    // Two sibling paragraphs, one per tagged unit. A `/P` element is itself block-level, so the
+    // `/ParentTree` walk stops on it rather than climbing to a parent.
+    let unit_zero = document.add_object(dictionary! {
+        "Type" => "StructElem",
+        "S" => "P",
+    });
+    let unit_one = document.add_object(dictionary! {
+        "Type" => "StructElem",
+        "S" => "P",
+    });
+    let per_page = document.add_object(Object::Array(vec![
+        Object::Reference(unit_zero),
+        Object::Reference(unit_one),
+    ]));
+    let parent_tree = document.add_object(dictionary! {
+        "Nums" => vec![0.into(), Object::Reference(per_page)],
+    });
+    let structure_root = document.add_object(dictionary! {
+        "Type" => "StructTreeRoot",
+        "ParentTree" => parent_tree,
+    });
+
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => resources_id,
+        "StructParents" => 0,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "StructTreeRoot" => structure_root,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
 /// Two adjacent operands on one line, each inside its own tagged unit (P2.7.1).
 ///
 /// The geometry is identical to [`two_run_line`] -- same font, same size, zero gap -- so

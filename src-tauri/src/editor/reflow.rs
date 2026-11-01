@@ -397,7 +397,7 @@ fn escape_literal(text: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::textlocate::{locate_runs, page_id, write_level};
+    use crate::editor::textlocate::{locate_runs, page_id, write_level, MergeScope};
     use std::path::Path;
 
     fn fixture(name: &str) -> std::path::PathBuf {
@@ -548,6 +548,84 @@ mod tests {
         );
         // And the move it *did* make is the one R2.1 predicts, so the test is not vacuous.
         assert!(applied.shift > 0.0);
+    }
+
+    /// R8b's fixture, asserted on the **parsed operator list** rather than on bytes.
+    ///
+    /// R-2b's refusal is a property of two same-baseline runs in different `merge_scope`s, so
+    /// the fixture must carry exactly that: two `BDC`/`EMC` units whose `/MCID`s differ, with
+    /// the edit target inside the second, and both runs on one baseline. A byte-level assertion
+    /// would pass on a stream that is textually right and semantically wrong — a `BDC` closed
+    /// in the wrong place still contains the same tokens.
+    #[test]
+    fn the_r8b_fixture_has_two_units_on_one_baseline() {
+        let source = fixture("two-mcid-one-baseline.pdf");
+        let document = Document::load(&source).expect("the R8b fixture is committed");
+        let page = page_id(&document, 0).expect("page 0");
+        let content = decoded_content(&document, page).expect("page content decodes");
+
+        let mcids: Vec<i64> = content
+            .operations
+            .iter()
+            .filter(|operation| operation.operator == "BDC")
+            .filter_map(|operation| operation.operands.get(1))
+            .filter_map(|properties| properties.as_dict().ok())
+            .filter_map(|properties| properties.get(b"MCID").ok())
+            .filter_map(|mcid| mcid.as_i64().ok())
+            .collect();
+        let closes = content
+            .operations
+            .iter()
+            .filter(|operation| operation.operator == "EMC")
+            .count();
+        assert_eq!(
+            mcids.len(),
+            2,
+            "the fixture must carry two tagged units, found {mcids:?}"
+        );
+        assert_eq!(closes, 2, "each unit must be closed by its own EMC");
+        assert_ne!(
+            mcids[0], mcids[1],
+            "the two units must differ by MCID; equal ids would be one unit written twice"
+        );
+
+        let runs = locate_runs(&document, page).expect("runs");
+        assert_eq!(runs.len(), 3, "HI, AB and CD: {runs:?}");
+        let left = runs.iter().find(|run| run.text == "HI").expect("HI");
+        let target = runs.iter().find(|run| run.text == "AB").expect("AB");
+        let tail = runs.iter().find(|run| run.text == "CD").expect("CD");
+
+        assert!(
+            (left.baseline() - target.baseline()).abs() < 1e-3,
+            "the two units must share a baseline, or the scope term cannot be reached: {} vs {}",
+            left.baseline(),
+            target.baseline()
+        );
+        assert_ne!(
+            left.merge_scope(),
+            target.merge_scope(),
+            "the units must be distinguishable by merge scope, not by tag: both are /P"
+        );
+        assert!(
+            matches!(left.merge_scope(), Some(MergeScope::Block(_)))
+                && matches!(target.merge_scope(), Some(MergeScope::Block(_))),
+            "the doc says both units are resolved /P blocks; a raw-MCID fallback would make the \
+             fixture test the conservative reading instead: {:?} vs {:?}",
+            left.merge_scope(),
+            target.merge_scope()
+        );
+        assert_eq!(
+            target.merge_scope(),
+            tail.merge_scope(),
+            "the target and its tail are one unit; otherwise the tail is a third scope"
+        );
+        assert!(
+            left.origin.0 < target.origin.0,
+            "the other unit must lie to the left, so a scope-blind line origin is too small: \
+             {} vs {}",
+            left.origin.0,
+            target.origin.0
+        );
     }
 
     /// R10b: the measured prefix belongs to **one** `TJ` array. A run whose position also
@@ -858,3 +936,4 @@ mod tests {
         assert_eq!(refused.rule, ReflowRefusal::R4Wrap);
     }
 }
+
