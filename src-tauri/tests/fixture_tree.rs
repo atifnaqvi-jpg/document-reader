@@ -14,6 +14,17 @@
 //! would make this guard fire on correct work and teach the next person to disable it. The
 //! hazard is a file git has never heard of, so the query is `git ls-files --others
 //! --exclude-standard`.
+//!
+//! **Mutation evidence for this file is hand-run, and no harness record is possible.**
+//! `scripts/mutate.sh` decides whether a mutant is present by diffing against `HEAD`, and an
+//! untracked file is not a `git diff` — the stray *is* the mutant, so the harness sees a clean
+//! tree and returns `SURVIVED` for a guard that in fact fires. `git add -N` satisfies its
+//! freshness witness but makes the stray *tracked*, after which the untracked query reports
+//! nothing by definition and the harness again records `SURVIVED`. Reading a `SURVIVED` for
+//! this test as an unproven guard would be wrong; conversely, a `CAUGHT` here must not be
+//! trusted unless someone watched it happen. The two mutants that matter are therefore run by
+//! hand and recorded in the commit message: a stray file with the correct pathspec (fails,
+//! naming the path), and a stray with the pathspec blinded (fails in the sentinel below).
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +44,11 @@ fn fixtures_dir() -> PathBuf {
 /// added" — a new fixture must not have to edit this number. It sits at the measured value
 /// with no headroom, so lowering it is caught.
 const FIXTURE_FLOOR: usize = 54;
+
+/// The one pathspec every query in this file uses. It is a shared `const` on purpose: the
+/// sentinel below must be blinded by the same edit that would blind the real query, or a
+/// mutant could break the assertion while leaving the precondition intact and survive.
+const FIXTURES_PATHSPEC: &str = "src-tauri/tests/fixtures";
 
 /// Every regular file below `dir`, recursively.
 fn regular_files(dir: &Path) -> Vec<PathBuf> {
@@ -109,6 +125,60 @@ fn the_untracked_reader_splits_on_nul_and_not_on_newlines() {
     assert!(paths_from_nul_output(b"").is_empty());
 }
 
+/// Deletes the sentinel even if an assertion panics, so a failing precondition does not leave
+/// a stray behind that the next run would report as a defect in the tree rather than in the
+/// guard. A leaked sentinel is itself caught: it is an untracked file under the fixtures dir.
+struct Sentinel(PathBuf);
+
+impl Drop for Sentinel {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Plants a file, runs the *real* untracked query against it, and asserts the query reported
+/// it. Returns nothing; it asserts.
+///
+/// This is what distinguishes "no strays" from "the query is blind". Both produce an empty
+/// list, and no assertion on the list itself can separate them -- which is exactly how the
+/// previous version passed with a stray present once its pathspec was altered. The sentinel
+/// is checked through the same `pathspec` argument the caller then uses, so a blinded
+/// pathspec fails here instead of quietly returning "nothing untracked".
+fn the_untracked_query_sees_a_planted_file(root: &Path, pathspec: &str) {
+    let sentinel = Sentinel(fixtures_dir().join(format!(".sentinel-{}.probe", std::process::id())));
+    std::fs::write(
+        &sentinel.0,
+        b"planted by fixture_tree; deleted before this test returns",
+    )
+    .unwrap_or_else(|e| panic!("cannot plant the sentinel {}: {e}", sentinel.0.display()));
+
+    let seen = paths_from_nul_output(&git(
+        root,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            pathspec,
+        ],
+    ));
+
+    let planted = sentinel
+        .0
+        .file_name()
+        .expect("sentinel has a file name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        seen.iter().any(|path| path.ends_with(&planted)),
+        "the untracked query did not report a file planted at {} under pathspec {pathspec:?}; \
+         it returned {seen:?}. The query is blind, so an empty result below would prove \
+         nothing. Check the pathspec, and that `-z` sits before `--`.",
+        sentinel.0.display()
+    );
+}
+
 #[test]
 fn the_fixture_tree_holds_no_untracked_files() {
     let root = repo_root();
@@ -124,10 +194,7 @@ fn the_fixture_tree_holds_no_untracked_files() {
 
     // Precondition on the *other* query too: if the pathspec were wrong, the untracked list
     // below would be empty for the wrong reason. Both counts are read from the same tree.
-    let tracked = paths_from_nul_output(&git(
-        &root,
-        &["ls-files", "-z", "--", "src-tauri/tests/fixtures"],
-    ));
+    let tracked = paths_from_nul_output(&git(&root, &["ls-files", "-z", "--", FIXTURES_PATHSPEC]));
     assert!(
         tracked.len() >= FIXTURE_FLOOR,
         "git reported only {} tracked files under tests/fixtures/, expected at least \
@@ -135,6 +202,9 @@ fn the_fixture_tree_holds_no_untracked_files() {
          vacuously",
         tracked.len()
     );
+
+    // Prove the query works before trusting an empty answer from it.
+    the_untracked_query_sees_a_planted_file(&root, FIXTURES_PATHSPEC);
 
     let untracked = paths_from_nul_output(&git(
         &root,
@@ -144,7 +214,7 @@ fn the_fixture_tree_holds_no_untracked_files() {
             "--exclude-standard",
             "-z",
             "--",
-            "src-tauri/tests/fixtures",
+            FIXTURES_PATHSPEC,
         ],
     ));
 
