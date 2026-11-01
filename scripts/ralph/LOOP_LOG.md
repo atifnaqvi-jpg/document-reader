@@ -1114,7 +1114,7 @@ open defect: the Windows suite crashes intermittently*.
   clippy clean, tsc clean, vitest 69 passed (both shapes, both counts — one count is not a gate).
   The old pins were 520/610; the +6 is **measured**, not incremented, and all four carriers moved
   in the same commit.
-- Commit: (this commit)
+- Commit: see `git log` (this entry is in the commit it describes).
 - Learned:
   - **The fixture topology, measured.** Line 1 at `Tf 24` Helvetica is `ALPHA ` 3557 + `BETA`
     2612 + kern −120 = 6289 thousandths = **150.936 pt**. At x=72 it ends at 222.936, leaving
