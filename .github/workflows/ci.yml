@@ -112,13 +112,16 @@ jobs:
           # (`the_kern_term_carries_the_horizontal_scale`) builds its text state by hand and needs
           # no library, so it moves `passed` and is counted below.
           #
-          # Measured at 90, not 89: R-1a's `a_kerned_prefix_includes_the_kern` compares the
-          # reflow's reported tail origin against rendered ink, so it needs PDFium too.
           # The other tests case (a) brought -- the `Td`-offset arithmetic and the R1/R4/R5/R6
           # refusals -- assert over `measure` and synthesized runs, need no library, and are
           # counted in `passed` below.
-          if [ "$ignored" -ne 91 ]; then
-            echo "::error::$ignored tests ignored; 91 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          #
+          # Measured at 92, not 91: R-4's `a_wider_replacement_moves_the_rest_of_the_line_and_nothing_else`
+          # compares three runs' positions against PDFium's per-glyph ink before and after a save,
+          # which is the row's oracle by design, so it cannot run here either. It moves this pin
+          # and leaves the Linux floor alone.
+          if [ "$ignored" -ne 92 ]; then
+            echo "::error::$ignored tests ignored; 92 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV

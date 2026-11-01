@@ -1208,3 +1208,60 @@ open defect: the Windows suite crashes intermittently*.
     in a row where fmt-first was load-bearing.
   - Next startable: **R-4** (row A10's guard — the move itself), then **R-5**. R-4 no longer has
     T-8 as a predecessor. **T-8b** and **R-H2** remain open and are not blocking R-4.
+
+## Iteration 26 — 2026-11-01 — R-4 (row A10's move guard) — green
+
+- Task: R-4 — write row A10's move assertions against R-3's committed fixture, so the row's
+  "the rest of the line moves and nothing else" half exists as a test rather than a contract.
+- Test: `a_wider_replacement_moves_the_rest_of_the_line_and_nothing_else` (red before: **yes** —
+  transplanted onto `b260966` in a throwaway worktree it failed with "the write reports its tail
+  at 184.056; the reader puts it at 186.936", short by exactly the 2.880 pt seam kern that R-1a
+  later added to the prefix).
+- Files: `src-tauri/src/editor/reflow.rs` (the test, 199 lines, plus `afm::text_width` for the two
+  measured widths), `docs/P2.8-reflow-DESIGN.md` (status line, §0.1 acceptance row, §6.1 test
+  cell, a new R-4 paragraph in §6.2), `.github/workflows/ci.yml` (ignored pin 91→92 plus the
+  comment recording why), `src-tauri/tests/ci_workflow.rs` (the `ne 92` assertion and its
+  explanation), `scripts/ralph/{gate.sh,PROMPT.md,IMPLEMENTATION_PLAN.md,LOOP_LOG.md}`.
+- Gate: cargo test **527 passed / 92 ignored**, AND `--include-ignored` **619 passed / 0
+  ignored**, clippy clean (`-D warnings`), tsc clean, vitest **69 passed**, `cargo fmt --check`
+  clean. Both shapes measured with `--no-fail-fast` and libtest's totals summed. The +1 is
+  **measured, not incremented**: the new test is `#[ignore]`d (it reads PDFium ink), so plain
+  `passed` is unchanged at 527 while `ignored` 91→92 and `--include-ignored` 618→619.
+- Commit: see `git log` (this entry is in the commit it describes).
+- Learned:
+  - **The fixture's line origin cannot be read from a glyph.** The first draft derived the
+    expected tail position from `at(ink, 'A', 700.0)`, and it failed at 160.248 against 162.912
+    because `A` occurs twice on the fixture (`ALPHA ` and `BETA`'s `A`) — `at` correctly refuses
+    to guess, but the *expectation* had picked the wrong one. The fix is to take the line origin
+    from the reader (`target.origin.0`) and assert `L`'s own offset from it, which is the number
+    that cannot be ambiguous.
+  - **The replacement must not contain letters the tail carries.** `ALPHABET ` would put a
+    second `B`, `E` and `T` on the page, and an ink oracle that looks a character up then reads
+    whichever it finds. `ALPHAab ` keeps every tracked glyph unique.
+  - **Three mutations, guarded file each time, each a pair.** (1) `tail_pen` from `old_width`
+    instead of `new_width` → CAUGHT. (2) The `escape_literal(replacement)` write deleted (the
+    `if let` arm became `let _ = &bytes`) → CAUGHT, failing on the read-back assertion with
+    `["ALPHA ", "BETA", "WXYZ"]`. (3) The splice range widened by one (`..op_index + 2`) so the
+    write drops the operator after the array → CAUGHT, and it reported itself usefully as "got
+    `('W', 249.6, 700.0)`" — the untouched line had been dragged onto line 1. `git diff --stat`
+    named `src-tauri/src/editor/reflow.rs` in all three runs; restoring returned green each time.
+  - **The mutation harness refused my first invocation, correctly.** `scripts/mutate.sh` prepends
+    `cargo test --release`; passing `--manifest-path src-tauri/Cargo.toml` *and* `--lib` made the
+    invocation malformed and it exited 3 (`no_summary`). The right form is `--lib -- <pattern>`,
+    as iteration 25 recorded for `--test`. This is the second iteration in a row where a
+    `cargo`-argument mistake looked like a measurement.
+  - **The pin guard lives in `the_linux_job_does_not_force_pdfium_tests_without_a_library`, not
+    `the_windows_job_asks_for_ignored_tests_and_counts_them`.** Mutating `ci.yml`'s `-ne 92` and
+    running the *Windows* guard reported SURVIVED — a real coverage finding about my own aim,
+    not about the guard. Re-running the Linux guard with the same mutant was CAUGHT, and so was
+    the upward mutant (`-ne 93`), so the pin is direction-free as an equality should be.
+  - **The design doc's §6.1 test cell was a lie the citation guard could not see.** It read "to be
+    written with the guard (§5)" — a promise, not a citation, so `docs_citations.rs` passed.
+    Naming the test is what makes it checkable; the paragraph in §6.2 records the red-before
+    number and the three mutations so the next reader does not re-measure them.
+  - **Row A10 stays `Missing` and the phase stays `[!]`.** R-5 (the refusal half) is not written,
+    R-6 has no caller in the edit path, R-7 is forbidden without a confirmed installer (Q7/Q9).
+    This iteration moves one row and closes nothing.
+  - Next startable: **R-5** (the near-edge refusal, `fits-width`, stream byte-unchanged), then
+    **R-6** (wire `reflow_tj_array` into the edit path). **T-8b** and **R-H2** remain open and
+    block neither.

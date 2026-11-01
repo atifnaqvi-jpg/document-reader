@@ -312,15 +312,15 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
     );
     assert!(
-        tests_step.contains("ignored") && tests_step.contains("ne 91"),
+        tests_step.contains("ignored") && tests_step.contains("ne 92"),
         "the Linux job must assert exactly the 90 known machine-dependent tests: 76 from before
          the Form XObject walk, the three PDFium-side walk tests it added, the two that compose
          the picker path (font search; describe/edit/save/re-open), two from P2.7.7's Type0
          writer (row6a renders pixels, row6c reads the program's hmtx; row6b is not ignored),
          four from P2.8's expectation reader, which needs PDFium's character grid by design,
          two from P2.8 case (a)'s reflow writes, whose oracle is per-glyph ink for the same
-         reason, and one from R-1a's kerned prefix, which compares a reported tail origin
-         against that same ink"
+         reason, one from R-1a's kerned prefix, which compares a reported tail origin against
+         that same ink, and one from R-4, which compares three runs' positions against it"
     );
 }
 

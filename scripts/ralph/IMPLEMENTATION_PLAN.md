@@ -693,7 +693,7 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       **Partly exists — must be shown RED.** The committed-fixture guard exists (`X4`); the
       clause naming this fixture does not.
 
-- [ ] **R-4 Row A10's guard: the move itself.** Write the A10 assertions against R-3's fixture.
+- [x] **R-4 Row A10's guard: the move itself.** Write the A10 assertions against R-3's fixture.
       Acceptance test first: `a_wider_replacement_moves_the_rest_of_the_line_and_nothing_else`.
       **NEW ASSERTION:** after a write of a *wider* replacement, every run on the edited line has
       moved by exactly the measured width of the replacement, every run on every other line has
@@ -703,6 +703,25 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       nothing about growth, nothing about the run's extracted text, and nothing about the
       measured-width relation. This is the entry the plan's A10 row is actually waiting on.
       **Partly exists — must be shown RED against `9471313`/`b260966`.**
+      **Done 2026-11-01.** The guard edits `ALPHA ` to `ALPHAab ` on `reflow-line.pdf` and asserts
+      four properties on PDFium's per-glyph ink: the head of the line did not move, the tail
+      moved by exactly the measured growth, the other line did not move, and the edited run
+      reads back as the requested string with its tail's `origin.0` equal to `moved_to` **and**
+      to `line origin + new width + kern` (R10.3's three-way relation, asserted separately).
+      The untouched-line half is stated twice — once in ink and once over every run's
+      `page_origin` on the reloaded document — so a tail glyph that happened to land right
+      cannot stand in for the whole line.
+      **RED confirmed** by transplanting the test onto `b260966` in a throwaway worktree: it
+      failed with `the write reports its tail at 184.056; the reader puts it at 186.936`, short
+      by the 2.880 pt seam kern that R-1a later put into the prefix. Three mutations of the
+      guarded file were each CAUGHT via `scripts/mutate.sh --lib` and each restored green:
+      `old_width` for `new_width` in the tail offset, the replacement text not written, and the
+      splice taking one operator too many.
+      **The replacement avoids `B`/`E`/`T` on purpose** — widening into letters the tail already
+      carries duplicates the tracked glyph and an ink oracle then reads the wrong one. Counts
+      moved 91→92 ignored and 618→619 `--include-ignored`, plain `passed` unchanged at 527;
+      **measured, not incremented**, across all four pin carriers.
+      Row A10 stays `Missing`: R-5 is not written and Q9 needs a confirmed installer.
 
 - [ ] **R-5 Row A10's refusal case.** Same fixture, near-edge variant.
       Acceptance test first: `a_replacement_too_wide_for_the_content_box_refuses_and_writes_nothing`.

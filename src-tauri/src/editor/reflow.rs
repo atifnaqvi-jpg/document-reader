@@ -1329,6 +1329,205 @@ pub enum SomethingElse {
         assert_eq!(refused.rule.name(), "R1-no-move");
     }
 
+    /// Row A10's guard, on the fixture R-3 committed for it.
+    ///
+    /// `kerned-line.pdf`'s guard above asserts the arithmetic of one move. This asserts the
+    /// row's whole contract on a document whose second line exists: the run before the edit
+    /// point does not move, the tail moves by exactly the measured growth, every glyph on the
+    /// untouched line keeps its origin, and the edited run reads back as the requested string
+    /// after a save.
+    ///
+    /// The replacement is `ALPHAab ` rather than `ALPHABET ` for the reason the neighbouring
+    /// test records: widening into letters the tail already carries (`B`, `E`, `T`) puts a
+    /// second copy of the tracked glyph on the page, and an ink oracle that looks a character up
+    /// then silently reads the wrong one. `a` and `b` appear nowhere in the fixture, and the
+    /// glyph this test tracks for "did the front of the line move" is `L`, of which the head
+    /// holds exactly one before and after.
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn a_wider_replacement_moves_the_rest_of_the_line_and_nothing_else() {
+        const LINE_Y: f32 = 700.0;
+        const OTHER_Y: f32 = 640.0;
+        /// The content box's right edge: the row's `fits-width` limit (design §4 R3).
+        const LIMIT_X: f32 = 612.0;
+        const SIZE: f32 = 24.0;
+
+        let width = |text: &str| {
+            crate::editor::afm::text_width("Helvetica", text, SIZE)
+                .unwrap_or_else(|| panic!("Helvetica covers {text:?}"))
+        };
+
+        let source = fixture("reflow-line.pdf");
+        let mut document = Document::load(&source).expect("the A10 fixture is committed");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+        let target = runs
+            .iter()
+            .find(|run| run.text == "ALPHA ")
+            .expect("the A10 fixture's edited run");
+        assert!(
+            runs.iter().any(|run| run.text == "BETA"),
+            "the fixture lost its tail: {:?}",
+            runs.iter().map(|run| run.text.as_str()).collect::<Vec<_>>()
+        );
+
+        let old_width = width("ALPHA ");
+        let new_width = width("ALPHAab ");
+        let growth = new_width - old_width;
+        assert!(
+            growth > 0.0,
+            "the replacement must be wider, or R1 refuses and there is nothing to move"
+        );
+        assert!(
+            (target.advance - old_width).abs() < 1e-3,
+            "the reader measures `ALPHA ` at {}; the AFM sum is {old_width}",
+            target.advance
+        );
+
+        let before = ink(&source);
+        // The line origin, from the reader rather than from a glyph: `A` occurs twice in the
+        // fixture (`ALPHA ` and `BETA`'s neighbour line), so an ink lookup by character cannot
+        // name it uniquely.
+        let line_origin = target.origin.0;
+        let l_before = at(&before, 'L', LINE_Y);
+        let b_before = at(&before, 'B', LINE_Y);
+        let w_before = at(&before, 'W', OTHER_Y);
+
+        assert!(
+            (l_before - (line_origin + width("A"))).abs() < 0.05,
+            "`L` drew at {l_before:.3}; the head's own advances put it at {:.3}",
+            line_origin + width("A")
+        );
+        // Precondition: the tail must be the `-120` kern's position, or a fixture that lost its
+        // seam would make (2) below agree with a wrong expectation.
+        let kern = 120.0 / 1000.0 * SIZE;
+        assert!(
+            (b_before - (line_origin + old_width + kern)).abs() < 0.05,
+            "the fixture's tail is not where the seam puts it: `B` drew at {b_before:.3}, \
+             expected {:.3}",
+            line_origin + old_width + kern
+        );
+
+        let (content, applied) =
+            reflow_tj_array(&document, 0, page, &runs, &target.id, "ALPHAab ", LIMIT_X)
+                .expect("a wider replacement that fits its line is case (a)");
+        assert!(
+            (applied.shift - growth).abs() < 0.01,
+            "the write reports a shift of {}; the measured growth is {growth}",
+            applied.shift
+        );
+
+        write_level(&mut document, page, &[], &content).expect("write page");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let edited = directory.path().join("reflow-line-edited.pdf");
+        document.save(&edited).expect("save");
+
+        let after = ink(&edited);
+
+        // (1) The text before the edit point did not move. A guard that only looked at the tail
+        // would pass on a write that shifted the whole line.
+        let l_after = at(&after, 'L', LINE_Y);
+        assert!(
+            (l_after - l_before).abs() < 0.05,
+            "the head of the line moved {:.3} pt; nothing before the edit point may move",
+            l_after - l_before
+        );
+
+        // (2) Every run after the edit point moved by exactly the measured growth.
+        let b_after = at(&after, 'B', LINE_Y);
+        assert!(
+            (b_after - (b_before + growth)).abs() < 0.05,
+            "the tail's ink moved {:.3} pt; the measured growth is {growth}",
+            b_after - b_before
+        );
+
+        // (3) Nothing on the other line moved.
+        let w_after = at(&after, 'W', OTHER_Y);
+        assert!(
+            (w_after - w_before).abs() < 0.05,
+            "the untouched line moved {:.3} pt",
+            w_after - w_before
+        );
+
+        // (3b) The same statement in run terms, over **every** run on the page, so a tail glyph
+        // that happened to land right cannot stand in for the whole line. The fixture has two
+        // runs on the edited baseline and one elsewhere, and all three are named.
+        let reloaded = Document::load(&edited).expect("the edited file loads");
+        let edited_page = page_id(&reloaded, 0).expect("page 0");
+        let described = locate_runs(&reloaded, edited_page).expect("runs");
+        let origin_after = |text: &str| -> f32 {
+            let found: Vec<f32> = described
+                .iter()
+                .filter(|run| run.text == text)
+                .map(|run| run.page_origin.0)
+                .collect();
+            assert_eq!(
+                found.len(),
+                1,
+                "expected exactly one {text:?} after the write"
+            );
+            found[0]
+        };
+        assert!(
+            (origin_after("ALPHAab ") - target.page_origin.0).abs() < 0.05,
+            "the edited run's origin is {} after the write; it began at {}",
+            origin_after("ALPHAab "),
+            target.page_origin.0
+        );
+        let tail_before = runs
+            .iter()
+            .find(|run| run.text == "BETA")
+            .expect("the tail before the edit")
+            .page_origin
+            .0;
+        assert!(
+            (origin_after("BETA") - (tail_before + growth)).abs() < 0.05,
+            "the tail's run origin is {} after the write; {tail_before} + {growth} is {}",
+            origin_after("BETA"),
+            tail_before + growth
+        );
+        let wxyz_before = runs
+            .iter()
+            .find(|run| run.text == "WXYZ")
+            .expect("the untouched line before the edit")
+            .page_origin
+            .0;
+        assert!(
+            (origin_after("WXYZ") - wxyz_before).abs() < 0.05,
+            "the untouched line's run origin moved from {wxyz_before} to {}",
+            origin_after("WXYZ")
+        );
+
+        // (4) The edited run reads back as the requested string, and the tail's reported origin
+        // agrees with the position the record names — `moved_to` includes the kern (R10.3),
+        // which is also where the reader puts the tail.
+        let texts: Vec<&str> = described.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            texts.contains(&"ALPHAab "),
+            "the edited run does not read back as `ALPHAab `: {texts:?}"
+        );
+        assert!(
+            !texts.contains(&"ALPHA "),
+            "the old text survived the write: {texts:?}"
+        );
+        let tail = described
+            .iter()
+            .find(|run| run.text == "BETA")
+            .expect("the tail survived the write");
+        assert!(
+            (tail.origin.0 - applied.moved_to).abs() < 0.05,
+            "the write reports its tail at {:.3}; the reader puts it at {:.3}",
+            applied.moved_to,
+            tail.origin.0
+        );
+        assert!(
+            (tail.origin.0 - (line_origin + new_width + kern)).abs() < 0.05,
+            "the tail's text-space origin is {:.3}; the measured prefix puts it at {:.3}",
+            tail.origin.0,
+            line_origin + new_width + kern
+        );
+    }
+
     #[test]
     fn a_replacement_past_the_limit_refuses_under_r4() {
         let source = fixture("kerned-line.pdf");
