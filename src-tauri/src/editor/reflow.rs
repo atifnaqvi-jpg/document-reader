@@ -668,6 +668,253 @@ mod tests {
         );
     }
 
+    /// R5 must refuse **real content**, not only a run pair built in a test.
+    ///
+    /// `xobject-single.pdf` draws only `/X1 Do`, so before this fixture no committed document
+    /// put page text and form text on one baseline: R5 was proven synthetically, against
+    /// [`synthetic`] runs. A `locate_runs` that reported the two levels at different baselines
+    /// would have left the gate unreachable on every real file while its unit test stayed green
+    /// — and the *message* the user reads had no assertion at all, only `name()`.
+    #[test]
+    fn r5_reports_its_own_message_and_refuses_real_content() {
+        let source = fixture("page-and-form-one-line.pdf");
+        let document = Document::load(&source).expect("the R5 fixture is committed");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+
+        assert_eq!(runs.len(), 2, "one page run, one form run: {runs:?}");
+        let page_run = runs.iter().find(|run| run.text == "PAGE").expect("PAGE");
+        let form_run = runs.iter().find(|run| run.text == "FORM").expect("FORM");
+
+        // Preconditions: a fixture that lost either level, or drew them on different
+        // baselines, cannot fail below and would pass vacuously.
+        assert!(
+            page_run.id.xobject_path.is_empty(),
+            "PAGE must be drawn by the page itself: {:?}",
+            page_run.id.xobject_path
+        );
+        assert_eq!(
+            form_run.id.xobject_path.len(),
+            1,
+            "FORM must be drawn inside the form"
+        );
+        assert!(
+            (page_run.baseline() - form_run.baseline()).abs() < 1e-3,
+            "the two levels must share a baseline, or nothing straddles it: {} vs {}",
+            page_run.baseline(),
+            form_run.baseline()
+        );
+        assert!(
+            page_run.origin.0 < form_run.origin.0,
+            "the page text must start left of the form's, so a level-blind line origin is \
+             observably too small: {} vs {}",
+            page_run.origin.0,
+            form_run.origin.0
+        );
+
+        let refused = reflow_tj_array(&document, 0, page, &runs, &form_run.id, "FORMER", 1000.0)
+            .expect_err("page text and form text on one baseline cannot be moved as one line");
+        assert_eq!(refused.rule, ReflowRefusal::R5StraddlesLevels);
+        assert_eq!(refused.rule.name(), "R5-straddles-levels");
+        assert_eq!(
+            refused.rule.message(),
+            "this line mixes page text with text inside a form, so its runs cannot be moved as \
+             one line",
+            "the sentence the user reads is part of the refusal, not decoration"
+        );
+        assert!(
+            refused.to_string().contains("R5-straddles-levels"),
+            "Display must name the rule, so a log is attributable: {refused}"
+        );
+    }
+
+    /// Every refusal's user-visible text is pinned, and the pin cannot go stale.
+    ///
+    /// `name()` and `message()` are two exhaustive `match`es, so a new variant is *forced* to
+    /// gain both — but nothing forced the table below to gain it, and a message that changes
+    /// silently is a user-visible change with no test to notice. So the variant list is read
+    /// from this file's own `enum` body: a variant added there and absent here fails the guard,
+    /// which is the direction a hand-maintained list alone cannot cover.
+    #[test]
+    fn every_reflow_refusal_names_itself_and_its_remedy() {
+        const PINNED: [(ReflowRefusal, &str, &str); 7] = [
+            (
+                ReflowRefusal::R1NoMove,
+                "R1-no-move",
+                "this replacement is not wider than the text it replaces, so nothing after it \
+                 needs to move",
+            ),
+            (
+                ReflowRefusal::R4Wrap,
+                "R4-wrap",
+                "this replacement does not fit on its line, and reflow does not wrap text onto \
+                 the next line",
+            ),
+            (
+                ReflowRefusal::R5StraddlesLevels,
+                "R5-straddles-levels",
+                "this line mixes page text with text inside a form, so its runs cannot be moved \
+                 as one line",
+            ),
+            (
+                ReflowRefusal::R6NonUniformTransform,
+                "R6-non-uniform-transform",
+                "this text is drawn through a non-uniform transform, so the rest of its line is \
+                 not horizontal",
+            ),
+            (
+                ReflowRefusal::R8bScopeLeftOfLine,
+                "R8b-scope-left-of-line",
+                "text from another tagged or structure unit lies to the left of this line, so \
+                 the rest of the line cannot be moved as one",
+            ),
+            (
+                ReflowRefusal::R10bUnattributedPrefix,
+                "R10b-unattributed-kern",
+                "another run on this line is positioned outside this TJ array, so reflow cannot \
+                 tell where the rest of the line starts",
+            ),
+            (
+                ReflowRefusal::NotOneArray,
+                "not-one-array",
+                "this text has no following run in the same TJ array, which is the only shape \
+                 reflow can currently move",
+            ),
+        ];
+
+        let declared = declared_variants(include_str!("reflow.rs"));
+        assert!(
+            declared.len() >= 7,
+            "the enum body parsed to {declared:?}; the guard is blind to its own source"
+        );
+        let pinned: Vec<String> = PINNED
+            .iter()
+            .map(|(rule, _, _)| format!("{rule:?}"))
+            .collect();
+        let mut unpinned: Vec<&String> = declared.iter().filter(|v| !pinned.contains(v)).collect();
+        let mut unknown: Vec<&String> = pinned.iter().filter(|v| !declared.contains(v)).collect();
+        unpinned.sort();
+        unknown.sort();
+        assert!(
+            unpinned.is_empty() && unknown.is_empty(),
+            "the pinned table and the enum disagree — a variant with no pinned message is \
+             unasserted, and a pin with no variant is stale. Declared but unpinned: {unpinned:?}; \
+             pinned but not declared: {unknown:?}"
+        );
+
+        for (rule, name, message) in PINNED {
+            assert_eq!(rule.name(), name, "{rule:?} reports the wrong identifier");
+            assert_eq!(
+                rule.message(),
+                message,
+                "{rule:?} reports the wrong message"
+            );
+        }
+
+        let names: std::collections::BTreeSet<&str> = PINNED.iter().map(|(_, n, _)| *n).collect();
+        let messages: std::collections::BTreeSet<&str> =
+            PINNED.iter().map(|(_, _, m)| *m).collect();
+        assert_eq!(
+            names.len(),
+            PINNED.len(),
+            "two refusals share an identifier"
+        );
+        assert_eq!(
+            messages.len(),
+            PINNED.len(),
+            "two refusals share a message, so the remedy named would be the wrong one"
+        );
+    }
+
+    /// The variant list is read out of source text, so the reader itself needs a crafted sample:
+    /// a parser that silently returned "nothing found" would make
+    /// [`every_reflow_refusal_names_itself_and_its_remedy`] pass on an empty set, which is the
+    /// vacuous-guard failure this repository has produced twice.
+    ///
+    /// The sample carries every shape a variant can take in this file's style — a doc comment
+    /// above a variant, a plain code comment, a `#[serde]` attribute, a one-line struct variant
+    /// and a **multi-line** one — plus a second `enum` after it, so a split that ran past the
+    /// closing brace would be visible.
+    #[test]
+    fn the_variant_reader_sees_its_own_source_and_not_a_neighbouring_enum() {
+        const SAMPLE: &str = "\
+pub enum ReflowRefusal {
+    /// A doc comment, which is not a variant.
+    First,
+    // A plain code comment, also not a variant.
+    #[serde(rename = \"second\")]
+    Second { field: u8 },
+    Third {
+        width: f32,
+    },
+    Fourth,
+}
+
+pub enum SomethingElse {
+    NotAVariant,
+}
+";
+        assert_eq!(
+            declared_variants(SAMPLE),
+            vec!["First", "Second", "Third", "Fourth"],
+            "the reader must skip comments and attributes, join a multi-line variant body, and \
+             stop at the closing brace"
+        );
+        assert_eq!(
+            declared_variants(include_str!("reflow.rs")),
+            vec![
+                "R1NoMove",
+                "R4Wrap",
+                "R5StraddlesLevels",
+                "R6NonUniformTransform",
+                "R8bScopeLeftOfLine",
+                "R10bUnattributedPrefix",
+                "NotOneArray",
+            ],
+            "the guard must see exactly the seven declared variants, in source order"
+        );
+    }
+
+    /// The variant names in a `pub enum ReflowRefusal { … }` body, in source order.
+    ///
+    /// Brace depth is tracked rather than assumed, so a variant written with a body across
+    /// several lines is still one entry: a line-based reader would report the *fields* as
+    /// variants and the variant itself as nothing, which is a silently shorter list.
+    fn declared_variants(source: &str) -> Vec<String> {
+        let body = source
+            .split("pub enum ReflowRefusal {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("the guard must find the enum body it governs");
+
+        let mut names = Vec::new();
+        let mut pending = String::new();
+        let mut depth = 0usize;
+        for line in body.lines() {
+            let line = line.trim();
+            if depth == 0 && (line.starts_with("//") || line.starts_with("#[")) {
+                continue;
+            }
+            pending.push(' ');
+            pending.push_str(line);
+            depth += line.matches('{').count();
+            depth = depth.saturating_sub(line.matches('}').count());
+            if depth > 0 || !line.ends_with(',') {
+                continue;
+            }
+            let declaration = pending.trim().trim_end_matches(',').trim();
+            let name: String = declaration
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric())
+                .collect();
+            if !name.is_empty() {
+                names.push(name);
+            }
+            pending.clear();
+        }
+        names
+    }
+
     /// R8b: a same-baseline run in another tagged unit must not set the line origin, and where it
     /// lies to the left of the target's own line start the move is refused rather than measured.
     ///

@@ -135,8 +135,13 @@ jobs:
           # Measured at 513, not 511: R-2b's two guards (511 -> 513) also parse the committed
           # fixture rather than opening a document through PDFium, so they move this floor and
           # leave the ignored count at 90.
-          if [ "$passed" -lt 513 ]; then
-            echo "::error::only $passed tests ran; 513 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # Measured at 516, not 513: R-2c added three guards (513 -> 516) -- R5's message and
+          # its real-content refusal, the every-variant message table, and the crafted sample
+          # that proves that table's source reader can see a defect. All three read a committed
+          # `.pdf`/`.rs` with `std::fs`, so none needs PDFium and the ignored count stays 90.
+          if [ "$passed" -lt 516 ]; then
+            echo "::error::only $passed tests ran; 516 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

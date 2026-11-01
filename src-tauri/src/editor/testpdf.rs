@@ -877,6 +877,39 @@ pub fn xobject_interleaved() -> Document {
     )
 }
 
+/// `page-and-form-one-line.pdf`: page text and form text on **one baseline**, the page's run
+/// starting further left.
+///
+/// R5 refuses a line that straddles content levels, and until this fixture existed no committed
+/// document could reach it: `xobject-single.pdf` draws only `/X1 Do`, so the gate was proven
+/// against a run pair synthesized in a test. A `locate_runs` that reported the two levels at
+/// different baselines would have left the gate unreachable on every real file while its unit
+/// test stayed green.
+///
+/// Geometry at `Tf 24` in Helvetica: `PAGE` at x=72 on the page, `FORM` at x=200 inside `/X1`,
+/// both on baseline 700. The page run is left of the form's, so a level-blind line origin is
+/// observably too small rather than merely different.
+pub fn page_and_form_one_line() -> Document {
+    xobject_document(
+        vec![(
+            "X1".into(),
+            vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                Operation::new("Td", vec![200.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal("FORM")]),
+                Operation::new("ET", vec![]),
+            ],
+            FormResources::Own(Vec::new()),
+        )],
+        vec![{
+            let mut operations = text_at("PAGE", 700.0);
+            operations.extend(draw_form("X1"));
+            operations
+        }],
+    )
+}
+
 /// `xobject-two-pages.pdf`: `/X1` drawn on page 1 and page 2, with both pages sharing one
 /// indirect `/Resources` object.
 ///

@@ -813,3 +813,59 @@ when `ink_y` is reverted to `run.origin.1`.
     rather than fixed here, because adding a gate step is its own task with its own guard.
   - Next startable: **R-2c** (pin R5's message, give R5 a real-content fixture). It now also owns
     R8b's message, which this iteration deliberately left unasserted — the task text says so.
+
+## Iteration 19 — 2026-11-01 — R-2c (pin R5's message; give R5 real content) — green
+
+- Task: R-2c — assert the exact sentence a user reads for R5 (and pin every other refusal's
+  identifier and message with it), and commit a fixture where page text and form text share one
+  baseline so R5 fires through `locate_runs` rather than only on runs built in a test.
+- Test: `r5_reports_its_own_message_and_refuses_real_content` (red before: **yes** — the fixture
+  did not exist, `Document::load` reported `NotFound` at the load line, so the test failed for
+  the missing fixture rather than for the assertion it is about). Two supporting guards:
+  `every_reflow_refusal_names_itself_and_its_remedy` (pins all seven variants) and
+  `the_variant_reader_sees_its_own_source_and_not_a_neighbouring_enum` (crafted sample, as the
+  parser-helper rule requires).
+- Files: `src-tauri/src/editor/reflow.rs`, `src-tauri/src/editor/testpdf.rs`,
+  `src-tauri/examples/make_p24_fixtures.rs`,
+  `src-tauri/tests/fixtures/page-and-form-one-line.pdf` (new, 788 bytes),
+  `docs/P2.8-reflow-DESIGN.md` (§7 item 3), `.github/workflows/ci.yml`,
+  `src-tauri/tests/ci_workflow.rs`, `scripts/ralph/{gate.sh,PROMPT.md,IMPLEMENTATION_PLAN.md,LOOP_LOG.md}`.
+- Gate: cargo test **516 passed / 90 ignored**, AND `--include-ignored` **606 passed / 0 ignored**,
+  clippy clean (0 warnings), tsc clean, vitest **69 passed**, `cargo fmt --check` clean. Both
+  counts moved by exactly three and were **measured, not incremented**: 513→516 and 603→606,
+  `ignored` unchanged at 90, because all three new guards read a committed `.pdf`/`.rs` with
+  `std::fs` and none opens a document through PDFium. The `-lt 513` floor in `ci.yml`, its mirror
+  in `tests/ci_workflow.rs` and both ralph pins were updated in the same commit; the floor
+  mutation (`516`→`517` in `ci.yml`) failed the mirror guard and restoring `516` passed.
+- Commit: see `git log` (this entry is in the commit it describes).
+- Learned:
+  - **A refusal's message was entirely unasserted, and `name()` looked like coverage.** Both are
+    exhaustive `match`es over the enum, so a new variant is *forced* to supply both — but nothing
+    forced a *test* to exist, so rewording a sentence a user reads was a silent change. The pin
+    now reads the variant list out of the module's own `enum` body via `include_str!`, so the
+    hand-maintained table cannot go stale in the direction that matters: an eighth variant added
+    to the enum and forgotten in the table fails the guard.
+  - **The source reader needed its own crafted sample, and the first draft was a rehearsal.**
+    A trim-and-`strip_suffix(',')` line reader "handled" a struct variant only because the sample
+    was written on one line; given a body across three lines it would report the *fields* as
+    variants. Rewritten to track brace depth, and the sample now carries a multi-line struct
+    variant, an attribute, both comment kinds and a second `enum` after the block.
+  - **Mutation discipline, four times, each in the guarded file and each a pair (red, then
+    restored green):** (1) append `(MUTANT)` to R5's `message()` arm → CAUGHT; (2) add an eighth
+    variant `MutantProbe` with both match arms → CAUGHT by the table, which is the stale-table
+    direction; (3) `if false &&` in front of the straddle check → CAUGHT, so the gate itself is
+    what the test measures and not just its message; (4) rewrite the fixture's `200 700 Td` to
+    `200 600 Td` → CAUGHT, failing at the baseline precondition with `700 vs 600`. The fixture
+    mutation was verified to have landed (`cmp -l` shows one differing offset, length unchanged
+    at 788), and the harness only accepted it once the new file was `git add -N`'d: an untracked
+    file is "unmodified relative to HEAD" to `git diff`, so the run was correctly refused as a
+    MEASUREMENT ERROR first. That refusal is the harness working, not a bug.
+  - **Deleting a fixture is not a harness-testable mutation.** `MUTATE_RUNTIME_READ` on a
+    nonexistent path exits 4 by design; the missing-fixture failure was measured with a direct
+    `cargo test` instead, and what it proved is only that the test cannot pass vacuously — the
+    preconditions inside the test are what catch an off-baseline or single-level fixture.
+  - `scripts/ralph/gate.sh` refuses to run while it has uncommitted changes (the pins must be the
+    committed ones), so the pin edits have to be committed before the gate is invoked. Run the
+    five non-pin steps first, commit, then the gate.
+  - Next startable: **R-H1** (assert the fixture tree holds no untracked files), then **R-3**
+    (the A10 fixture) and **R-4** (row A10's guard).

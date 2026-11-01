@@ -189,6 +189,13 @@ fn main() {
             "xobject-single.pdf",
             testpdf::bytes(&testpdf::xobject_single()),
         ),
+        // P2.8 R5: page text and form text on one baseline. Without it R5 is reachable only
+        // through runs synthesized in a test, so no committed file proves the gate can fire on
+        // real content.
+        (
+            "page-and-form-one-line.pdf",
+            testpdf::bytes(&testpdf::page_and_form_one_line()),
+        ),
         (
             "xobject-two-draws.pdf",
             testpdf::bytes(&testpdf::xobject_two_draws()),

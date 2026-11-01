@@ -27,8 +27,8 @@ previous iterations**; everything you need is in the files named below. Read the
 
    ```
    cd src-tauri && cargo fmt --check
-   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 513 passed, 90 ignored
-   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 603 passed, 0 ignored
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 516 passed, 90 ignored
+   cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 606 passed, 0 ignored
    cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo clippy --all-targets
    npx tsc --noEmit
    npx vitest run
