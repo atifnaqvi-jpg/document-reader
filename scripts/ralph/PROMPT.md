@@ -21,17 +21,23 @@ previous iterations**; everything you need is in the files named below. Read the
    Run it and confirm it fails for the right reason. If it cannot be written yet, say why and
    stop — do not proceed on tests that already pass.
 3. Implement the smallest change that makes it pass. No drive-by refactors.
-4. Run the full gate. All five commands must pass, and the two `cargo test` shapes are
+4. Run the full gate. All six commands must pass, and the two `cargo test` shapes are
    **separate** — running only the first one silently skips the 90 PDFium-backed ink tests,
    which are the only tests that compare the renderer to the ink:
 
    ```
+   cd src-tauri && cargo fmt --check
    cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test                          # 513 passed, 90 ignored
    cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo test -- --include-ignored     # 603 passed, 0 ignored
    cd src-tauri && PDFIUM_LIBRARY_PATH=$PWD/resources/libpdfium.so cargo clippy --all-targets
    npx tsc --noEmit
    npx vitest run
    ```
+
+   `cargo fmt --check` is first because it is the cheapest and because CI runs it as its own
+   step: 714f2a9 passed this gate and failed CI on formatting alone, which is what a gate that
+   is a subset of CI produces. `scripts/ralph/gate.sh` runs the same six commands; if the two
+   ever disagree, the agent and the loop are checking different things.
 
    The counts are **pins**. If either moves, stop and report it as a count change, not as a
    green suite — a test that stopped running is not a test that passes.

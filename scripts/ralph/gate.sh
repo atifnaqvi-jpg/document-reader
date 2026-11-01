@@ -81,6 +81,13 @@ status=0
 assert_shape "plain" "$PIN_PLAIN_PASSED" "$PIN_PLAIN_IGNORED" || status=1
 assert_shape "--include-ignored" "$PIN_IGNORED_PASSED" "$PIN_IGNORED_IGNORED" -- --include-ignored || status=1
 
+# Before clippy, and before anything that compiles for minutes. CI runs this as its own step,
+# and until iteration 18 the gate did not run it at all: 714f2a9 passed the gate and failed CI
+# on Format alone, so "gate green" never implied "CI green". rustfmt is fast enough that there
+# is no reason to order it late.
+log "gate: cargo fmt --check"
+( cd src-tauri && cargo fmt --check ) || status=1
+
 log "gate: cargo clippy"
 ( cd src-tauri && PDFIUM_LIBRARY_PATH="$PWD/resources/libpdfium.so" cargo clippy --all-targets ) || status=1
 
