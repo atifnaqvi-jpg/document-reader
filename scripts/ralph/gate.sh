@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The Ralph gate. Runs both `cargo test` shapes, clippy, tsc and vitest, and asserts the two
-# test-count pins.
+# The Ralph gate. Runs fmt, both `cargo test` shapes, clippy, tsc and vitest, and asserts the
+# two test-count pins.
 #
 # This is a separate process on purpose. It used to be a function inside loop.sh, which meant
 # bash parsed the pins once when the loop started and then reused them for every iteration.
