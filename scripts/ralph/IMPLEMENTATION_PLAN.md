@@ -567,6 +567,45 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       the test, confirm it fails naming that path, then delete it and confirm green. A second
       mutation renames the stray to `sample-99.pdf`, confirms the gitignore backstop hides it, and
       records that the test is not a substitute for staging by explicit path.
+      **Implemented and mutation-proven on 2026-11-01 (iteration 20), but NOT committed: the
+      gate went red during the iteration for a reason outside this task.** See **R-H3**. The
+      test is `src-tauri/tests/fixture_tree.rs` (`the_fixture_tree_holds_no_untracked_files` plus
+      `the_untracked_reader_splits_on_nul_and_not_on_newlines`); both were run, both mutations
+      were run and restored, and the file was reverted rather than committed because the prompt
+      forbids committing a red gate. It is re-applied unchanged once R-H3 is ruled.
+
+- [!] **R-H3 The carriers are stale now that `v0.9.0` is tagged — needs a ruling.** **Discovered
+      2026-11-01 (iteration 20), pre-existing and unrelated to that iteration's task.**
+      `the_tree_version_is_ahead_of_every_published_tag` (`src-tauri/tests/release_version.rs:178`)
+      **fails at `94d2d34` on a clean worktree**, so the local gate has been red since `v0.9.0`
+      was created on `6caaedd` at 04:26 today. It is not a defect in the guard: the guard is
+      doing exactly what `05a257f` built it for. The tree carries 30 commits past `v0.9.0`, all
+      six carriers still say **0.9.0**, and HEAD is not the tagged commit, so `0.9.0 > 0.9.0` is
+      false. Measured, both shapes, `--no-fail-fast`: plain **515 passed / 90 ignored / 1
+      failed**, `--include-ignored` **605 passed / 0 ignored / 1 failed** — exactly the pinned
+      516/90 and 606/0 minus the one guard.
+      **Why this is `[!]` and not a fix.** Every available number is spoken for or forbidden:
+      **1.0.0** is P2.8's and may not land before a confirmed installer (Q7, R-7, and this
+      loop's standing instruction); **0.9.0** is taken by the tag; **0.9.1** is a *development*
+      version, not a phase's, and taking it decides the cadence question **A-6**
+      (`docs/P2.7-REVIEW-OPEN-QUESTIONS.md:29`), which is marked **Open** while Q7 rules only
+      the per-phase mapping. It would also need a `## 0.9.1` section in
+      `docs/RELEASE-NOTES.md`, and that section must carry the "rust 1.90 minimum" and "rust
+      1.91 verified" lines `the_release_notes_name_the_toolchain_the_build_was_verified_on`
+      demands — i.e. it would state that a build nobody has run was verified, which is the
+      class of claim this whole guard set exists to stop.
+      **What the ruling has to decide:** whether an in-flight phase carries a patch bump
+      (`0.9.1`, with a release-notes section written as *unverified*), whether the carriers
+      hold the last released number until the phase's own bump (`0.9.0`, which requires
+      relaxing the guard for an untagged tree between a tag and the next phase bump), or
+      something else. Do not answer it here.
+      **Scope check, done rather than assumed:** CI is **not** red. `ci.yml` uses bare
+      `actions/checkout@v4`, which fetches no tags; reproduced in a shallow clone of this repo,
+      `git tag --list` returned **0** and the guard's `git tag --list v*` finds nothing and
+      skips. The failure is local-only, which is why it went unnoticed — the tag was created at
+      04:26:26, commit `324c131` landed 14 seconds before it, and the two commits after it
+      (`03e231d`, `94d2d34`) are docs-only — and why the local gate and CI now disagree in the
+      direction that matters (local red, CI green).
 
 - [ ] **R-G1 Assert the gate's command list against `ci.yml`.** **New work discovered
       2026-11-01.** `scripts/ralph/gate.sh` and `.github/workflows/ci.yml` are two hand-kept
