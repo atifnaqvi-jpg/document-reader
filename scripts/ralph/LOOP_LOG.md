@@ -5,6 +5,31 @@ most recent iteration last.
 
 ---
 
+## Note — 2026-11-01 — the loop had no push step through iteration 17
+
+Recorded as a note rather than edited into the iteration entries above, because those entries
+are what each iteration actually observed and rewriting them would make the log agree with a
+later understanding instead of with the run.
+
+Through iteration 17 `loop.sh` never pushed. It compared `HEAD` before and after the agent,
+ran the gate, checked that `LOOP_LOG.md` was non-empty, and stopped. Publication was the
+agent's problem and the agent has no push step either, so every iteration's commit stayed
+local until a human pushed it.
+
+Two commits were therefore pushed by hand, not by the loop:
+
+- `4abd4ba` — iteration 16 (R-1b). The loop reported a false red on correct, already-committed
+  work (stale pins: bash had parsed 509/599 before the agent's commit moved them to 510/600)
+  and exited 1. Pushed during the diagnosis of that defect.
+- `714f2a9` — iteration 17 (R-2a). The loop exited 0, but still had no push step. Pushed by
+  hand after the run.
+
+A red iteration stranded its commit, and a green one did not publish it either. `loop.sh` now
+pushes the agent's commit itself, before the gate, so a red iteration leaves a pushed commit
+with a red CI run rather than an invisible local one.
+
+---
+
 ## Iteration 0 — setup — green
 
 - Task: harness + ruled-answer doc updates

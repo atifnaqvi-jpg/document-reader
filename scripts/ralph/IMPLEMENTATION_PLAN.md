@@ -516,6 +516,36 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       rather than through synthesized runs. R-2a's fixture cannot serve: it differs in
       `merge_scope`, while R5 fires on `xobject_path` — different term, different refusal.
 
+- [ ] **R-H1 Assert the fixture tree holds no untracked files.** **New work discovered
+      2026-11-01.** `750f5fb` committed 36 test-generated copies because `git add -A` swept them
+      in, and nothing noticed for two commits: the concurrency tests create them with
+      `std::fs::copy` beside a real fixture, they are byte-identical to an input, and their
+      cleanup is `let _ = std::fs::remove_file(...)` on success paths only, so a panicking run
+      leaves them and the suite still reports green. `.gitignore` covers two known prefixes, which
+      is a backstop for two names, not a guarantee. No test enumerates `tests/fixtures/`; the
+      `read_dir` calls in `ci_workflow.rs`, `docs_citations.rs` and `font_bundle.rs` walk `src/`,
+      `docs/` and the font directory respectively.
+      Acceptance test first: `the_fixture_tree_holds_no_untracked_files`.
+      **NEW ASSERTION:** that every regular file under `tests/fixtures/` is reported by
+      `git ls-files --error-unmatch`, and that the enumeration saw at least the committed fixture
+      count, so an empty or unreadable directory cannot pass vacuously.
+      **Form — a Rust test in `src-tauri/tests/`, not a shell step.** The suite already shells out
+      to `git` (`the_font_payload_is_not_gitignored` runs `git check-ignore`, `release_version.rs` runs
+      `git tag`), so there is a precedent and no new dependency. A gate step would be the wrong
+      place: the gate asserts counts and build health, while this is a property of the working
+      tree that must fail the same way locally, in CI, and in any editor's test run. Keeping it in
+      the suite also means it is subject to the same mutation discipline as every other guard.
+      **Dirty-tree behaviour — the deliberate part.** The test must ignore *modified* tracked
+      files and flag only *untracked* ones (`git ls-files --others --exclude-standard`), because
+      mid-iteration a legitimately edited tracked file is normal and must not fail the gate. The
+      hazard is specifically a file that git does not know about, which is what a stray copy is.
+      Stating it the other way round would make the test fire on every iteration.
+      **Mutation that proves it:** copy `tests/fixtures/kerned-line.pdf` to
+      `tests/fixtures/kerned-line-stray.pdf` while *not* matching either gitignored prefix, run
+      the test, confirm it fails naming that path, then delete it and confirm green. A second
+      mutation renames the stray to `sample-99.pdf`, confirms the gitignore backstop hides it, and
+      records that the test is not a substitute for staging by explicit path.
+
 - [ ] **R-3 The A10 fixture.** `two_run_line()` cannot carry A10 (§6.2: no second line, no `TJ`
       seam, nothing near the content box). Add a builder beside `too_wide_page()` in
       `testpdf.rs`, wired into `make_p24_fixtures.rs` with one line.

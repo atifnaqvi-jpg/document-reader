@@ -51,6 +51,36 @@ run_gate() {
   scripts/ralph/gate.sh
 }
 
+# Publish the iteration's commit before the gate runs, not after it. A red iteration must leave
+# a pushed commit with a red CI run rather than a commit stranded on this machine: a stranded
+# commit is invisible, unattributable, and dies with the workspace, and the next iteration then
+# builds on an un-gated base so every later green is green on unverified history. Pushing first
+# makes origin the durable record of what the loop did, including what it got wrong.
+#
+# Pushing after the gate was rejected for exactly that compounding reason. Not pushing at all
+# and printing "NOT PUSHED" was rejected because it keeps a human as the transport, which is
+# the mechanism that stranded two commits in one session.
+#
+# A branch with no upstream is not silently skipped: the loop cannot publish, and pretending
+# otherwise is the failure this function exists to remove.
+push_commit() {
+  local sha="$1"
+
+  if ! git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+    fail "commit $sha has no upstream branch — cannot publish it; set one with \
+git push --set-upstream origin <branch>"
+    return 1
+  fi
+
+  log "pushing $sha"
+  if ! git push --quiet; then
+    fail "git push failed for $sha — the commit is local only"
+    return 1
+  fi
+  log "pushed $sha"
+  return 0
+}
+
 # Refuse to start on a dirty tree: an iteration must build on a committed base, otherwise a
 # failed iteration is indistinguishable from the previous one's leftovers.
 if [ -n "$(git status --porcelain)" ] && [ "${RALPH_ALLOW_DIRTY:-0}" != "1" ]; then
@@ -82,14 +112,6 @@ for iteration in $(seq 1 "$MAX_ITERATIONS"); do
     fi
   fi
 
-  if run_gate; then
-    log "gate green"
-  else
-    fail "gate red after iteration $iteration"
-    log "leaving the tree as-is for inspection; not proceeding"
-    exit 1
-  fi
-
   if [ ! -s scripts/ralph/LOOP_LOG.md ]; then
     fail "LOOP_LOG.md is empty — the iteration did not record itself"
     exit 1
@@ -108,7 +130,21 @@ for iteration in $(seq 1 "$MAX_ITERATIONS"); do
     log "no commit since $start_sha; stopping (nothing was completed)"
     exit 0
   fi
+
+  # Before the gate, deliberately. See push_commit.
+  if ! push_commit "$new_sha"; then
+    log "leaving the tree as-is for inspection; not proceeding"
+    exit 1
+  fi
   start_sha="$new_sha"
+
+  if run_gate; then
+    log "gate green"
+  else
+    fail "gate red after iteration $iteration (commit $new_sha is pushed; CI will mark it)"
+    log "leaving the tree as-is for inspection; not proceeding"
+    exit 1
+  fi
 
   # The durable record is the log heading; the agent also emits an ITERATION line in its
   # final message, but that only reaches run-iteration.sh's stdout, not this log.
