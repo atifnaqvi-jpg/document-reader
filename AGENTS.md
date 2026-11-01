@@ -256,6 +256,32 @@ An early `return` from a skip arm (`if !pdfium_ready() { return; }`) is forbidde
 captures the stdout of a passing test, so the skip message never reaches the log and the suite
 reports `0 ignored` while having run nothing. `tests/ci_workflow.rs` fails on that shape.
 
+## Known open defect: the Windows suite crashes intermittently
+
+The `--include-ignored` Windows job aborts with
+`exit code: 0xc0000005, STATUS_ACCESS_VIOLATION`. Undiagnosed. Two timestamped reproductions:
+
+| Run | Commit | What it shows |
+|---|---|---|
+| `40908435884` attempt 1 | `3942c8c` | crashed after 354 of 393 tests; a **same-SHA re-run passed** |
+| `41278018858` | `94d2d34` | crashed on a **documentation-only** commit |
+
+**What the two reproductions rule out.** Anything code-dependent. `94d2d34` touches two
+markdown files and no source; no Rust in it compiled differently. The first reproduction
+passed on a re-run of the identical SHA, which rules out a deterministic defect in that tree.
+Together: the fault is not a property of the source at either commit, so it is not "the code I
+changed" and not "the tree is broken".
+
+**What remains possible.** Everything that varies between runs of the same bytes: teardown
+ordering between the PDFium handle cache and libtest's threads; a use-after-free whose
+manifestation depends on allocation timing; PDFium's own global initialisation not being
+thread-safe at exit; and the Windows job's `--include-ignored` running ~90 tests that the
+Linux job never runs, so it is the only place with that concurrency. Not narrowed further.
+
+**Do not silently retry.** A third reproduction is an escalation, not a re-run: two is a
+pattern, three is a defect with a shape worth instrumenting (which test, which thread, at what
+point in teardown). A re-run that passes tells you nothing about which of the four above it is.
+
 ## Gates
 
 `ci.yml` runs on **every branch**; do not reintroduce a `branches:` filter. The toolchain is

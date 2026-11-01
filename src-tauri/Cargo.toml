@@ -1,6 +1,6 @@
 [package]
 name = "document-reader"
-version = "0.9.0"
+version = "0.9.1"
 description = "Local-first personal library document reader"
 edition = "2021"
 rust-version = "1.90"

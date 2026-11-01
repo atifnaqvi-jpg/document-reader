@@ -7,6 +7,42 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 0.9.1
+
+**Development version. No build has been hand-run for this version, and none is published.**
+
+This section exists because the tree version must stay ahead of every published tag. `v0.9.0`
+points at `6caaedd`, and `the_tree_version_is_ahead_of_every_published_tag` requires the
+carriers to name something higher; leaving them at `0.9.0` made that guard unsatisfiable by
+construction for every commit after the tag.
+
+- The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+- Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
+  and `release-windows.yml`; `cargo fmt --version` on the verifying box reported
+  `rustfmt 1.8.0-stable (f8297e351a 2025-10-28)`.
+
+There is no changelog beyond those two facts, because nothing has shipped under this number.
+The next section below is the last release.
+
+### The Windows suite crash: two reproductions, neither from this branch
+
+`94d2d34` is a **documentation-only** commit — it edits `docs/RELEASE-NOTES.md` and
+`docs/P2.7.6-embed-DESIGN.md` and no source file — and CI run `41278018858` failed on it at
+Windows step 10 (*Assert the PDFium tests actually ran*) with
+`process didn't exit successfully ... (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)`.
+
+`324c131` passed the same job twenty minutes earlier. There are now two timestamped
+reproductions:
+
+| Run | Commit | Outcome |
+|---|---|---|
+| `40908435884` attempt 1 | `3942c8c` | aborted `STATUS_ACCESS_VIOLATION` after 354 of 393 tests; a same-SHA re-run passed |
+| `41278018858` | `94d2d34` | `STATUS_ACCESS_VIOLATION` on a documentation-only change |
+
+**This is not caused by any code in this branch.** A docs-only commit cannot introduce a
+memory fault, and the first reproduction already passed on a re-run of the identical SHA.
+It is the known intermittent teardown fault, still undiagnosed. No fix is attempted here.
+
 ## 0.9.0
 
 Closing **P2.7.6** — font embedding (MECH-B), plus the A7 skew fix found while freezing it.

@@ -870,6 +870,30 @@ when `ink_y` is reverted to `run.origin.1`.
   - Next startable: **R-H1** (assert the fixture tree holds no untracked files), then **R-3**
     (the A10 fixture) and **R-4** (row A10's guard).
 
+## Note — 2026-11-01 — the branch carried a red CI from `94d2d34`, and it was not this loop's
+
+Recorded because the loop treats CI health as a precondition, and that reading was wrong.
+
+`94d2d34` is a **documentation-only** commit: `docs/RELEASE-NOTES.md` and
+`docs/P2.7.6-embed-DESIGN.md`, no source file. Its CI run `41278018858` failed at Windows
+step 10 (*Assert the PDFium tests actually ran*) with `exit code: 0xc0000005,
+STATUS_ACCESS_VIOLATION`. `324c131` passed the same job twenty minutes earlier.
+
+That is now **two timestamped reproductions** — `40908435884` attempt 1 (`3942c8c`, aborted
+after 354 of 393 tests; a same-SHA re-run passed) and `41278018858` — of the known
+intermittent teardown fault. It is **not caused by any code in this branch**: a docs-only
+commit cannot introduce a memory fault, and the earlier reproduction passed on a re-run of
+identical bytes. No fix is attempted here.
+
+Consequence for the loop: **a red Windows job is not by itself evidence that an iteration's
+code is bad.** The local gate cannot see this fault at all — this box has no Windows and no
+`--include-ignored` on the MSVC target — so the loop will happily pass a commit that CI then
+fails on this. Distinguishing the two means reading the failing step: `STATUS_ACCESS_VIOLATION`
+at step 10 is this defect; any other red belongs to the iteration. See `AGENTS.md`, *Known
+open defect: the Windows suite crashes intermittently*.
+
+---
+
 ## Iteration 20 — 2026-11-01 — R-H1 (no untracked fixture files) — **blocked**
 
 - Task: R-H1 — assert that nothing lives under `src-tauri/tests/fixtures/` that git does not
