@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The Ralph gate. Runs fmt, both `cargo test` shapes, clippy, tsc and vitest, and asserts the
-# two test-count pins.
+# The Ralph gate. Runs fmt, both `cargo test` shapes, clippy with warnings denied, tsc and
+# vitest, and asserts the two test-count pins.
 #
 # This is a separate process on purpose. It used to be a function inside loop.sh, which meant
 # bash parsed the pins once when the loop started and then reused them for every iteration.
@@ -89,7 +89,7 @@ log "gate: cargo fmt --check"
 ( cd src-tauri && cargo fmt --check ) || status=1
 
 log "gate: cargo clippy"
-( cd src-tauri && PDFIUM_LIBRARY_PATH="$PWD/resources/libpdfium.so" cargo clippy --all-targets ) || status=1
+( cd src-tauri && PDFIUM_LIBRARY_PATH="$PWD/resources/libpdfium.so" cargo clippy --all-targets -- -D warnings ) || status=1
 
 log "gate: tsc"
 npx tsc --noEmit || status=1

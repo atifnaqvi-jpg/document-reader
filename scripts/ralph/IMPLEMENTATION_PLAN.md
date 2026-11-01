@@ -568,6 +568,38 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       mutation renames the stray to `sample-99.pdf`, confirms the gitignore backstop hides it, and
       records that the test is not a substitute for staging by explicit path.
 
+- [ ] **R-G1 Assert the gate's command list against `ci.yml`.** **New work discovered
+      2026-11-01.** `scripts/ralph/gate.sh` and `.github/workflows/ci.yml` are two hand-kept
+      lists of the same checks. They have already drifted twice: fmt was in CI and absent from
+      the gate until `144f65c` (so `714f2a9` passed the gate and failed CI), and clippy ran
+      without `-D warnings` in the gate until this commit, which is the same failure in a
+      smaller size — a warning passes locally and fails CI. Nothing detects the next drift.
+      Acceptance test first: `the_gate_runs_the_checks_ci_requires`.
+      **NEW ASSERTION:** that every `run:` command under `ci.yml`'s `rust` and `frontend` jobs
+      appears in `gate.sh`, matched on the command text after collapsing whitespace, and that
+      the set is non-empty so a parse failure cannot pass vacuously.
+      **Is that comparison meaningful?** Not as a literal string match, for three measured
+      reasons. (i) The two jobs run on different platforms with different setups — CI needs
+      `apt-get install libwebkit2gtk-4.1-dev …` before anything compiles; the gate runs on a
+      machine where those are already installed, and replicating the install would be wrong,
+      not missing. (ii) Some CI steps have no local analogue at all: `cargo check --target
+      x86_64-pc-windows-msvc`, `scripts/fetch-pdfium.ps1`, and the three PDFium-on-Windows
+      tests cannot run on this aarch64 box, and `--include-ignored` here uses a different
+      library that CI is explicitly told never to fetch. (iii) CI's `Tests` step is a shell
+      script with count floors embedded, not a command the gate could contain; the gate
+      expresses the same intent as two pinned shapes.
+      **What is worth asserting instead, weaker but real:** a *declared* correspondence rather
+      than a discovered one. Each check the gate does not run is listed in `gate.sh` with the
+      reason it is out of scope (platform, or fetched binary), and the test asserts that every
+      `ci.yml` `run:` line is either present in `gate.sh` or named in that exemption list. A
+      new CI step then fails the test until someone decides which it is, which is the property
+      that matters: the drift becomes a decision instead of an omission. The parse is over
+      `ci.yml`'s step names and `run:` bodies only — asserting anything about *behaviour*
+      equivalence between the two is not possible from text.
+      **Not to be fixed here:** `npm ci` and `npm run build` stay missing from the gate. They
+      belong to the frontend install/build path and are out of scope for this phase; this task
+      records them as exemptions when it lands, it does not add them.
+
 - [ ] **R-3 The A10 fixture.** `two_run_line()` cannot carry A10 (§6.2: no second line, no `TJ`
       seam, nothing near the content box). Add a builder beside `too_wide_page()` in
       `testpdf.rs`, wired into `make_p24_fixtures.rs` with one line.
