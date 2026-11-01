@@ -19,11 +19,20 @@ against the commit they were actually about.
   not of the tagged commit. At `6caaedd` all four checks are green: *Rust (fmt, clippy, test)*,
   *Frontend (typecheck, test, build)*, *Windows compile check + render smoke*, and *Build
   Windows installer* (run `41154631220`).
-- Condition 2 said the installer "from that tagged run" must be hand-confirmed. A tag run
-  publishes as well as builds, so the condition could never be met without publishing. The
-  resolution kept the *commit* boundary: the installer built from `6caaedd` by dispatch run
-  `41154631220` (artifact `13024068656`, 10,321,346 bytes) is the one a human confirmed, and
-  the tag points at the commit that produced it. This is 0.8.1's provenance rule, applied.
+- Condition 2 said the installer "from that tagged run" must be hand-confirmed. That is
+  unsatisfiable by construction, not merely stale: a tag run *publishes*, so the condition
+  demanded confirmation of a build that does not exist until the release is already public,
+  and the publish cannot be taken back if the confirmation then fails. The criterion is
+  corrected here in both documents, and this is the order 1.0.0 must follow:
+
+  1. **Build only.** `workflow_dispatch` on the release commit publishes nothing; it uploads
+     the installer as a workflow artifact.
+  2. **A human hand-confirms that artifact.**
+  3. **Only then tag.** The tag run republishes the same tree; its asset may differ from the
+     hand-tested one by the embedded NSIS build timestamp and by nothing else.
+
+  This is what 0.9.0 did: dispatch `41154631220` (artifact `13024068656`, 10,321,346 bytes) was
+  built from `6caaedd` and hand-confirmed, and `v0.9.0` was created on `6caaedd` afterwards.
 
 **What that means in plain terms:** the installer you can download from this release is built
 from exactly the source the tag points at. It is *not* the `dd8efce` installer described under
@@ -50,7 +59,11 @@ cannot set.** Measured on the tree at `6caaedd` (the tagged commit), which is 12
   covers an uncovered glyph; the claim that `漢` is a permanent gap rather than a retry was
   never encoded as a test. Stated here as a design intent, not a measurement.
 
-Type0/CID fonts are **not** embedded by this version. That is P2.7.7, which landed after it.
+Type0/CID fonts **are** embedded by this version. P2.7.7 landed in `dcffa91` and `da360fc`,
+both ancestors of `6caaedd` (`git merge-base --is-ancestor`), and `6caaedd` routes a CID run to
+the CID writer before MECH-A can claim it. See *What 0.9.0 does not include* below, where this
+same question is answered; an earlier revision of this paragraph said the opposite and
+contradicted that section in the same file.
 
 ### The A7 skew half, found after 0.8.1 shipped
 
@@ -145,10 +158,9 @@ green here.
 | Tag run (published) | `41273111581` |
 | Release asset | `Document.Reader_0.9.0_x64-setup.exe`, 10,340,606 bytes, asset `697368174` |
 
-The published asset and the hand-tested artifact are **not byte-identical** (10,340,606 vs
-10,321,346) because both are NSIS builds of the same commit and the installer embeds a build
-timestamp. They are built from the same tree, which is what the provenance rule requires; this
-table exists so that a size difference is not later read as a different source.
+The published asset differs from the hand-tested artifact only by the embedded NSIS build
+timestamp (10,340,606 vs 10,321,346 bytes, same tree at `6caaedd`) -- the table exists so that a
+size difference is not later read as a different source.
 
 The `--include-ignored` suite ran with PDFium on this commit in both runs, and the tag run
 reached step 10 *Assert the PDFium tests actually ran* successfully.
