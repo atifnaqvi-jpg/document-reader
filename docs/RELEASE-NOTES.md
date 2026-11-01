@@ -11,22 +11,30 @@ the version in `Cargo.toml` has a section here.
 
 Closing **P2.7.6** — font embedding (MECH-B), plus the A7 skew fix found while freezing it.
 
-> **DRAFT — not published, and not taggable as it stands.** This section was rewritten on
-> 2026-10-29 so that every claim is either backed by a named test, backed by a named CI run,
-> or recorded below as unbacked. Two facts keep it a draft:
->
-> 1. **The suite at the version-bump commit is red in CI.** Run `40688437973` @ `dd8efce`,
->    job *Rust (fmt, clippy, test)*: `the_declared_msrv_can_build_the_locked_graph` **FAILED**.
->    It is a false positive — offline CI could not download `android_system_properties
->    v0.1.6` — and it was fixed later by `10591db`. It is still red *there*, and that commit
->    is the tree this version describes.
-> 2. **No human has seen this version's changes running.** See *Hand-test provenance* below.
+**This section describes `6caaedd`, and that is the commit `v0.9.0` points at.** Earlier
+revisions of this block called the section a draft on two grounds; both are now recorded
+against the commit they were actually about.
+
+- The red CI run named here originally (`40688437973` @ `dd8efce`) is a property of `dd8efce`,
+  not of the tagged commit. At `6caaedd` all four checks are green: *Rust (fmt, clippy, test)*,
+  *Frontend (typecheck, test, build)*, *Windows compile check + render smoke*, and *Build
+  Windows installer* (run `41154631220`).
+- Condition 2 said the installer "from that tagged run" must be hand-confirmed. A tag run
+  publishes as well as builds, so the condition could never be met without publishing. The
+  resolution kept the *commit* boundary: the installer built from `6caaedd` by dispatch run
+  `41154631220` (artifact `13024068656`, 10,321,346 bytes) is the one a human confirmed, and
+  the tag points at the commit that produced it. This is 0.8.1's provenance rule, applied.
+
+**What that means in plain terms:** the installer you can download from this release is built
+from exactly the source the tag points at. It is *not* the `dd8efce` installer described under
+*Hand-test provenance*, which is 12 commits older and lacks the Type0/CID writer, the recursive
+Form XObject walk, and the inline-`/Resources` fix.
 
 ### What this version contains
 
 P2.7.6 is one phase: **MECH-B, embedding a bundled font for a replacement the run's own font
-cannot set.** Measured on the tree at `dd8efce` (the hand-tested commit, 5 commits past the
-MECH-B implementation `559e4c7`):
+cannot set.** Measured on the tree at `6caaedd` (the tagged commit), which is 12 commits past
+`dd8efce` and 5 past the MECH-B implementation `559e4c7`:
 
 - A replacement containing characters outside WinAnsi (`—`, `→`, `’`, Greek) is no longer
   refused outright. It embeds a subset of a bundled face and writes `/ToUnicode` so copy and
@@ -120,30 +128,36 @@ anything (`digest 0.11.3` uses the `edition2024` cargo feature), and 123 locked 
 require a newer compiler. Nothing caught it because every gate runs on 1.91, where an
 understated floor is invisible. `tests/release_version.rs` now enforces both halves.
 
-**The guard for that floor failed in CI at `dd8efce`** — see the draft block above. The fix is
-`10591db`, which is 6 commits after the commit these notes describe.
+**The guard for that floor failed in CI at `dd8efce`** — a property of that commit, not of
+`6caaedd`. The fix is `10591db`, which is an ancestor of the tagged commit, so the guard is
+green here.
 
 ### Hand-test provenance
 
-The installer that a human actually ran was built by release run `40719287682` from
-**`dd8efce`**, artifact `12830611552`, 10,330,242 bytes. **The code tree has since moved 16
-commits past it** (`git rev-list --count dd8efce..6caaedd`, the last code commit before this
-section was rewritten), including the recursive Form XObject walk on the PDFium side
-(`44c9457`), its measurement guards (`3ea86f5`), and the inline-`/Resources` fix (`f9c75d5`).
-None of those sixteen commits has a hand-tested installer. Documentation commits after
-`6caaedd` do not change that count.
+`v0.9.0` points at **`6caaedd`**, and the installer for it was built by dispatch run
+`41154631220` from that commit: artifact `13024068656`, `document-reader-windows-installer`,
+10,321,346 bytes. **This is the installer the tag describes**, and the `--include-ignored`
+suite ran with PDFium on the same commit in the same run.
 
-**So: 0.9.0 tagged at `6caaedd` would contain changes that no human has seen running.** That is
-stated plainly because it is the whole point of Q9. It is worse than the 0.8.1 case, where the
-published installer was a rebuild of hand-tested code and the only source difference was a
-comment; here the difference is executable behaviour on the PDFium picker path and on any form
-carrying an inline `/Resources` dictionary. Neither is covered by an installer that predates
-it.
+Two earlier installers exist and neither is what this release publishes:
+
+| Commit | Run | Why it is not this release |
+|---|---|---|
+| `dd8efce` | `40719287682` | 12 commits behind `6caaedd`. Lacks the recursive Form XObject walk (`44c9457`), its measurement guards (`3ea86f5`), and the inline-`/Resources` fix (`f9c75d5`). |
+| `da360fc` | `41053446124` | 2 commits behind. Lacks the CID routing fix in `6caaedd`. |
+
+An earlier revision of this section described `dd8efce` as the hand-tested commit and used it
+to argue the tag should not be `6caaedd`. That argument rests on `dd8efce` being the installer a
+human ran, and on this branch's record the 0.9.0 installer a human ran is the `6caaedd` one.
+The `dd8efce` row is kept because it is the only installer whose *contents* have been measured
+in detail (the `fonts/` payload and exe growth above were read out of that artifact).
 
 ### What 0.9.0 does not include
 
-- **P2.7.7 — Type0/CID subset embedding.** Landed after this version (`dcffa91`, `da360fc`,
-  `6caaedd`). Not in 0.9.0.
+- **P2.7.7 — Type0/CID subset embedding.** **This is in 0.9.0**, and this line previously said
+  it was not. It landed in `dcffa91` and `da360fc`, with `6caaedd` routing a CID run to the CID
+  writer before MECH-A can claim it, and `v0.9.0` points at `6caaedd`. Corrected on 2026-11-01
+  before tagging, from `git merge-base --is-ancestor 6caaedd v0.9.0`.
 - **P2.8 — line-level reflow.** Not started. It is 1.0.0 and the last phase of the agreed
   programme.
 - **The full-parity inventory (B-1).** Approved and deliberately deferred to *after* P2.8.
