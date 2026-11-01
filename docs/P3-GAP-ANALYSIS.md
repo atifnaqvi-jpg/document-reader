@@ -29,10 +29,17 @@ against the tree, the tag list, or the test files on 2026-11-01.
   count). Guards cover the CI itself, the docs citations, the fixture tree, and
   the release-version carriers.
 - **Open ledger (small):** page **insert** is missing and `pages::merge` is dead
-  code (B1b); dead helper `text_without_rise()` has zero callers (T1); U-3 (the
-  page-operation leg of multi-level undo) is tracked in the parity plan; the
-  Windows CI teardown crash (`STATUS_ACCESS_VIOLATION`, intermittent,
-  same-SHA re-runs pass) remains undiagnosed and is not caused by the branch.
+  code (B1b); U-3 (the page-operation leg of multi-level undo) is tracked in the
+  parity plan; the Windows CI teardown crash (`STATUS_ACCESS_VIOLATION`) has two
+  timestamped reproductions (`40908435884` attempt 1, `41278018858` on a
+  documentation-only commit with `324c131` passing the same job twenty minutes
+  earlier) — together they rule out anything code-dependent; the cause remains
+  unidentified (record: AGENTS.md, `docs/RELEASE-NOTES.md` §0.9.1).
+- ~~Dead helper `text_without_rise()` has zero callers (T1).~~ **Closed.** Struck
+  2026-11-01 after the loop's challenge: `text_without_rise` was deleted in
+  `dcffa91`, shipped inside 0.9.0. It is the third time this item resurfaced as
+  outstanding after being done, so it is recorded retracted here rather than
+  carried forward again.
 
 ## 2. Charter (binding)
 
