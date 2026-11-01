@@ -1038,3 +1038,58 @@ open defect: the Windows suite crashes intermittently*.
   - Next startable: **R-3** (the A10 fixture) and then **R-4** (row A10's guard). T-8 is
     flagged in the plan as worth landing **before R-4 starts asserting positions**, because a
     reflow that moves a kern-positioned tail would inherit its 3 pt error at `Tz 50`.
+
+---
+
+## Iteration 22 — 2026-11-01 — R-G1 (gate/CI parity) — green
+
+- Task: R-G1 — assert that every `run:` command in `.github/workflows/ci.yml` is either executed
+  by `scripts/ralph/gate.sh` or named in it with a reason, so the next drift between the two is a
+  decision instead of an omission.
+- Test: `the_gate_runs_the_checks_ci_requires` (red before: **yes** — `gate.sh` had no exemption
+  block, so it failed at `parsed 0 exemptions … An unparsed block excuses nothing`, and before
+  that at the literal-match assertion in the same test). Supporting guard
+  `the_parity_check_reports_what_it_is_given`, which feeds the parser a clean sample and four
+  defect shapes and requires a finding for each.
+- Files: `src-tauri/tests/gate_parity.rs` (new, two tests), `scripts/ralph/gate.sh` (the
+  `>>> ci-exemptions` block, 10 entries), `.github/workflows/ci.yml`, `src-tauri/tests/ci_workflow.rs`,
+  `scripts/ralph/{PROMPT.md,IMPLEMENTATION_PLAN.md,LOOP_LOG.md}`.
+- Gate: cargo test **520 passed / 90 ignored**, AND `--include-ignored` **610 passed / 0 ignored**,
+  clippy clean (`-D warnings`), tsc clean, vitest **69 passed**, `cargo fmt --check` clean. Both
+  counts moved by two and were **measured, not incremented**: 518→520 and 608→610, ignored
+  unchanged at 90. Both new guards read `ci.yml` and `gate.sh` with `std::fs` and need no PDFium.
+- Commit: see `git log` (this entry is in the commit it describes).
+- Learned:
+  - **The plan's acceptance test asked for a literal comparison, and the plan itself argued it
+    down in the same paragraph.** A literal match reports 10 failures on a correct tree, because
+    `sudo apt-get update`, `npm ci`, the pwsh fetch, `cargo check --target …-msvc` and the three
+    Windows PDFium steps have no local analogue. What landed is the *declared* correspondence the
+    plan named as "weaker but real", and the `windows-check` job was kept in the parse rather than
+    filtered out — its steps are precisely the ones an allow-list exists to record.
+  - **An allow-list entry can be made to satisfy its own excuse, so two cross-checks were added
+    that the plan did not ask for.** (1) An exemption naming a command `ci.yml` no longer holds
+    fails, so an excuse cannot outlive its step. (2) An exemption whose `covers:` command the gate
+    no longer runs fails, so deleting `npx tsc --noEmit` cannot hide behind the `npm run build`
+    entry. (3) No exemption may be a prefix of another, so `cargo test` as an entry cannot stand in
+    for `cargo test --test memory …`. Each has its own craft-sample arm.
+  - **Message lines had to be excluded from the "commands the gate runs" text.** `gate.sh` says
+    `log "gate: cargo fmt --check"` before every check. A `contains`-based comparison against the
+    whole file would let deleting the `cargo fmt --check` run leave the message behind and still
+    pass — the documented "a value that is still satisfied by the defect" shape. `gate_commands`
+    drops `log`/`fail`/`printf`/`echo`/`set` lines as well as comments.
+  - **Three mutations, all in the file the guard reads, all a pair (red, then restored green).**
+    (1) `( cd src-tauri && cargo fmt --check ) || status=1` deleted from `gate.sh` → CAUGHT via
+    `scripts/mutate.sh` with `MUTATE_RUNTIME_READ=scripts/ralph/gate.sh`, exit 0.
+    (2) A new step `run: cargo miri test` added to `ci.yml` → CAUGHT, exit 0, with
+    `MUTATE_RUNTIME_READ=.github/workflows/ci.yml`. (3) `npx tsc --noEmit || status=1` deleted from
+    `gate.sh` → CAUGHT, exit 0, which is the `covers:` cross-check firing rather than the step
+    comparison. `git diff --stat` named the guarded file in all three runs.
+  - **`gate.sh` refuses to run on a dirty pin file**, so the pin move has to be committed before
+    the gate is invoked (this is in iteration 20's entry as well and was true again here).
+  - **The `executed` floor is the measured value, not headroom.** Two CI commands are run literally
+    by the gate (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`); `cargo test` is
+    covered but written differently (`assert_shape` passes `cargo test "$@"`). A `>= 3` floor failed
+    against a correct tree, so it is `>= 2` with the number in the message.
+  - Next startable: **R-3** (the A10 fixture), then **R-4**. **T-8** is still worth landing before
+    R-4 asserts positions: a reflow that moves a kern-positioned tail inherits its 3 pt error at
+    `Tz 50`.

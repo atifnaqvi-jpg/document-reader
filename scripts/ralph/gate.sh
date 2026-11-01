@@ -18,6 +18,32 @@
 
 set -uo pipefail
 
+# Every `run:` command in .github/workflows/ci.yml is either executed below or declared here.
+# `tests/gate_parity.rs` asserts exactly that, so a new CI step fails the suite until someone
+# decides which it is. Without this block the two lists drift silently, which they have done
+# twice: fmt was in CI and absent from the gate until 144f65c, and clippy ran without
+# `-D warnings` until dfb8549. A gate that is a subset of CI reports green on a tree CI rejects.
+#
+# The block is a set of decisions, not a wildcard. Each entry is
+#   ci-exempt: <ci.yml command> ;; covers: <command run here, or `none`> ;; <reason>
+# and the test asserts three things about it: the named command still exists in ci.yml (an
+# excuse cannot outlive its step), the claimed `covers:` command is still run here (deleting a
+# check cannot hide behind an old excuse), and no entry is a prefix of another (which would let
+# one entry excuse a family of steps).
+#
+# >>> ci-exemptions -- parsed by src-tauri/tests/gate_parity.rs
+# ci-exempt: sudo apt-get update ;; covers: none ;; platform: CI installs Tauri's system libraries; this machine has them
+# ci-exempt: cargo test 2>&1 | tee /tmp/test-output.txt ;; covers: cargo test ;; the gate runs both shapes as pinned counts instead of CI's shell script of floors
+# ci-exempt: npm ci ;; covers: none ;; install path, not a check; node_modules is already present on this machine
+# ci-exempt: npm test ;; covers: npx vitest run ;; `npm test` is `vitest run`; the gate calls it directly
+# ci-exempt: npm run build ;; covers: npx tsc --noEmit ;; `build` is `tsc --noEmit && vite build`; the typecheck is the check, the bundle is not
+# ci-exempt: ./scripts/fetch-pdfium.ps1 ;; covers: none ;; pwsh fetches the Windows DLL; this machine loads resources/libpdfium.so
+# ci-exempt: cargo check --target x86_64-pc-windows-msvc ;; covers: none ;; Windows-only target; no toolchain for it here
+# ci-exempt: cargo test --test memory -- --include-ignored --nocapture ;; covers: cargo test "$@" ;; the gate's ignored shape runs the same target with the local library
+# ci-exempt: $output = cargo test --test embed_acceptance ;; covers: cargo test "$@" ;; same, one test, same library
+# ci-exempt: $output = cargo test -- --include-ignored ;; covers: cargo test "$@" ;; same suite, plus the assertion that nothing stayed ignored
+# <<< ci-exemptions
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
@@ -35,9 +61,9 @@ fi
 # Expected counts for each shape. These are pins, not observations: a count that moves must be
 # an explicit decision, because the failure they exist to catch is a test that stopped running
 # rather than a test that started failing.
-PIN_PLAIN_PASSED=518
+PIN_PLAIN_PASSED=520
 PIN_PLAIN_IGNORED=90
-PIN_IGNORED_PASSED=608
+PIN_IGNORED_PASSED=610
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

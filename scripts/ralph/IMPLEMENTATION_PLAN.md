@@ -624,7 +624,7 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       numbers. The guard is green again and **unchanged** -- the tree moved, not the invariant.
       Cadence question **A-6** stays Open for the next phase, but it no longer blocks the loop.
 
-- [ ] **R-G1 Assert the gate's command list against `ci.yml`.** **New work discovered
+- [x] **R-G1 Assert the gate's command list against `ci.yml`.** **New work discovered
       2026-11-01.** `scripts/ralph/gate.sh` and `.github/workflows/ci.yml` are two hand-kept
       lists of the same checks. They have already drifted twice: fmt was in CI and absent from
       the gate until `144f65c` (so `714f2a9` passed the gate and failed CI), and clippy ran
@@ -655,6 +655,18 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       **Not to be fixed here:** `npm ci` and `npm run build` stay missing from the gate. They
       belong to the frontend install/build path and are out of scope for this phase; this task
       records them as exemptions when it lands, it does not add them.
+      **Landed.** `src-tauri/tests/gate_parity.rs` (`the_gate_runs_the_checks_ci_requires`, plus
+      `the_parity_check_reports_what_it_is_given` for the parser) over a `>>> ci-exemptions` block
+      in `gate.sh` holding 10 entries. Every `run:` body in all three jobs is parsed; the
+      `windows-check` job's steps were kept rather than excluded, because they are the ones with
+      no local analogue and are exactly the entries an allow-list is for. Three assertions the
+      plan did not ask for: an exemption naming a command that no longer exists in `ci.yml`
+      fails (an excuse cannot outlive its step), an exemption whose `covers:` command is no
+      longer run by the gate fails (deleting a check cannot hide behind an old excuse), and no
+      exemption may be a prefix of another (an allow-list must name checks, not wildcards).
+      `fmt` and `clippy -D warnings` are additionally pinned by name and forbidden from being
+      exempted, so the two historical drifts cannot be re-blessed as decisions. The `executed`
+      floor is the measured value (2), not headroom.
 
 - [ ] **R-3 The A10 fixture.** `two_run_line()` cannot carry A10 (§6.2: no second line, no `TJ`
       seam, nothing near the content box). Add a builder beside `too_wide_page()` in

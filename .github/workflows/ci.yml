@@ -145,8 +145,13 @@ jobs:
           # scan and the crafted sample that proves its NUL reader can see a defect. Both call
           # `git` and `std::fs` on the working tree, so neither needs PDFium and the ignored
           # count stays 90.
-          if [ "$passed" -lt 518 ]; then
-            echo "::error::only $passed tests ran; 518 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # Measured at 520, not 518: R-G1 added two guards (518 -> 520) -- the gate/CI parity
+          # comparison and the crafted sample that proves its parser can see a defect. Both read
+          # `.github/workflows/ci.yml` and `scripts/ralph/gate.sh` with `std::fs`, so neither
+          # needs PDFium and the ignored count stays 90.
+          if [ "$passed" -lt 520 ]; then
+            echo "::error::only $passed tests ran; 520 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
