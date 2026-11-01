@@ -134,10 +134,24 @@ green here.
 
 ### Hand-test provenance
 
-`v0.9.0` points at **`6caaedd`**, and the installer for it was built by dispatch run
-`41154631220` from that commit: artifact `13024068656`, `document-reader-windows-installer`,
-10,321,346 bytes. **This is the installer the tag describes**, and the `--include-ignored`
-suite ran with PDFium on the same commit in the same run.
+`v0.9.0` points at **`6caaedd`**. The installer the tag publishes was built by the *tag* run,
+`41273111581`, from that commit; the dispatch run `41154631220` from the same commit
+(artifact `13024068656`) is the one hand-confirmed before tagging.
+
+| Fact | Value |
+|---|---|
+| Tag | `v0.9.0` → `6caaedd5e70080d1da65f52efc4d41103c7650f9` |
+| Dispatch run (hand-tested) | `41154631220`, artifact `13024068656`, 10,321,346 bytes |
+| Tag run (published) | `41273111581` |
+| Release asset | `Document.Reader_0.9.0_x64-setup.exe`, 10,340,606 bytes, asset `697368174` |
+
+The published asset and the hand-tested artifact are **not byte-identical** (10,340,606 vs
+10,321,346) because both are NSIS builds of the same commit and the installer embeds a build
+timestamp. They are built from the same tree, which is what the provenance rule requires; this
+table exists so that a size difference is not later read as a different source.
+
+The `--include-ignored` suite ran with PDFium on this commit in both runs, and the tag run
+reached step 10 *Assert the PDFium tests actually ran* successfully.
 
 Two earlier installers exist and neither is what this release publishes:
 
