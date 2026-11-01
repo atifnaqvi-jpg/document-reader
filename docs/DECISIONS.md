@@ -204,3 +204,39 @@ multi-tenant anything; macOS/Linux builds; highlights/annotations.
 
 *Frozen 2026-09-27. The Section 7 questions are CLOSED. Scaffold against this
 document; do not re-ask.*
+
+---
+
+## 9. Amendments (2026-11-01, user rulings — Acrobat parity programme)
+
+> These follow the P2-DESIGN precedent: they extend the frozen decisions; they do
+> not re-litigate them. Binding for all phases from P2.8 onward.
+
+1. **Charter reaffirmed — local-first.** No accounts, no server, no cloud, no
+   telemetry. Acrobat's cloud/collab surface (feature-extraction report §2.9:
+   IMS/NGL auth, Document Cloud, storage connectors, shared reviews, Adobe Sign,
+   comment sync) is **out of parity scope** and is not planned in any phase. The
+   only considered carve-out is a signed auto-update channel, and only if later
+   ruled.
+2. **R2 — OCR unfrozen (amends §8 and Q3).** OCR is an active requirement for
+   `docs/P3-PLAN.md` P3.5, implemented behind the existing `TextExtractor` trait
+   seam, on-device (tesseract), never a network call. The detect-and-surface
+   behaviour for image-only PDFs (search unavailable) keeps its current wording
+   until P3.5 lands.
+3. **R3 — digital signatures: offline mode ruled in, TSA mode out.** Signing and
+   verifying must complete with no network call; the document hash never leaves
+   the machine. RFC-3161 timestamping and AATL-equivalent trust services stay out
+   until separately ruled. Redaction, sanitize, and signatures carry correctness
+   obligations: named invariants up front, per the B-1 note in
+   `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`.
+4. **R4 — compress/optimize uses a bundled qpdf sidecar** (Apache-2.0) as an
+   out-of-process worker instead of a lopdf re-implementation. The P3.4 design
+   freezes the bundling and invocation shape before any code (stage gate).
+5. **R5 — rename to "docu PRO" immediately after 1.0.0.** Product name and bundle
+   identifier change together in one housekeeping phase. Accepted consequence, on
+   record: the identifier is the Windows upgrade identity, so existing hand-test
+   installs update by reinstall and both entries appear in Add/Remove —
+   deliberate, while the install base is hand-test machines only.
+
+Requirements source for the parity target: the Adobe feature/capability survey at
+`docs/reference/acrobat/acrobat-reader-feature-extraction-report.md`.

@@ -303,6 +303,19 @@ Six version carriers must agree (`tests/release_version.rs` enforces it), and
 Release tags publish as **pre-releases** until 1.0.0. The `prerelease: true` in
 `release-windows.yml` is guarded; flip it and the guard together when P2.8 ships.
 
+## Programme documents (read when planning past P2.8)
+
+- `docs/DECISIONS.md` §9 "Amendments (2026-11-01)" — charter reaffirmation plus the
+  user's rulings: OCR unfrozen (R2), offline-mode signatures (R3), qpdf sidecar for
+  compress (R4), rename to **docu PRO** after 1.0.0 (R5). Binding.
+- `docs/P3-GAP-ANALYSIS.md` — the full-parity inventory (B-1, produced 2026-11-01 at the
+  user's direction): what shipped, what diverges deliberately, what remains, per Acrobat
+  feature domain.
+- `docs/P3-PLAN.md` — the post-1.0.0 programme (P3.1…P3.6). Phases stay stage-gated:
+  freeze a design → sign-off → implement → gate. No P3 phase starts before 1.0.0 ships.
+- `docs/reference/acrobat/acrobat-reader-feature-extraction-report.md` — the parity
+  requirements source ([O]/[I]/[?]-marked); §-references in the P3 docs point here.
+
 ## Out-of-scope projects
 
 **No POS work.** A point-of-sale project is not in scope and never was. See
