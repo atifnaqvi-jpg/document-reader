@@ -928,8 +928,20 @@ when `ink_y` is reverted to `run.origin.1`.
   - **Not a substitute for the rule:** this guard cannot see a stray whose name matches the
     two ignored prefixes, and it cannot see an ignored tracked-adjacent file. `AGENTS.md`'s
     "never `git add -A`, stage by explicit path" remains the primary control.
-  - R-H1 should be re-applied verbatim once R-H3 is ruled; the two tests and the
-    `FIXTURE_FLOOR = 54` were measured against this tree (52 `.pdf` + `README.md` +
-    `sample.txt`) and will move by one if R-3 adds `kerned`-style fixtures before it lands.
-  - Next startable: **nothing** until R-H3 is ruled — R-H1 is written but uncommittable under a
-    red gate, and R-3/R-4 sit behind it in the plan's order.
+  - **R-H1's implementation was never committed and no copy of it survives.** An earlier
+    revision of this entry said the test was "written but uncommitted" and should be
+    "re-applied verbatim". That is false and is corrected here. `2ffeccd` touched only
+    `IMPLEMENTATION_PLAN.md` and `LOOP_LOG.md`; `FIXTURE_FLOOR` appears nowhere under
+    `src-tauri/src` or `src-tauri/tests` at that commit or at any commit on this branch, and
+    the working tree held no uncommitted Rust when the iteration ended. The test must be
+    **rewritten**, not re-applied. What survives is the design description above -- the
+    untracked-vs-modified distinction, the `--exclude-standard` limit, the 54-file floor
+    (52 `.pdf` + `README.md` + `sample.txt`) -- and the fact that its own floor assertions
+    caught two real defects while it existed.
+  - **R-H3 is filed for the version-invariant blocker**, not for R-H1. `v0.9.0` now points at
+    `6caaedd`, and `the_tree_version_is_ahead_of_every_published_tag` requires the carriers to
+    exceed the highest published tag; they say `0.9.0`, so the test fails on this branch by
+    construction. That red is a property of tagging without moving the tree version, not a
+    defect in R-H1.
+  - Next startable: **nothing** until R-H3 is ruled. R-H1 cannot be committed under a red gate
+    and will be rewritten once it is unblocked.
