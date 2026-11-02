@@ -2122,10 +2122,13 @@ fn ends_a_word(run: &RawRun, runs: &[RawRun]) -> bool {
     if run.text.ends_with(char::is_whitespace) || run.text.is_empty() {
         return true;
     }
-    // The next fragment of the same array, in content order. `reads_on_from_grid`-style seam
-    // measurement is unavailable here (no PDFium spans in this path), so the test is the one the
-    // merge rule itself would make from geometry: the next origin must be at least the run's own
-    // advance away, which is exactly one blank pen movement.
+    // The next fragment of the same array, in content order. There are no PDFium spans on this
+    // path, so the seam cannot be measured the way the merge rule measures it (which knows
+    // whether the reader reconstructed a space at the boundary). The **wider** window is used
+    // instead — the one for a boundary that does carry a space — because the two errors are not
+    // equal: too narrow a window calls a same-word seam a word break and reflows into it, which
+    // is the visible duplicate this function exists to prevent; too wide a window declines a
+    // real word break, and the user gets the width refusal instead of a reflow.
     let Some(next) = runs
         .iter()
         .filter(|candidate| {
