@@ -372,8 +372,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 523 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 523. \
+        tests_step.contains(r#"if [ "$passed" -lt 524 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 524. \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }

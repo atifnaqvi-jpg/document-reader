@@ -66,9 +66,12 @@ fi
 # tests, and this row added 2 (`a_reflow_edit_reaches_the_document_and_its_inverse_restores_it`,
 # `a_vector_leg_refuses_when_its_operations_changed_since`). 10 - 2 = 8. The ignored count is
 # unchanged at 93, which is the check that matters: no PDFium-backed test was lost.
-PIN_PLAIN_PASSED=523
+# 2026-11-02 (U-2): +1 in both shapes, 523/93 -> 524/93 and 616/0 -> 617/0, for
+# `a_reflow_shaped_multi_operand_edit_is_one_undo`. One test, counted once in each shape; the
+# ignored pin is again the check that it was not a PDFium test changing shape.
+PIN_PLAIN_PASSED=524
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=616
+PIN_IGNORED_PASSED=617
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

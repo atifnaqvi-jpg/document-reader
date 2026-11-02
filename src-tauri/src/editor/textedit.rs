@@ -4655,6 +4655,82 @@ mod tests {
         assert_eq!(error.code(), "TEXT_RUN_MISMATCH");
     }
 
+    /// U-2: a reflow-shaped multi-operator write is **one** undo, and it survives the trip to
+    /// the UI as one entry.
+    ///
+    /// `undo_restores_the_do_and_drops_the_clone` covers a different kind of grouped write
+    /// (`Do` + clone, where the operator count never changes), so it is not evidence for this:
+    /// the reflow puts **three** operations where one stood, and any undo that stepped per
+    /// operator would leave the stream half-restored between steps.
+    #[test]
+    fn a_reflow_shaped_multi_operand_edit_is_one_undo() {
+        let mut document = testpdf::reflow_line(false);
+        let page = page_id(&document, 0).expect("page 0");
+        let before = page_content_bytes(&document, page);
+        let runs = textlocate::locate_runs(&document, page).expect("runs");
+        let target = runs
+            .iter()
+            .find(|run| run.text.trim() == "ALPHA")
+            .expect("the fixture's first run")
+            .clone();
+        let measure = measure_fixed(target.advance + 60.0);
+        let outcome = edit(
+            &mut document,
+            &request(&target, "ALPHA ALPHA", target.advance, &measure),
+        )
+        .expect("a wider replacement that fits is a reflow");
+
+        let after = page_content_bytes(&document, page);
+
+        // The write inserted a `Td`: that is what makes this multi-operator rather than a byte
+        // substitution, and it is why the operator count cannot be addressed by an operand path.
+        let written = textlocate::read_level(&document, page, &[])
+            .expect("the page has content")
+            .encode()
+            .expect("content encodes");
+        assert!(
+            written.windows(2).any(|window| window == b"Td"),
+            "the reflow must insert a Td; without it this is not the shape U-2 is about"
+        );
+
+        // Exactly one entry, and it is a vector leg. A per-operator undo would need three.
+        assert!(
+            outcome.inverse.ops.is_some(),
+            "a reflow's undo is one vector leg, not one entry per operator"
+        );
+        assert_eq!(
+            outcome
+                .inverse
+                .ops
+                .as_ref()
+                .map(|ops| ops.new_ops_len().unwrap()),
+            Some(3),
+            "the write left TJ + Td + TJ at the replaced index"
+        );
+
+        // The record survives the trip the UI actually makes. `ContentOperation` is what
+        // `EditorProvider.push` stores and what a later `revert` reads back, so a leg that only
+        // exists in memory is not a replayable undo.
+        let json = serde_json::to_string(&outcome.inverse).expect("the inverse serialises");
+        let replayed: ContentOperation = serde_json::from_str(&json).expect("and deserialises");
+        assert_eq!(
+            replayed.ops, outcome.inverse.ops,
+            "the vector leg must survive the round trip to the UI and back"
+        );
+
+        // One undo, from the round-tripped record: the exact pre-edit stream, in one step.
+        revert(&mut document, &replayed).expect("the inverse replays");
+        assert_eq!(
+            page_content_bytes(&document, page),
+            before,
+            "one undo restores the pre-reflow stream — the whole TJ + Td + TJ vector at once"
+        );
+        assert_ne!(
+            before, after,
+            "and the edit had changed it in the first place"
+        );
+    }
+
     /// B-7: undo takes the clone out again. After an edit of a named `ActualText` and its
     /// revert, the `BDC` names its original entry, the clone key is gone, the clone object is
     /// gone, and the shared entry never changed.
