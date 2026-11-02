@@ -748,13 +748,32 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       four pin carriers. Row A10 stays `Missing`: R-6 has no caller, R-7 needs a confirmed
       installer (Q9).
 
-- [ ] **R-6 Give `reflow_tj_array` a caller in the edit path.** Today it is reachable only from
+- [x] **R-6 Give `reflow_tj_array` a caller in the edit path.** Landed 2026-11-02 (`fec52e8`).
+      Today it is reachable only from
       tests — §5.3 accepts that the *guard* has no caller, but the reflow itself must be wired
       before A10 can pass on a real document.
-      Acceptance test first: `a_reflow_edit_reaches_the_document_and_its_inverse_restores_it`.
+      Acceptance test first: `a_reflow_edit_reaches_the_document_and_its_inverse_restores_it`,
+      written red against the old API (it failed on `fits-width` refusing at 145.4 against 85.4),
+      and green after the wiring.
       **NEW ASSERTION:** the reflow write goes through the same path a user edit takes (so the
       edited copy, not the original, is what changes — D-2), and its inverse restores the exact
       pre-edit bytes. No existing test invokes `reflow_tj_array` outside its own module.
+
+      **Ruling A applied**, not a sibling type: `ContentOperation` grew
+      `ops: Option<OpVector>`, so a byte edit is the degenerate one-element case. Both sides of
+      the vector travel **encoded** because `lopdf`'s `Operation` and `Object` have no `serde`
+      impl in 0.45.0 — a fact this row discovered by compiling the wrong assumption.
+      `revert()` refuses (not no-ops) when the recorded `new_stream` is no longer at `op_index`.
+
+      **One defect of my own, caught by an existing test:** `try_reflow` did not require the
+      selection to end a word, so editing `H` in `Hi` moved the `i` — a duplicated letter.
+      `merged_width_refusal_quotes_both_widths` fails on that mutation, in the
+      `--include-ignored` shape only. Fixed by `ends_a_word`.
+
+      Gate pins `531/93 → 523/93`, `624/0 → 616/0`; the −8 is `undo.rs`'s 10 tests retired minus
+      this row's 2. Retiring `undo.rs` also settles the ruling's "no sibling type" half.
+      Four mutants, all CAUGHT; the staleness one **survived first**, which is why
+      `a_vector_leg_refuses_when_its_operations_changed_since` exists.
 
 - [ ] **U-2 Replay `ReflowOperation`.** U-1 acceptance (b), the only criterion X3 did not deliver.
       Depends on the §7.4 ruling (share the persisted record, or a sibling leg).
