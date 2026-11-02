@@ -113,11 +113,50 @@ That flag is flipped here, together with `tests/release_workflow.rs`, which pins
 the publish step's own depth. A 1.0.0 tag must publish as a full release, and the flag and its
 guard have to move in the same commit or the tree contradicts itself.
 
+### Hand-test provenance
+
+**Status: awaiting a human run. This section names the exact bytes to run; it does not claim
+anyone has run them.**
+
+The installer comes from a **build-only** `workflow_dispatch` run, because the attach step is
+tag-gated and a tag is the thing this gate exists to withhold. Run `41461007177` on
+`p2-windows-test` at `1e6bfd8`, artifact `13149701933`:
+
+| Field | Value |
+|---|---|
+| Artifact | `document-reader-windows-installer` |
+| Artifact size | 10,359,389 bytes |
+| File | `Document Reader_1.0.0_x64-setup.exe` |
+| File size | 10,375,381 bytes |
+| SHA-256 | `af18fca8274027dd7416c8d500e49a4a68554be72ea90cfedeae8ab5d9cc57b9` |
+| Expires | 2027-01-31 |
+
+Three independent readings agree on the version before anyone runs it: the **filename**, the
+PE **`FileVersion`** resource, and the PE **`ProductVersion`** resource all say `1.0.0`. That
+check exists because the carriers in the tree and the string the installer embeds are produced
+by different steps, and a mismatch would produce a download that is not the build described
+here.
+
+**What a human needs to confirm**, at minimum — the reflow path end to end, since that is the
+whole of P2.8:
+
+1. Open a PDF and edit text to something **wider**. The rest of the line moves; nothing else on
+   the page does.
+2. Undo **once**. The line returns exactly as it was, in one step rather than an operator at a
+   time.
+3. Redo. The reflowed state returns.
+4. Edit to something **narrower**. Nothing moves — the gap widens (this is deliberate; see the
+   asymmetry note above).
+5. Edit a selection that ends **mid-word**. It refuses, and the refusal is legible.
+6. Save, reopen the saved file. The line is where the edit put it.
+
+The counts and the flag above are facts about a tree. This list is what turns that tree into a
+release, and nothing in CI can satisfy it: rule 1 asks for a human on the installer.
+
 ### Not yet true
 
-- **No installer has been hand-confirmed.** The artifact to confirm comes from a *build-only*
-  `workflow_dispatch` run, which attaches nothing to a release; the artifact must be recorded
-  here by run id and byte size, and a human must run it, before any tag exists.
+- **No installer has been hand-confirmed.** The artifact above is named, hashed and waiting; a
+  human still has to run it.
 - **Nothing has been tagged.** This section describes a tree, not a release.
 
 Both facts are stated plainly rather than left to be inferred from the absence of a tag,
