@@ -314,6 +314,21 @@ export interface ContentOperation {
    * the clone, so one edit remains one undo entry.
    */
   xobjectClones?: XObjectClone[];
+  /**
+   * Ruling A (2026-11-02): this leg replaced the operation **vector** at `opIndex` rather than
+   * one operand's bytes. A reflow splits one `TJ` into `TJ` + `Td` + `TJ`, so it changes the
+   * operator count and has no `operandPath` to address. Both streams are encoded with the same
+   * encoder `write_level` writes; `oldBytes`/`newBytes` are empty on such a leg.
+   *
+   * Absent for every byte-level edit, which is the degenerate one-element case.
+   */
+  ops?: OpVector | null;
+}
+
+/** The two encoded operation vectors a reflow's inverse records (ruling A). */
+export interface OpVector {
+  oldStream: number[];
+  newStream: number[];
 }
 
 /** One Form XObject copy an edit made (P2.7.3 §7). */

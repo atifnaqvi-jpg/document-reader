@@ -2112,6 +2112,115 @@ pub struct EditOutcome {
     pub actual_text_preserved: bool,
 }
 
+/// Whether the run's selection ends a word, so the fragments after it really are the rest of
+/// the line (P2.8 R-6, A10).
+///
+/// `false` means the tail continues **this** word: moving it would visibly duplicate or orphan
+/// glyphs. The refusal is the honest answer there — a merged edit is the machinery for editing
+/// inside a word, and it is reached by selecting the whole word.
+fn ends_a_word(run: &RawRun, runs: &[RawRun]) -> bool {
+    if run.text.ends_with(char::is_whitespace) || run.text.is_empty() {
+        return true;
+    }
+    // The next fragment of the same array, in content order. `reads_on_from_grid`-style seam
+    // measurement is unavailable here (no PDFium spans in this path), so the test is the one the
+    // merge rule itself would make from geometry: the next origin must be at least the run's own
+    // advance away, which is exactly one blank pen movement.
+    let Some(next) = runs
+        .iter()
+        .filter(|candidate| {
+            candidate.id.op_index == run.id.op_index
+                && candidate.id.xobject_path == run.id.xobject_path
+                && candidate.id.operand_path.first() == run.id.operand_path.first()
+                && candidate.baseline() == run.baseline()
+        })
+        .filter(|candidate| candidate.id.operand_path > run.id.operand_path)
+        .min_by_key(|candidate| candidate.id.operand_path.clone())
+    else {
+        // Nothing after it in this array: the last fragment ends the line, where a wider
+        // replacement simply extends the line and there is no tail to displace.
+        return true;
+    };
+    let gap = next.origin.0 - (run.origin.0 + run.advance);
+    gap > gap_tolerance(run.font_size, true)
+}
+
+/// P2.8 R-6 (A10): write a replacement that is wider than its run's own advance, by moving the
+/// rest of the line and nothing else.
+///
+/// Returns `Ok(None)` when the run is not a reflow case at all — not one fragment of a `TJ`
+/// array, or no tail to move — so `edit()` can report the width gate's own refusal, which is the
+/// remedy the user can act on. Returns `Err` only for a genuine write failure.
+///
+/// The refusal rules (R1, R4, R5, R6, R8b, R10b) live in [`crate::editor::reflow`] and are reused
+/// unchanged: this function decides *whether* a reflow applies, never *whether it is allowed*.
+fn try_reflow(
+    document: &mut Document,
+    request: &EditRequest<'_>,
+    runs: &[RawRun],
+    run: &RawRun,
+) -> Result<Option<EditOutcome>, AppError> {
+    if run.operator != "TJ" || request.run_id.operand_path.len() < 2 {
+        return Ok(None);
+    }
+
+    // The selection must end where a **word** ends, or the tail is not "the rest of the line"
+    // but the rest of this word. Editing `H` in `Hi` and pushing `i` right leaves the `i` where
+    // the user can see it — a duplicated letter and a gap, which is worse than the refusal.
+    //
+    // Two ways a fragment ends a word: its own text ends in whitespace (the space is part of the
+    // selection, which is how `ALPHA ` is written), or the seam to the next fragment is wider
+    // than the merge tolerance, so the next fragment is already a separate word.
+    if !request.replacement.is_empty() && !ends_a_word(run, runs) {
+        return Ok(None);
+    }
+
+    // The reflow resolves the page's own content box (R3), so the number it is judged by is the
+    // one the user's page actually has.
+    let page_id = textlocate::page_id(document, request.page)?;
+    let (content, applied) = match crate::editor::reflow::reflow_line_within_content_box(
+        document,
+        request.page,
+        page_id,
+        runs,
+        &request.run_id,
+        &request.replacement,
+    ) {
+        Ok(applied) => applied,
+        // A rule refusal is not a reflow: fall back to the gate's message, which names a remedy.
+        Err(_) => return Ok(None),
+    };
+
+    // The reflow returns the edited level rather than writing it, so the write happens here —
+    // once, after the arithmetic, exactly as `apply_merged` does for a byte edit.
+    textlocate::write_level(document, page_id, &run.id.xobject_path, &content)?;
+
+    let inverse = ContentOperation {
+        page: request.page,
+        // A vector leg has no operand path; `op_index` and the recorded length are its address.
+        op_index: applied.operation.op_index,
+        operand_path: Vec::new(),
+        old_bytes: Vec::new(),
+        new_bytes: Vec::new(),
+        font_swap: None,
+        also: Vec::new(),
+        ops: Some(crate::editor::textlocate::OpVector {
+            old_stream: crate::editor::reflow::encode(&applied.operation.old_ops),
+            new_stream: crate::editor::reflow::encode(&applied.operation.new_ops),
+        }),
+        property_clone: None,
+        xobject_path: applied.operation.xobject_path.clone(),
+        xobject_clones: Vec::new(),
+    };
+
+    Ok(Some(EditOutcome {
+        inverse,
+        substitution: None,
+        note: None,
+        actual_text_preserved: true,
+    }))
+}
+
 /// Applies a Stage-2 edit, returning the inverse operation for undo (T5).
 ///
 /// Gate order (T11/T13/T14 is load-bearing):
@@ -2355,6 +2464,24 @@ pub fn edit(document: &mut Document, request: &EditRequest<'_>) -> Result<EditOu
         }
     };
     if let Some(error) = width_refusal(request.old_width, scaled_new_width) {
+        // P2.8 R-6 (A10): "wider than the run's own advance" is not the same question as "wider
+        // than the line has room for". When the run is one fragment of a `TJ` array with a tail
+        // and the line still fits inside the content box, the replacement is a **reflow** — the
+        // rest of the line moves and nothing else does — not a refusal.
+        //
+        // Only the paths that leave the run's own glyphs in its own font can reflow here. A
+        // substitution or an embedded subset writes bytes the reflow's measurement did not
+        // produce, and the font-swap legs below are the machinery for that; mixing the two would
+        // record one write twice. A merged or ranged selection is likewise a different write.
+        let reflowable = request.fragments.is_empty()
+            && request.range.is_empty()
+            && matches!(plan, crate::editor::substitute::Plan::KeepOriginal)
+            && cid.is_none();
+        if reflowable {
+            if let Some(outcome) = try_reflow(document, request, &runs, run)? {
+                return Ok(outcome);
+            }
+        }
         return Err(error);
     }
 
@@ -2543,6 +2670,20 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
     }
 
     for write in &writes {
+        // Ruling A (2026-11-02): a vector leg is checked as an operator-vector replacement, not
+        // as an operand's bytes. It has no operand path to read — the reflow changed the
+        // operation count, so `op_index` plus the recorded length is the whole address.
+        //
+        // The check is the same discipline the byte legs use: if the operations there are not
+        // what this edit left, something else has written since, and replaying the inverse would
+        // undo an edit the user did not make.
+        if let Some(ops) = &write.ops {
+            if encode_ops(vector_at(&content, write.op_index, ops.new_ops_len()?)) != ops.new_stream
+            {
+                return Err(AppError::TextRunMismatch);
+            }
+            continue;
+        }
         let current = content
             .operations
             .get(write.op_index)
@@ -2557,6 +2698,21 @@ pub fn revert(document: &mut Document, operation: &ContentOperation) -> Result<(
 
     {
         for write in &writes {
+            // Ruling A: a vector leg is replayed by restoring the operations it replaced. The
+            // splice goes in where the write went, and its length is the recorded one, so the
+            // operator count returns to what it was — this is the half that makes a reflow one
+            // undo rather than a partial restore.
+            if let Some(ops) = &write.ops {
+                let restored = lopdf::content::Content::decode(&ops.old_stream)
+                    .map_err(|_| AppError::TextRunMismatch)?
+                    .operations;
+                let end = write.op_index + ops.new_ops_len()?;
+                if end > content.operations.len() {
+                    return Err(AppError::TextRunMismatch);
+                }
+                content.operations.splice(write.op_index..end, restored);
+                continue;
+            }
             let slot = string_at_mut(
                 content
                     .operations
@@ -2670,6 +2826,32 @@ fn operation_at_mut<'a>(
 
 // Local copies of the string accessors, so `revert` does not depend on `textlocate`'s
 // private helpers staying public. They are three lines each and identical.
+/// The `len` operations starting at `op_index`, encoded with the same encoder `write_level`
+/// writes.
+///
+/// Fewer operations than asked for yields a shorter encoding, which never equals the recorded
+/// one — that is the whole check, so a truncated stream refuses rather than matching a prefix.
+fn vector_at(
+    content: &lopdf::content::Content<Vec<lopdf::content::Operation>>,
+    op_index: usize,
+    len: usize,
+) -> Vec<lopdf::content::Operation> {
+    content
+        .operations
+        .iter()
+        .skip(op_index)
+        .take(len)
+        .cloned()
+        .collect()
+}
+
+/// `Content::encode` over a bare operation vector, which is what both `write_level` and the
+/// recorded inverse use. The two must be the same encoder or the comparison is between two
+/// descriptions of the same stream (the reason `reflow::encode` exists).
+fn encode_ops(operations: Vec<lopdf::content::Operation>) -> Vec<u8> {
+    crate::editor::reflow::encode(&operations)
+}
+
 fn string_at<'a>(operation: &'a lopdf::content::Operation, path: &[usize]) -> Option<&'a [u8]> {
     let mut current = operation.operands.get(*path.first()?)?;
     for index in &path[1..] {
@@ -3710,6 +3892,70 @@ mod tests {
         );
     }
 
+    /// The page stream's operations, encoded — the thing an undo either restores exactly or does
+    /// not. Compared as bytes because that is what `write_level` writes.
+    fn page_content_bytes(document: &lopdf::Document, page: lopdf::ObjectId) -> Vec<u8> {
+        textlocate::read_level(document, page, &[])
+            .expect("the page has content")
+            .encode()
+            .expect("content encodes")
+    }
+
+    /// R-6 (A10): a replacement wider than the run's own advance but narrow enough for the line
+    /// reaches the document through the edit path, and its inverse restores the exact pre-edit
+    /// bytes.
+    ///
+    /// Today `edit()` refuses this at the `fits-width` gate and `reflow_tj_array` is reachable
+    /// only from its own module's tests. That is the state this test exists to end (§5.3 accepts
+    /// a guard with no caller, but the reflow itself must be wired before A10 can pass on a real
+    /// document).
+    #[test]
+    fn a_reflow_edit_reaches_the_document_and_its_inverse_restores_it() {
+        let mut document = testpdf::reflow_line(false);
+        let page = page_id(&document, 0).expect("page 0");
+        let before = document.clone();
+
+        let runs = textlocate::locate_runs(&document, page).expect("runs");
+        let target = runs
+            .iter()
+            .find(|run| run.text.trim() == "ALPHA")
+            .expect("the fixture's first run")
+            .clone();
+
+        // PDFium would measure the replacement wider than the run's own advance — that is what
+        // makes this a reflow rather than a same-width edit. The plain suite has no PDFium, so
+        // the measurement is supplied, as it is throughout this module.
+        let measure = measure_fixed(target.advance + 60.0);
+        let outcome = edit(
+            &mut document,
+            &request(&target, "ALPHA ALPHA", target.advance, &measure),
+        )
+        .expect("a wider replacement that fits is a reflow, not a refusal");
+
+        // The write must be the reflow's own vector leg. Without this the rest of the test would
+        // also pass on a byte-level edit that happened to write the same bytes, and the assertion
+        // below would be checking the wrong machinery.
+        assert!(
+            outcome.inverse.ops.is_some(),
+            "the inverse of a reflow is a vector leg, not an operand's bytes"
+        );
+
+        // D-2: the copy is what changed. `edit()` is handed the loaded copy, and the original
+        // this test kept must still hold its own bytes.
+        assert_ne!(
+            page_content_bytes(&document, page),
+            page_content_bytes(&before, page),
+            "the reflow must reach the document handed to edit()"
+        );
+
+        revert(&mut document, &outcome.inverse).expect("the inverse replays");
+        assert_eq!(
+            page_content_bytes(&document, page),
+            page_content_bytes(&before, page),
+            "one undo restores the exact pre-edit stream"
+        );
+    }
+
     #[test]
     fn edits_a_simple_font_run_when_it_fits() {
         let mut document = testpdf::simple_winansi();
@@ -4370,6 +4616,41 @@ mod tests {
             new_bytes: b"SOMETHING ELSE".to_vec(),
             ..outcome.inverse
         };
+        let error = revert(&mut document, &stale).unwrap_err();
+        assert_eq!(error.code(), "TEXT_RUN_MISMATCH");
+    }
+
+    /// Ruling A: a vector leg must refuse when the operations it wrote are no longer there.
+    ///
+    /// The byte-level sibling above cannot cover this: a reflow has no operand path, so without
+    /// this check an undo would splice the old `TJ` back at an index that now holds someone
+    /// else's operators — restoring a stream the user never had.
+    #[test]
+    fn a_vector_leg_refuses_when_its_operations_changed_since() {
+        let mut document = testpdf::reflow_line(false);
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = textlocate::locate_runs(&document, page).expect("runs");
+        let target = runs
+            .iter()
+            .find(|run| run.text.trim() == "ALPHA")
+            .expect("the fixture's first run")
+            .clone();
+        let measure = measure_fixed(target.advance + 60.0);
+        let outcome = edit(
+            &mut document,
+            &request(&target, "ALPHA ALPHA", target.advance, &measure),
+        )
+        .unwrap();
+
+        // A later, unrelated edit landing where the reflow wrote: the recorded `new_stream` is
+        // no longer what is there.
+        let mut stale = outcome.inverse.clone();
+        let ops = stale
+            .ops
+            .as_mut()
+            .expect("a reflow's inverse is a vector leg");
+        ops.new_stream = b"BT ET".to_vec();
+
         let error = revert(&mut document, &stale).unwrap_err();
         assert_eq!(error.code(), "TEXT_RUN_MISMATCH");
     }

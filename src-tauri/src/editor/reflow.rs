@@ -179,7 +179,7 @@ impl ReflowOperation {
 ///
 /// Uses `Content::encode`, the same encoder that writes the page: recording with a second
 /// encoder could describe a stream that never gets written.
-fn encode(operations: &[Operation]) -> Vec<u8> {
+pub(crate) fn encode(operations: &[Operation]) -> Vec<u8> {
     Content {
         operations: operations.to_vec(),
     }

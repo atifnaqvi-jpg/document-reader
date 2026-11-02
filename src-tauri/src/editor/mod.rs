@@ -21,4 +21,3 @@ pub mod substitute;
 pub mod testpdf;
 pub mod textedit;
 pub mod textlocate;
-pub mod undo;

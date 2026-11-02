@@ -61,9 +61,14 @@ fi
 # Expected counts for each shape. These are pins, not observations: a count that moves must be
 # an explicit decision, because the failure they exist to catch is a test that stopped running
 # rather than a test that started failing.
-PIN_PLAIN_PASSED=531
+# 2026-11-02 (R-6): 531/93 -> 523/93 and 624/0 -> 616/0. The drop is exactly 8 in both
+# shapes and it is accounted for, not merely observed: retiring `undo.rs` removed its 10
+# tests, and this row added 2 (`a_reflow_edit_reaches_the_document_and_its_inverse_restores_it`,
+# `a_vector_leg_refuses_when_its_operations_changed_since`). 10 - 2 = 8. The ignored count is
+# unchanged at 93, which is the check that matters: no PDFium-backed test was lost.
+PIN_PLAIN_PASSED=523
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=624
+PIN_IGNORED_PASSED=616
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

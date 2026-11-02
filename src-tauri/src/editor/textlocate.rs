@@ -1829,6 +1829,7 @@ pub fn apply_text(
         new_bytes: new_bytes.to_vec(),
         font_swap: None,
         also: Vec::new(),
+        ops: None,
         property_clone: None,
         xobject_path: Vec::new(),
         xobject_clones: Vec::new(),
@@ -2016,6 +2017,7 @@ pub fn apply_merged(
             property_clone: None,
             xobject_path: level.clone(),
             xobject_clones: Vec::new(),
+            ops: None,
         })
         .collect();
 
@@ -2048,6 +2050,7 @@ pub fn apply_merged(
             property_clone,
             xobject_path: level.clone(),
             xobject_clones: Vec::new(),
+            ops: None,
         },
         actual_text_preserved,
     ))
@@ -3451,8 +3454,23 @@ pub struct ContentOperation {
     /// with the replacement and clears each following fragment to empty; every one of those
     /// writes is recorded here, so a single undo restores all their original bytes. Empty for
     /// an ordinary single-operand edit.
+    ///
+    /// Ruling A (2026-11-02) makes this the vector inverse's tail: one edit is one entry, and
+    /// its legs are `self` plus `also`. A reflow's three-operation replacement is one leg with
+    /// [`ContentOperation::ops`] set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<ContentOperation>,
+    /// Ruling A (2026-11-02): this leg replaced a **vector** of operations rather than one
+    /// operand's bytes. Empty for every byte-level edit, which is therefore the degenerate
+    /// one-element case.
+    ///
+    /// A reflow turns one `TJ` into `TJ` + `Td` + `TJ`, so its inverse is not a byte swap at an
+    /// operand path — there is no operand path once the operator count changes. The two vectors
+    /// are the replacement as written and as it was, in the same encoded form `ReflowOperation`
+    /// records (`lopdf`'s `Operation` has no `serde` impl, so the operands travel as the
+    /// operator's own token list rather than as `Operation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<OpVector>,
     /// The `/Properties` clone a named-`ActualText` rewrite created (ruling B-7), so undo can
     /// repoint the `BDC` at the original name and drop the clone again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3465,6 +3483,38 @@ pub struct ContentOperation {
     /// (Q6). Empty at page level; undo restores the `Do` and drops each clone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub xobject_clones: Vec<XObjectClone>,
+}
+
+/// A replacement of the operation **vector** at one index, as undo needs it (ruling A).
+///
+/// A reflow splices one `TJ` into `TJ` + `Td` + `TJ`, so the write is not an operand's bytes but
+/// the operator list itself — and it changes the operator count, so no `operand_path` can address
+/// it. Both sides travel **encoded**, by the same `Content::encode` that `write_level` writes,
+/// because neither `lopdf::content::Operation` nor `lopdf::Object` implements `serde` (checked
+/// against 0.45.0: `content.rs` and `object.rs` derive only `Debug, Clone`, `Object` adding
+/// `PartialEq`). Decoding is `Content::decode`, so the record and the stream are the same bytes by
+/// construction.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpVector {
+    /// The operation(s) at `op_index` before the write, encoded.
+    pub old_stream: Vec<u8>,
+    /// The operations the write put at `op_index`, encoded.
+    pub new_stream: Vec<u8>,
+}
+
+impl OpVector {
+    /// How many operations the write left at `op_index` — which is one more than the reflow
+    /// replaced, because it splits one `TJ` into `TJ` + `Td` + `TJ`.
+    ///
+    /// Counted by decoding the recorded stream rather than by storing a third number: a length
+    /// field could disagree with the stream, and an inverse that lies about its own extent is
+    /// worse than one that cannot be read at all.
+    pub fn new_ops_len(&self) -> Result<usize, crate::model::AppError> {
+        lopdf::content::Content::decode(&self.new_stream)
+            .map(|content| content.operations.len())
+            .map_err(|_| crate::model::AppError::TextRunMismatch)
+    }
 }
 
 /// One run's switch from its original font resource to a standard-14 substitute.
