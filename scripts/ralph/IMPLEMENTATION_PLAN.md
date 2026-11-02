@@ -367,30 +367,38 @@ point at which text editing is declared complete. Never reach it by accident.
       outside its own tests, and not on any edit path. And `EditorProvider` is a TSX component,
       not a Rust type; the earlier claim that `pages.rs` and `annotate.rs` route through it was
       wrong, and neither file records undo.
-- [!] **P2.8 Line-level reflow → 1.0.0** — **Design-doc blocker cleared 2026-10-31** by:
+- [x] **P2.8 Line-level reflow → 1.0.0** — **Shipped 2026-11-02**, tag `v1.0.0` at `1e6bfd8`,
+      hand-confirmed on the installer from dispatch `41461007177`. **Design-doc blocker cleared
+      2026-10-31** by:
       `docs/P2.8-reflow-DESIGN.md`, 547 lines, frozen at `39d2b26` (the 460-line figure
       sometimes quoted is that commit's diff stat, not the file). Invariants live in
       `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` §4, not in this file, which has no `## 4`.
-      **Still `[!]`, because `[!]` means "blocked (needs a ruling)" and two rulings are open.
-      It is no longer blocked on a missing design doc.** What blocks it now, in order:
-      **§7.2 — RESOLVED 2026-10-31 by R10**, so it is no longer a blocker. The prefix includes
+      **Both blockers this row was `[!]` for are now resolved, and the phase closed on the gate the
+      process requires rather than on a green suite.** The history is kept because the shape of
+      it recurs — a phase can be "blocked on a ruling" long after the code is finished, and the
+      temptation is to tick it when the code lands.
+
+      **§7.2 — RESOLVED 2026-10-31 by R10.** The prefix includes
       the kern for a run kern-positioned inside one `TJ` array; a run whose position also
       depends on a preceding `Tj` or a mid-array `Td`/`TD` is refused. Ruling it exposed a
       reader defect (`R10.1`) that is now T-8 below. Answering it also retired the risk that the
       guard (`9471313`) had been built on an unruled assumption: the rule is now stated, so the
       guard's expected positions can be checked against it rather than assumed to match.
-      **§7.3 — the R5/R8 refusal strings.** Still undecided in the doc. R5's gate exists
-      (`R5StraddlesLevels`). R8's does **not**: the refusal was implemented, no test could
-      make it fire, and it was deleted rather than shipped unguarded — a `TJ` array cannot
+      **§7.3 — RESOLVED 2026-10-31: the R5/R8 refusal strings.** R5's gate exists
+      (`R5StraddlesLevels`). R8's does **not**, and the ruling was to delete rather than ship it
+      unguarded: the refusal was implemented, no test could make it fire, and a `TJ` array cannot
       express a `Tf`/`BDC`/`Ts` between two strings, so the states R8 rejects are unreachable
-      from a single array. §2.3.2 of the doc records this. §7.3 must therefore be reworded
-      before it is ruled: the question is not "what string for R8" but "what, if anything, R8
-      refuses on a path that exists."
-      **The undo leg.** U-1 acceptance (b): `ReflowOperation` is recorded but not replayable.
-      Needed for a user-facing undo of a reflow; **not** needed for case (a)'s write, which is
-      landed. Tracked as U-2 below.
+      from a single array. §2.3.2 of the design doc records this. The question was reworded from
+      "what string for R8" to "what, if anything, R8 refuses on a path that exists", and the
+      answer was nothing.
+      **The undo leg — landed as U-2.** U-1 acceptance (b): `ReflowOperation` is recorded but not
+      replayable. Needed for a user-facing undo of a reflow; **not** needed for case (a)'s write.
+      U-2 made a reflow-shaped write one undo that survives persistence to the UI.
 
 ## H4. P2.8 case (a) → 1.0.0 — task list
+
+**Closed 2026-11-02. Every row below is ticked.** The instruction that governed the list is kept
+verbatim, because it is what the ticks mean and it will govern H5:
 
 Do these in order. Each is one iteration and one commit. **None is ticked**, and none may be
 ticked on the ground that the suite was already green: where a test partly exists, the entry
@@ -791,13 +799,50 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       The second is the load-bearing one — the in-memory path stays green under it, so only the
       round-trip assertion can see a leg that never reaches the UI.
 
-- [ ] **R-7 Row A10 `Missing → Have`, and the 1.0.0 bump.** Last, and only after a confirmed
-      installer (Q9). Bumping to 1.0.0 before that is forbidden by Q7's intent even though Q7
+- [x] **R-7 Row A10 `Missing → Have`, and the 1.0.0 bump.** Landed 2026-11-02 (tag `v1.0.0` at
+      `1e6bfd8`; docs commit `e64c805` carries the flip). Last, and only after a confirmed
+      installer (Q9). Bumping to 1.0.0 before that was forbidden by Q7's intent even though Q7
       assigns P2.8 to 1.0.0, because a version string names a build a human has run.
-      Acceptance test first: `the_parity_matrix_promotes_a10_only_with_a_recorded_installer` —
-      a docs test asserting the matrix row and a recorded artefact id move together.
-      **NEW ASSERTION:** that A10 cannot be promoted without a named installer artefact in the
-      release notes, mirroring the guard `release_version.rs` already applies to version carriers.
+
+      **The acceptance test was written, and it was not a formality.** It did not exist when this
+      row was reached — `grep` found the name only in this plan. Written as
+      `the_parity_matrix_promotes_a10_only_with_a_recorded_installer` in
+      `src-tauri/tests/release_version.rs`. It asserts that a promoted A10 row names the
+      dispatch, the artefact id and the tag, and that the dispatch id also appears in
+      `docs/RELEASE-NOTES.md`, so the row and the release record cannot drift apart. Two
+      mutants, both CAUGHT and both restored: stripping the dispatch id from a promoted row
+      ("A10 is promoted to `Have`, but its row does not name 41461007177"), and removing the id
+      from the notes while the row kept it ("the hand-test provenance would exist only in the
+      matrix cell that depends on it"). The second is the one that matters: without it a
+      reviewer sees a row citing a build nobody wrote down, which is unfalsifiable from the tree.
+
+      **What the guard cannot do, stated so it is not mistaken for more.** It cannot know whether
+      a human ran the installer; that evidence is on the user's machine. It refuses the *shape*
+      where a row is promoted with no provenance written down, which is the failure that
+      survives review.
+
+      **Order actually executed**, matching the 0.9.0 provenance rule: notes section before the
+      bump (2026-11-02, `afadcc4`), build-only dispatch `41461007177` at `1e6bfd8`, hand-confirm
+      on 2026-11-02, tag at `1e6bfd8` — the commit the artifact was built from, not the docs-only
+      `e64c805` that was HEAD at confirm time. That staleness delta is recorded **in the tag
+      message**, not elided.
+
+      **The count moved with it.** `525/93 · 618/0`, up one in both shapes for the new guard;
+      the ignored pin is still 93, which is the check that this was not a PDFium test changing
+      shape. Four carriers updated: `gate.sh`, `ci.yml` (floor and comment), `ci_workflow.rs`
+      (assertion and message), `PROMPT.md`. The `RELEASE-NOTES.md` counts table was **not**
+      changed: it documents the shipped 1.0.0 build, measured before this test existed, and
+      rewriting it would falsify the record of what was hand-tested.
+
+      **1.0.1 is reserved, and the reservation is not a claim.** The tree moved to 1.0.1 in the
+      same turn because `the_tree_version_is_ahead_of_every_published_tag` went red the moment
+      `v1.0.0` existed — observed, not predicted. 1.0.1 is reserved for the R5 rename to
+      "docu PRO" (`docs/DECISIONS.md` §9 item 5, scheduled as 1.0.1 in `docs/P3-PLAN.md`). No
+      P3 feature lands under it.
+
+      **Filed from the hand-test, not a P2.8 defect:** overflow UX. The `fits-width` refusal
+      quoted both widths correctly when the box had no room; the user's assessment was that the
+      behaviour is right and the *presentation* is the future row. Nothing in P2.8 waits on it.
 
 - [x] **T-8 Reader's kern term omitted `Tz`.** Landed 2026-11-01. `tj_fragment_origins`
 computes the kern as `pen_x -= number / 1000.0 * state.size` with no

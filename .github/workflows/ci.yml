@@ -167,6 +167,11 @@ jobs:
           # selection properties, and the resolver's refusal to invent a box. All three call
           # code rather than opening PDFium, so the ignored count stays 92.
           #
+          # Measured at 525, not 524: R-7 added
+          # `the_parity_matrix_promotes_a10_only_with_a_recorded_installer`, which reads the
+          # parity matrix and the release notes rather than opening PDFium, so the ignored pin
+          # stays 93.
+          #
           # Measured at 524, not 523: U-2 added one non-PDFium guard
           # (`a_reflow_shaped_multi_operand_edit_is_one_undo`), which serialises an inverse and
           # replays it through lopdf rather than opening PDFium, so the ignored pin stays 93.
@@ -195,8 +200,8 @@ jobs:
           # comparison and the crafted sample that proves its parser can see a defect. Both read
           # `.github/workflows/ci.yml` and `scripts/ralph/gate.sh` with `std::fs`, so neither
           # needs PDFium and the ignored count stays 90.
-          if [ "$passed" -lt 524 ]; then
-            echo "::error::only $passed tests ran; 524 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 525 ]; then
+            echo "::error::only $passed tests ran; 525 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

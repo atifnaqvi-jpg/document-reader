@@ -161,14 +161,50 @@ whole of P2.8:
 The counts and the flag above are facts about a tree. This list is what turns that tree into a
 release, and nothing in CI can satisfy it: rule 1 asks for a human on the installer.
 
-### Not yet true
+### Confirmed, tagged, and published
 
-- **No installer has been hand-confirmed.** The artifact above is named, hashed and waiting; a
-  human still has to run it.
-- **Nothing has been tagged.** This section describes a tree, not a release.
+- **Hand-confirmed 2026-11-02.** All six steps above were run on the artifact from dispatch
+  `41461007177` and passed, including the A10 move case observed live: a wider replacement
+  moved the tail, and where the box had no room it refused honestly and quoted both widths.
+- **Tagged `v1.0.0` at `1e6bfd8`**, the commit that dispatch was built from — not at the later
+  `e64c805`, which is documentation only. The staleness delta is recorded in the tag message
+  rather than smoothed over, because "tag the confirmed tree" and "tag HEAD" are different
+  claims and the difference is the whole point of the provenance rule.
+- **Published as a full release.** The publish step's `prerelease` flag is `false` and
+  `a_tag_publishes_a_full_release_since_1_0_0` asserts it, so the flag and its guard moved
+  together with the phase rather than one asserting what the other denies.
 
-Both facts are stated plainly rather than left to be inferred from the absence of a tag,
-because "unreleased" and "released badly" look identical from a version number alone.
+The earlier 0.6.0–0.9.0 tags were pre-releases because each was an intermediate step and a
+"latest release" badge would have claimed more than the build delivered. This one is not.
+
+---
+
+## 1.0.1
+
+**Development version, reserved for the R5 rename to "docu PRO". No build has been hand-run for
+it and none is published.**
+
+This section exists for the same mechanical reason `0.9.1` did: the tree version must stay ahead
+of every published tag. `v1.0.0` now points at `1e6bfd8`, and
+`the_tree_version_is_ahead_of_every_published_tag` requires the carriers to name something
+higher. Leaving them at `1.0.0` makes that guard unsatisfiable by construction for every commit
+after the tag — which is exactly what it reported once the tag was pushed, before this bump.
+
+**What 1.0.1 is reserved for.** R5 (`docs/DECISIONS.md` §9 item 5, scheduled as 1.0.1 in
+`docs/P3-PLAN.md`): the product name and bundle identifier change together to "docu PRO" in one
+housekeeping phase. The identifier is the Windows upgrade identity, so hand-test installs update
+by reinstall and both entries appear in Add/Remove. That is accepted and on record while the
+install base is hand-test machines only — deliberate now, costly later.
+
+**No P3 feature lands under 1.0.1.** The reservation is a reservation, not a claim: nothing here
+says 1.0.1 ships the rename, only that the number is not available to anything else.
+
+- The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+- Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
+  and `release-windows.yml`.
+
+There is no changelog beyond that, because nothing has shipped under this number. The next
+section below is the last release.
 
 ---
 

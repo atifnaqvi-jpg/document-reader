@@ -1397,3 +1397,72 @@ open defect: the Windows suite crashes intermittently*.
     `gate_parity.rs` asserts it cannot be exempted — but its task text still says `[ ]` and its
     named test `the_gate_runs_every_check_ci_runs` does not exist under that name; left for the
     user to close rather than checked on a name that does not match.
+
+## Iteration 29 — 2026-11-02 — R-7 (row A10 `Missing → Have`, tag `v1.0.0`) — green, phase closed
+- Task: promote A10 on the strength of a hand-tested installer, tag the confirmed commit, publish
+  as a full release, and move the dev tree to 1.0.1 so the tree-ahead-of-tag invariant holds.
+- **Release authority was granted by the user**, who hand-ran the installer built from dispatch
+  `41461007177` (`artifact 13149701933`, `Document Reader_1.0.0_x64-setup.exe`, 10,375,381 bytes,
+  `af18fca8…c57b9`) and reported all checks pass, including the A10 move case observed live.
+
+### What was done, in order
+1. **Tag target verified before creating it.** `41461007177` ran at `1e6bfd8`, not at HEAD. Tagged
+   `1e6bfd8`, per the 0.9.0 provenance rule. The two docs-only commits between it and HEAD
+   (`7d3c661`, `e64c805`) are recorded **in the tag message** as the staleness delta, with the
+   reason they cannot change the artifact: neither touches `src-tauri/` or `src/`, and the crate's
+   only `include_bytes!` is the font payload. Eliding this would have made "tag the confirmed
+   tree" and "tag HEAD" indistinguishable from outside.
+2. **The acceptance test did not exist, so it was written.** `grep` found
+   `the_parity_matrix_promotes_a10_only_with_a_recorded_installer` only in the plan that named it.
+   Added to `src-tauri/tests/release_version.rs`: a promoted A10 row must name the dispatch, the
+   artefact id and the tag, and the dispatch id must also appear in `RELEASE-NOTES.md`.
+3. **Two mutants, both CAUGHT, both restored:**
+   - dispatch id stripped from a promoted row → *"A10 is promoted to `Have`, but its row does not
+     name 41461007177"*;
+   - dispatch id removed from the notes while the row kept it → *"the hand-test provenance would
+     exist only in the matrix cell that depends on it"*. This is the load-bearing half: without
+     it a promoted row citing a build nobody wrote down is unfalsifiable from the tree.
+4. **The guard cannot know a human ran the installer** — that evidence is on the user's machine.
+   It refuses the *shape* where a row is promoted with no provenance recorded, which is the
+   failure mode that survives review. Said plainly in the doc comment so it is not mistaken for
+   more than it is.
+5. **Counts moved +1 in both shapes: 524/93 · 617/0 → 525/93 · 618/0.** Ignored pin unchanged at
+   93, which is the check that no PDFium-backed test changed shape. Four carriers updated:
+   `gate.sh`, `ci.yml` (floor `-lt 525` and the comment), `ci_workflow.rs` (the assertion string
+   and its message), `PROMPT.md`. A fifth carrier I deliberately did **not** touch: the counts
+   table in `RELEASE-NOTES.md` documents the *shipped 1.0.0 build*, measured before this test
+   existed. Rewriting it would falsify the record of what was hand-tested.
+6. **`gate.sh` refused to run while it was dirty** — its own guard ("the pins would not be the
+   committed ones"). Counts were therefore measured and the pins edited first, committed, then
+   gated. Same sequence as iteration 28; it is the script's design, not an accident.
+7. **1.0.1 bump**, driven by an observed red rather than a prediction:
+   `the_tree_version_is_ahead_of_every_published_tag` failed the moment `v1.0.0` existed, saying
+   the carriers `1.0.0` is "not ahead of the highest published tag v1.0.0". All six carriers moved
+   (`Cargo.toml`, `package.json` ×2 in `package-lock.json`, `tauri.conf.json`, `Cargo.lock`). The
+   dependency version strings that merely look like ours — `miniz_oxide 0.9.1`, `0.9.12` — were
+   left alone by line-addressed edits, then checked.
+8. **`## 1.0.1` section added**, mirroring the `## 0.9.1` precedent: development version, no
+   build, reserved for R5. The R5 citation is `docs/DECISIONS.md` **§9 item 5** — there is no
+   "§9.5" heading in that file, and `docs/P3-PLAN.md` already schedules R5 as 1.0.1.
+
+### Row state
+- **A10 → `Have`** in `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` with the dispatch, artefact and tag
+  in the cell; in `docs/P2.7-STOCK-TAKE.md` as a dated *supersession* rather than a silent
+  rewrite, because that file is a dated audit and what it said at 0.6.0 was true then.
+- **Overflow UX filed, not fixed.** The `fits-width` refusal quoted both widths correctly when
+  the box had no room; the user judged the behaviour right and the *presentation* worth a future
+  row. Recorded as such; nothing in P2.8 waits on it.
+- **P2.8 phase row → `[x]`**, both former blockers (§7.2, §7.3) recorded resolved and the undo leg
+  recorded as landed (U-2). The H4 list is fully ticked; its governing instruction is kept
+  verbatim under a `Closed` line so the next phase list inherits it.
+- `docs/P2.8-reflow-DESIGN.md` status → **shipped**, with the tag and the hand-test date.
+
+### Verdicts
+- **CI, tag `v1.0.0` @ `1e6bfd8`:** run `41508308720` — success (all three jobs).
+- **Release `v1.0.0`:** workflow run `41508308763`, triggered by the tag push, publishing as a
+  full release (`prerelease: false`, guarded by `a_tag_publishes_a_full_release_since_1_0_0`).
+- **Gate:** `525 passed / 93 ignored` and `618 / 0`, reconciling (525 + 93 = 618).
+
+### Next
+Nothing in P2.8. **Halted here by instruction.** P2.8 closes with this turn; the next briefing
+names what follows. 1.0.1 is reserved for the R5 rename and no P3 work may take that number.

@@ -69,9 +69,12 @@ fi
 # 2026-11-02 (U-2): +1 in both shapes, 523/93 -> 524/93 and 616/0 -> 617/0, for
 # `a_reflow_shaped_multi_operand_edit_is_one_undo`. One test, counted once in each shape; the
 # ignored pin is again the check that it was not a PDFium test changing shape.
-PIN_PLAIN_PASSED=524
+# 2026-11-02 (R-7): +1 in both shapes, 524/93 -> 525/93 and 617/0 -> 618/0, for
+# `the_parity_matrix_promotes_a10_only_with_a_recorded_installer`. It reads two Markdown files
+# and never opens PDFium, so the ignored pin stays 93.
+PIN_PLAIN_PASSED=525
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=617
+PIN_IGNORED_PASSED=618
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

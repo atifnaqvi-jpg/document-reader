@@ -816,3 +816,55 @@ fn the_release_notes_name_the_toolchain_the_build_was_verified_on() {
     );
     claim(&format!("rust {pin_major}.{pin_minor}"), &["verified"]);
 }
+
+/// Row A10 may not say `Have` unless the notes name the build a human actually ran.
+///
+/// The parity matrix's status column claims what a *shipped* build does, so promoting A10 is a
+/// claim about a run installer, not about code reachable from `edit()`. Between R-6 and the
+/// hand-test those two were a week apart: the reflow path existed, was unit-tested, and
+/// `Missing` was still the honest entry. A flip driven by "the code is merged" would have
+/// published the more comfortable claim.
+///
+/// This asserts the two documents agree rather than that either is right. It cannot know
+/// whether a human really ran the installer — that evidence lives on the user's machine. What
+/// it can do is refuse the shape where a row is promoted and the provenance is not written
+/// down, which is the failure mode that survives a review.
+///
+/// The artefact identifiers are checked because a row that says "hand-confirmed" and names no
+/// dispatch can always be promoted by editing one cell, and nobody reading the diff can tell
+/// whether a build exists behind it.
+#[test]
+fn the_parity_matrix_promotes_a10_only_with_a_recorded_installer() {
+    let root = repo_root();
+    let plan = read(&root.join("docs/P2.7-TEXT-EDITING-PARITY-PLAN.md"));
+    let notes = read(&root.join("docs/RELEASE-NOTES.md"));
+
+    // The A10 row, up to the next row or blank line. Pipes are the table's cell separators.
+    let row = plan
+        .lines()
+        .find(|line| line.starts_with("| A10 |"))
+        .expect("the parity matrix must carry an A10 row");
+
+    let promoted = row.contains("**Have**");
+    if !promoted {
+        // `Missing` needs no provenance. The guard exists for the promotion, not the absence.
+        return;
+    }
+
+    for needle in ["41461007177", "13149701933", "v1.0.0"] {
+        assert!(
+            row.contains(needle),
+            "A10 is promoted to `Have`, but its row does not name {needle}. The status column \
+             claims what a shipped build does, so the promotion has to carry the dispatch, the \
+             artefact and the tag that make it a claim about a build rather than about code"
+        );
+    }
+
+    // The evidence must also exist in the notes, so the row and the release record cannot drift
+    // apart: a row citing a dispatch nobody wrote down is unfalsifiable from the tree.
+    assert!(
+        notes.contains("41461007177"),
+        "A10's row names dispatch 41461007177 but docs/RELEASE-NOTES.md never records it; the \
+         hand-test provenance would exist only in the matrix cell that depends on it"
+    );
+}
