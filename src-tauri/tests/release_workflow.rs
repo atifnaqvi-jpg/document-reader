@@ -366,15 +366,21 @@ fn the_glob_matcher_follows_the_documented_semantics() {
     assert!(glob_matches("[0-9a-z]", "7"));
 }
 
-/// The publish step must say `prerelease: true`, and say it explicitly.
+/// The publish step must say `prerelease: false`, and say it explicitly.
 ///
-/// `softprops/action-gh-release` treats a missing key as `false`, so an omission publishes a
-/// full release — GitHub then offers it as "latest" and users read it as stable. Every phase
-/// before 1.0.0 is intermediate by ruling Q7, so the omission would misrepresent the build in
-/// exactly the way the version discipline exists to prevent.
+/// `softprops/action-gh-release` treats a missing key as `false`, so for 1.0.0 the omission
+/// happens to produce the right outcome — but for the wrong reason, and by accident. Stating
+/// it explicitly is what makes the intent checkable: a future phase that wants a pre-release
+/// has to change the key, and this guard has to move with it.
+///
+/// History matters here. Up to 0.9.0 this guard required `true`, for the opposite reason:
+/// every phase before 1.0.0 is intermediate by ruling Q7, so publishing a stable release would
+/// have misrepresented the build. 1.0.0 completes text editing, which is what the flip records.
+/// The flag and this guard move in the same commit — one asserting `false` while the other
+/// demanded `true` is a tree that contradicts itself.
 ///
 /// Deliberately not a check for "the string appears anywhere": it must be a key at the
-/// `with:` depth of the publish step, because a `prerelease: true` left in a comment or
+/// `with:` depth of the publish step, because a `prerelease: ...` left in a comment or
 /// attached to a different step would satisfy a substring search while changing nothing.
 ///
 /// Anchored on the `uses:` line, not the `- ` line: the step's dash carries `name:` and the
@@ -421,7 +427,7 @@ fn publish_input(text: &str, key: &str) -> Option<String> {
 }
 
 #[test]
-fn a_tag_publishes_a_prerelease_not_a_stable_release() {
+fn a_tag_publishes_a_full_release_since_1_0_0() {
     let text = workflow();
     assert!(
         text.contains("softprops/action-gh-release"),
@@ -429,9 +435,11 @@ fn a_tag_publishes_a_prerelease_not_a_stable_release() {
     );
     assert_eq!(
         publish_input(&text, "prerelease").as_deref(),
-        Some("true"),
-        "the publish step must set `prerelease: true` explicitly. Omission means `false`, \
-         which publishes a stable release for a phase that is not stable yet"
+        Some("false"),
+        "the publish step must set `prerelease: false` explicitly. 1.0.0 completes text \
+         editing, so its tag publishes as a full release; leaving this at `true` marks the \
+         shipped release as intermediate, and omitting the key states it by accident rather \
+         than on purpose"
     );
 }
 

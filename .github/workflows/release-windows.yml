@@ -3,10 +3,12 @@ name: Release (Windows installer)
 # Builds the NSIS installer on a real Windows runner — the only supported way to
 # produce a Windows binary for this project (see docs/DECISIONS.md: Windows-only v1).
 #
-# Tags are published as *pre-releases* (set below), because every phase between 0.6.0 and
-# 1.0.0 is an intermediate step: P2.7.4 and P2.7.6 are still unreleased, so text editing is
-# not complete and a "latest release" badge would claim more than the build delivers. Flip
-# `prerelease:` when 1.0.0 (P2.8) ships, and change `tests/release_workflow.rs` with it.
+# Tags publish as **full releases** as of 1.0.0 (P2.8). Every phase between 0.6.0 and 0.9.0
+# was an intermediate step, so each of those tags was published as a pre-release: P2.7.4 and
+# P2.7.6 were still unreleased and a "latest release" badge would have claimed more than the
+# build delivered. 1.0.0 completes text editing, so the flag is flipped and
+# `tests/release_workflow.rs` is flipped with it -- the flag and its guard move together, or
+# one of them is asserting something the other denies.
 #
 # Tag a commit to publish a downloadable installer:
 #   git tag v0.5.0 && git push origin v0.5.0
@@ -144,9 +146,10 @@ jobs:
         with:
           files: src-tauri/target/release/bundle/nsis/*.exe
           generate_release_notes: true
-          prerelease: true
+          prerelease: false
           body: |
-            **Pre-release** — intermediate phase build, not a stability guarantee. See
+            **Document Reader 1.0.0** — line-level reflow; text editing is complete against
+            the parity table. See
             [the release notes](https://github.com/atifnaqvi-jpg/document-reader/blob/main/docs/RELEASE-NOTES.md)
             for what changed, what is still refused, and the phase's acceptance record.
 

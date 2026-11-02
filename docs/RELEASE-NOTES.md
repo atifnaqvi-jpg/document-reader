@@ -7,9 +7,127 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 1.0.0
+
+**Reserved for P2.8. Not shipped.** There is no `v1.0.0` tag, no published release, and no
+installer a human has run. This section is written first because the bump is what puts these
+bytes in an installer, and the order is the point: notes, then bump, then a build-only
+dispatch, then a human confirmation, then a tag (Q9; the sequence recorded in §0.9.0).
+
+### What this version ships
+
+Line-level reflow: **P2.8**, the last phase of the agreed text-editing programme.
+
+- **A replacement wider than its run's own advance moves the rest of the line.** Nothing else
+  on the page moves. The write replaces one `TJ` operation with three — `TJ`, `Td`, `TJ` — so
+  the operator count changes, which is why the undo record is a vector replacement rather
+  than a byte swap (see *One undo* below).
+- **Positioning is line origin + measured prefix, never pen + Δ.** `Td` sets the line matrix,
+  discarding the pen's accumulated advance, so a pen-delta formulation would silently drop the
+  width of every run before the insertion point — correct on a one-character prefix, wrong on
+  a long one. Measured on the kerned fixture: a pen-delta `Td` moved the tail 1.984 pt when
+  40 pt was asked for; the line-origin form moved it 40.000 pt.
+- **The measured prefix includes the `TJ` kern**, and both the prefix and the kern term are
+  scaled by `Tz`, so a horizontally-scaled run is measured as it is drawn.
+- **A replacement the content box has no room for is refused**, reporting both widths. The
+  line's available width is measured to the content box — `/CropBox`, falling back to
+  `/MediaBox` — not to the page's nominal width.
+- **A narrower replacement changes no operator.** The gap widens and trailing text keeps its
+  position. Acrobat behaves the same way. Closing a gap would mean moving runs *backward*,
+  which is a layout change the user did not ask for, so the asymmetry is deliberate.
+- **Reflow will not run into the middle of a word.** A selection that does not end at a word
+  boundary is refused rather than reflowed, because the fragment after it would be the rest of
+  the same word and moving it would duplicate or orphan glyphs. That case is what merging is
+  for.
+
+### One undo, whatever the operator count
+
+A reflow's inverse is a **single** undo entry that puts the pre-edit operation vector back in
+one splice. It is not one entry per operator: a per-operator undo would leave the stream
+half-restored between steps.
+
+The record is a persisted one — the same `ContentOperation` the editor stores and reads back —
+with the two vectors encoded by the same encoder that writes the page, so the record and the
+stream are the same bytes by construction. Because `lopdf`'s `Operation` carries no `serde`
+impl, the operands travel as their encoded token list. A byte-level edit remains the
+degenerate one-element case of the same record, so nothing about ordinary edits changed.
+
+### What is still refused
+
+Every refusal names itself and its remedy. A run refused before reflow is still refused after
+it: reflow moves runs, it does not re-admit them.
+
+| Rule | Refused when |
+|---|---|
+| `R1-no-move` | the replacement is not wider than what it replaces — nothing needs to move |
+| `R4-wrap` | the replacement does not fit its line; reflow does not wrap onto the next line |
+| `R5-straddles-levels` | the line mixes page text with text inside a form, so its runs cannot move as one line |
+| `R6-non-uniform-transform` | the drawing matrix is non-uniform, so "the rest of the line" is not horizontal |
+| `R8b-scope-left-of-line` | another tagged unit has a run on this baseline, left of this line's own start |
+| `R10b-unattributed-kern` | the text before this run is positioned by an operator outside its `TJ` array |
+| `not-one-array` | the run is not a fragment of a multi-fragment `TJ` array with something after it |
+
+**Wrapping and paragraph reflow are out of scope** and stay out: a changed line count moves
+every subsequent baseline on the page, which is paragraph-level reflow under another name.
+
+### What 1.0.0 does not include
+
+- **P2.7.7 — Type0/CID subset embedding.** Text in a Type0/CID face still refuses rather than
+  embedding a new subset. P2.7.6 covered simple fonts; this is the remaining font gap.
+- **Paragraph-level reflow and text wrapping.**
+- **The full-parity inventory (B-1).** Produced after P2.8, not inside it.
+
+1.0.0 completes **text editing** against the parity table. It is not Acrobat parity as a whole,
+and the P3 programme is where the remaining domains are addressed.
+
+### Toolchain: what the build is verified against
+
+The minimum supported version, from `rust-version` in the manifest, is **rust 1.90**.
+
+Verified on **rust 1.91.0**, the channel pinned in `rust-toolchain.toml`, in
+`.github/workflows/ci.yml` and in `release-windows.yml`. All three must agree, or a local
+`cargo fmt --check` stops meaning anything about CI.
+
+### Measured on this tree
+
+Counts are from the gate at the commit the bump lands on; they are restated here so a later
+reader can tell a real change from a pin that moved with the code.
+
+| Shape | Result |
+|---|---|
+| `cargo test` (Linux, PDFium present) | **524 passed, 93 ignored** |
+| `cargo test -- --include-ignored` (Linux, PDFium present) | **617 passed, 0 ignored** |
+| Windows CI, `-- --include-ignored` | **616 passed, 0 ignored** |
+| Frontend | vitest **69**, `tsc` and `vite build` clean |
+
+The Windows figure is one lower **by construction, not by a skip**: one test is gated
+`#[cfg(unix)]` because it uses poppler's CLI tools, which are a Unix install here, and Windows
+runs the PDFium equivalent instead. A platform gate removes the test from the binary; it is
+not a runtime skip that could hide a green pass.
+
+### Pre-release flag
+
+`release-windows.yml` sets `prerelease: true`, which made every tag up to 0.9.0 a pre-release.
+That flag is flipped here, together with `tests/release_workflow.rs`, which pins it: a missing
+`prerelease` key reads as `false`, so the guard requires the key to be present and explicit at
+the publish step's own depth. A 1.0.0 tag must publish as a full release, and the flag and its
+guard have to move in the same commit or the tree contradicts itself.
+
+### Not yet true
+
+- **No installer has been hand-confirmed.** The artifact to confirm comes from a *build-only*
+  `workflow_dispatch` run, which attaches nothing to a release; the artifact must be recorded
+  here by run id and byte size, and a human must run it, before any tag exists.
+- **Nothing has been tagged.** This section describes a tree, not a release.
+
+Both facts are stated plainly rather than left to be inferred from the absence of a tag,
+because "unreleased" and "released badly" look identical from a version number alone.
+
+---
+
 ## 0.9.1
 
-**Development version. No build has been hand-run for this version, and none is published.**
+**Development version superseded by 1.0.0. No build was hand-run for it and none is published.**
 
 This section exists because the tree version must stay ahead of every published tag. `v0.9.0`
 points at `6caaedd`, and `the_tree_version_is_ahead_of_every_published_tag` requires the
