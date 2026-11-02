@@ -1358,7 +1358,8 @@ open defect: the Windows suite crashes intermittently*.
   ignored**, clippy `-D warnings` clean, `cargo fmt --check` clean, tsc clean, vitest **69
   passed**. Counts measured with `--no-fail-fast` and summed from libtest's own totals, then set
   in all four carriers in this commit.
-- **Commit:** see below.
+- **Commit:** see `git log` (this entry is in the commit it describes). `scripts/ralph/gate.sh`
+  confirmed green after the pin move: 531/93 plain, 624/0 ignored, fmt, clippy, tsc, vitest 69.
 - **Learned:**
   - **The task text named half the defect.** It said the kern term omitted `Tz`; the *replacement
     measurement* omitted it too, and that is the larger half — 29.352 pt against 3.000. Fixing
