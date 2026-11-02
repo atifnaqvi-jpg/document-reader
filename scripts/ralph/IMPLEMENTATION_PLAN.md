@@ -723,13 +723,30 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       **measured, not incremented**, across all four pin carriers.
       Row A10 stays `Missing`: R-5 is not written and Q9 needs a confirmed installer.
 
-- [ ] **R-5 Row A10's refusal case.** Same fixture, near-edge variant.
+- [x] **R-5 Row A10's refusal case.** Same fixture, near-edge variant.
       Acceptance test first: `a_replacement_too_wide_for_the_content_box_refuses_and_writes_nothing`.
       **NEW ASSERTION:** the refusal goes through the content box's `fits-width` path (§4 R3) —
       not R4's caller-supplied `limit_x` — **and** the stream is byte-unchanged after the
       refusal. `a_replacement_past_the_limit_refuses_under_r4` (`b260966`) asserts R4 with a
       `limit_x` handed in by the caller, and never inspects the content stream afterwards, so it
       covers neither half of this.
+      **Done 2026-11-01.** `reflow_line_within_content_box` resolves the box from the document
+      (`content_box`: `/CropBox`, defaulting to `/MediaBox`, both through the `/Parent` chain,
+      normalised — §3) and passes its right edge to `reflow_tj_array`, which keeps its
+      caller-supplied limit for the gate tests. R4's refusal is translated to the `fits-width`
+      gate, carrying the two widths the decision compared: R3 says the change is the message, not
+      the gate, so the *needed* width is the growth and the *available* width is the line's own
+      room. Measured on the near-edge fixture: 9.064 pt of room against a 38.688 pt growth, so a
+      resolver that returned a wider box could not pass by rounding. Two further guards are on
+      `content_box` itself — the four selection properties (`/CropBox` first, `/MediaBox` default,
+      inheritance through the page tree for **both**, normalisation) and the two refusal shapes
+      (no box anywhere; a box present but unreadable, which must error rather than fall through
+      to the next attribute). Six mutations of `src-tauri/src/editor/reflow.rs` were each CAUGHT
+      via `scripts/mutate.sh --lib` and each restored green; the `ci.yml` floor was mutated both
+      ways and both were caught. Counts moved 527 -> 530 plain and 619 -> 622
+      `--include-ignored`, ignored unchanged at 92 — **measured, not incremented**, across all
+      four pin carriers. Row A10 stays `Missing`: R-6 has no caller, R-7 needs a confirmed
+      installer (Q9).
 
 - [ ] **R-6 Give `reflow_tj_array` a caller in the edit path.** Today it is reachable only from
       tests — §5.3 accepts that the *guard* has no caller, but the reflow itself must be wired

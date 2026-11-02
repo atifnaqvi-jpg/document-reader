@@ -16,8 +16,10 @@
 
 use lopdf::{content::Content, content::Operation, Document, Object, ObjectId};
 
+use crate::editor::geometry::PdfRect;
 use crate::editor::substitute::FontMetrics;
 use crate::editor::textlocate::{decoded_content, RawRun, RunId, XObjectStep};
+use crate::model::AppError;
 
 /// Which ruling refused a reflow request.
 ///
@@ -100,6 +102,12 @@ impl ReflowRefusal {
 pub struct ReflowRefused {
     pub rule: ReflowRefusal,
     pub run: RunId,
+    /// The two widths a refusal compared, as `(needed, available)`, when it compared two.
+    ///
+    /// R3 keeps the `fits-width` sentence's shape — both measured widths — and the numbers are
+    /// measured once, where the decision is made. Re-measuring them at the seam would let the
+    /// refusal say one thing while the rule decided another.
+    pub measured: Option<(f32, f32)>,
 }
 
 impl ReflowRefused {
@@ -107,6 +115,16 @@ impl ReflowRefused {
         Self {
             rule,
             run: run.clone(),
+            measured: None,
+        }
+    }
+
+    /// The same refusal, carrying the widths it compared: `needed` first, `available` second.
+    fn measured(rule: ReflowRefusal, run: &RunId, needed: f32, available: f32) -> Self {
+        Self {
+            rule,
+            run: run.clone(),
+            measured: Some((needed, available)),
         }
     }
 }
@@ -348,7 +366,15 @@ pub fn reflow_tj_array(
         .map(|candidate| candidate.page_origin.0 + candidate.advance)
         .fold(f32::NEG_INFINITY, f32::max);
     if line_right + growth > limit_x + f32::EPSILON {
-        return Err(ReflowRefused::new(ReflowRefusal::R4Wrap, target));
+        // The two widths the decision compared travel with the refusal: R3 keeps the gate's
+        // sentence, and re-measuring them at the seam would let the message describe a different
+        // comparison from the one that was made.
+        return Err(ReflowRefused::measured(
+            ReflowRefusal::R4Wrap,
+            target,
+            growth,
+            limit_x - line_right,
+        ));
     }
 
     // R2.1: the trailing run's new origin is **line origin + measured prefix**. The prefix is
@@ -422,6 +448,144 @@ pub fn reflow_tj_array(
     Ok((content, applied))
 }
 
+/// Widens one run of a multi-fragment `TJ` array and moves the runs after it with an inserted
+/// `Td`, refusing when the widened line leaves the page's **content box**.
+///
+/// This is the entry point a user edit takes: the box is resolved from the document itself
+/// (§3), so no caller can hand in a limit that is not this page's. [`reflow_tj_array`] keeps its
+/// caller-supplied limit because the gate tests exercise rules against a chosen number; R3's
+/// contract is about *where the number comes from*, and only this function can state it.
+///
+/// R3's refusal is the `fits-width` gate, not a reflow code of its own: the user is about to be
+/// judged by that gate, so a refusal that named a different rule would send them to a remedy
+/// that does not exist. It carries the gate's own sentence and both measured widths, with the
+/// line's available width standing where the run's own advance used to.
+pub fn reflow_line_within_content_box(
+    document: &Document,
+    page_index: u32,
+    page_id: ObjectId,
+    runs: &[RawRun],
+    target: &RunId,
+    replacement: &str,
+) -> Result<(Content<Vec<Operation>>, ReflowApplied), AppError> {
+    let box_ = content_box(document, page_id)?;
+    if !runs.iter().any(|candidate| candidate.id == *target) {
+        return Err(AppError::TextRunMismatch);
+    }
+
+    match reflow_tj_array(
+        document,
+        page_index,
+        page_id,
+        runs,
+        target,
+        replacement,
+        box_.x1,
+    ) {
+        Ok(success) => Ok(success),
+        // R4 is the rule that refuses when the *widened line* does not fit, which is exactly R3's
+        // decision. It reaches the user as `fits-width`, with this line's available width — the
+        // change R3 calls "a message change, not a gate change".
+        Err(refused) if refused.rule == ReflowRefusal::R4Wrap => {
+            let (needed, available) = refused.measured.ok_or_else(|| {
+                AppError::Other(
+                    "the width refusal did not record the widths it compared".to_string(),
+                )
+            })?;
+            Err(AppError::TextRunNotEditable(format!(
+                "the replacement needs {needed:.1}pt, available {available:.1}pt; \
+                 select a narrower range, or use the annotation tools to add a note \
+                 (gate: {})",
+                crate::editor::textedit::Gate::FitsWidth.name()
+            )))
+        }
+        Err(refused) => Err(AppError::TextRunNotEditable(format!("{refused}"))),
+    }
+}
+
+/// The page's content box: the `/CropBox`, defaulting to `/MediaBox` (ISO 32000-1 Table 30).
+///
+/// Both are **inheritable page attributes** (§7.7.3.4), so both are resolved up the `/Parent`
+/// chain, normalised, and read fresh. `export.rs`'s `media_box` must not be reused (§3.3): it has
+/// a US-Letter fallback and does not resolve inheritance, which is acceptable for placing a
+/// watermark and wrong for a gate — an A4 page that inherits its `/MediaBox` would be treated as
+/// Letter and reflowed into a margin the user cannot see.
+///
+/// A page with neither box anywhere in its chain is malformed, and inventing one would turn a
+/// malformed file into a wrong reflow decision, so it is an error rather than a default.
+pub fn content_box(document: &Document, page_id: ObjectId) -> Result<PdfRect, AppError> {
+    for key in [b"CropBox".as_slice(), b"MediaBox".as_slice()] {
+        if let Some(found) = inherited_box(document, page_id, key)? {
+            return Ok(found);
+        }
+    }
+    Err(AppError::Other(
+        "this page has neither a CropBox nor a MediaBox, so how much room its text has cannot \
+         be decided"
+            .to_string(),
+    ))
+}
+
+/// One inheritable box attribute, resolved up the `/Parent` chain and normalised.
+///
+/// `Ok(None)` means **absent from the page and every ancestor**, which is the only case that
+/// falls through to the next box attribute. A box that is *present* and unreadable is an error
+/// rather than an absence: treating a malformed `/CropBox` as missing would silently substitute
+/// the `/MediaBox` and reflow text into a region the user cannot see, which is the failure §3.2
+/// step 3 refuses to invent a box for, one level down.
+///
+/// Normalisation is not cosmetic either: reflow subtracts the line's right edge from `x1`, so a
+/// box given with its corners swapped would report a negative width, read as "no room", and
+/// refuse every edit on the page.
+fn inherited_box(
+    document: &Document,
+    page_id: ObjectId,
+    key: &[u8],
+) -> Result<Option<PdfRect>, AppError> {
+    let mut node_id = page_id;
+    for _ in 0..crate::editor::textlocate::MAX_PARENT_DEPTH {
+        let Ok(node) = document.get_dictionary(node_id) else {
+            break;
+        };
+        if let Ok(value) = node.get(key) {
+            return parse_box(document, value, key).map(Some);
+        }
+        let Ok(parent) = node.get(b"Parent").and_then(|object| object.as_reference()) else {
+            break;
+        };
+        node_id = parent;
+    }
+    Ok(None)
+}
+
+/// One box attribute's four coordinates, dereferenced and normalised.
+fn parse_box(document: &Document, value: &Object, key: &[u8]) -> Result<PdfRect, AppError> {
+    let malformed = || {
+        AppError::Other(format!(
+            "this page's {} is not four numbers, so how much room its text has cannot be \
+             decided",
+            String::from_utf8_lossy(key)
+        ))
+    };
+    let (_, resolved) = document.dereference(value).map_err(|_| malformed())?;
+    let array = resolved.as_array().map_err(|_| malformed())?;
+    let coordinate = |index: usize| -> Result<f32, AppError> {
+        array.get(index).ok_or_else(malformed).and_then(|operand| {
+            operand
+                .as_float()
+                .or_else(|_| operand.as_i64().map(|number| number as f32))
+                .map_err(|_| malformed())
+        })
+    };
+    Ok(PdfRect {
+        x0: coordinate(0)?,
+        y0: coordinate(1)?,
+        x1: coordinate(2)?,
+        y1: coordinate(3)?,
+    }
+    .normalised())
+}
+
 /// A PDF literal string holding `text`, with `\`, `(` and `)` escaped.
 fn escape_literal(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
@@ -438,6 +602,7 @@ fn escape_literal(text: &str) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::editor::textlocate::{locate_runs, page_id, write_level, MergeScope};
+    use lopdf::{dictionary, Stream};
     use std::path::Path;
 
     fn fixture(name: &str) -> std::path::PathBuf {
@@ -1540,5 +1705,317 @@ pub enum SomethingElse {
         let refused = reflow_tj_array(&document, 0, page, &runs, &target.id, "ABC", 100.0)
             .expect_err("no room on the line");
         assert_eq!(refused.rule, ReflowRefusal::R4Wrap);
+    }
+
+    /// Row A10's refusal case, on R-3's near-edge fixture.
+    ///
+    /// The row's refusal has to arrive through `fits-width` — the gate the user is judged by —
+    /// and it has to arrive because *this page's content box* has no room, not because a caller
+    /// handed in a limit. The document is the authority on its own box (§3), so this test names
+    /// no limit at all.
+    #[test]
+    fn a_replacement_too_wide_for_the_content_box_refuses_and_writes_nothing() {
+        const SIZE: f32 = 24.0;
+        let width = |text: &str| {
+            crate::editor::afm::text_width("Helvetica", text, SIZE)
+                .unwrap_or_else(|| panic!("Helvetica covers {text:?}"))
+        };
+
+        let source = fixture("reflow-line-near-edge.pdf");
+        let document = Document::load(&source).expect("the A10 near-edge fixture is committed");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+        let target = runs
+            .iter()
+            .find(|run| run.text == "ALPHA ")
+            .expect("the A10 fixture's edited run");
+
+        // The room this page has left, from the fixture itself: the content box's right edge
+        // less the line's own right edge. Both numbers are read, not transcribed.
+        let box_ = content_box(&document, page).expect("the fixture states a MediaBox");
+        let line_right = runs
+            .iter()
+            .map(|run| run.page_origin.0 + run.advance)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let room = box_.x1 - line_right;
+        assert!(
+            (room - 9.064).abs() < 0.05,
+            "the near-edge fixture leaves {room:.3} pt, not the 9.064 the builder intends"
+        );
+
+        // Preconditions: the replacement must be wider than the room and must be a *wider*
+        // replacement at all, or R1 refuses first and this test would be measuring R1.
+        let growth = width("ALPHAabc ") - width("ALPHA ");
+        assert!(
+            growth > room,
+            "the replacement grows the line by {growth:.3} pt and the room is {room:.3}; a \
+             replacement that fits cannot exercise the refusal"
+        );
+
+        let stream_before = document.get_page_content(page);
+        let refused =
+            reflow_line_within_content_box(&document, 0, page, &runs, &target.id, "ALPHAabc ")
+                .expect_err("a replacement wider than the content box has nowhere to go");
+
+        let AppError::TextRunNotEditable(message) = &refused else {
+            panic!("the content box's refusal must reach the user as a gate, got {refused:?}");
+        };
+        assert!(
+            message.contains("fits-width"),
+            "the refusal must name the gate the user is judged by: {message}"
+        );
+        // R3: the message keeps the gate's shape — both measured widths — with the *line's*
+        // available width standing where the run's own advance used to.
+        assert!(
+            message.contains(&format!("needs {growth:.1}pt")),
+            "the message must quote the width the replacement needs ({growth:.1}): {message}"
+        );
+        assert!(
+            message.contains(&format!("available {room:.1}pt")),
+            "the message must quote the room the line has left ({room:.1}): {message}"
+        );
+
+        assert_eq!(
+            document.get_page_content(page),
+            stream_before,
+            "a refusal must write nothing: the content stream changed"
+        );
+
+        // Non-vacuity, in both directions.
+        //
+        // (a) The same request on the wide-margin fixture succeeds, so the refusal above is this
+        // page's box talking and not the replacement. A guard that refused everything would pass
+        // the assertions above without a content box existing at all.
+        let roomy = fixture("reflow-line.pdf");
+        let mut roomy_document = Document::load(&roomy).expect("the A10 fixture is committed");
+        let roomy_page = page_id(&roomy_document, 0).expect("page 0");
+        let roomy_runs = locate_runs(&roomy_document, roomy_page).expect("runs");
+        let roomy_target = roomy_runs
+            .iter()
+            .find(|run| run.text == "ALPHA ")
+            .expect("the edited run");
+        let (content, applied) = reflow_line_within_content_box(
+            &roomy_document,
+            0,
+            roomy_page,
+            &roomy_runs,
+            &roomy_target.id,
+            "ALPHAabc ",
+        )
+        .expect("the same replacement fits a page with 389 pt to spare");
+        assert!(
+            (applied.shift - growth).abs() < 0.01,
+            "the write reports a shift of {}; the measured growth is {growth}",
+            applied.shift
+        );
+
+        // (b) A write *does* change the stream, so the equality above is not a statement about a
+        // function that never writes. Without this, the byte check would pass on a refusal that
+        // half-wrote and then returned an error.
+        write_level(&mut roomy_document, roomy_page, &[], &content).expect("write page");
+        assert_ne!(
+            roomy_document.get_page_content(roomy_page),
+            Document::load(&roomy)
+                .expect("the fixture reloads")
+                .get_page_content(roomy_page),
+            "the positive control must actually change the stream"
+        );
+    }
+
+    /// A one-page document whose page dictionary carries the given box attributes.
+    ///
+    /// `page` entries land on the page object, `inherited` ones on the `/Pages` node above it,
+    /// which is how a real producer writes a document-wide box. Both are needed: the resolver's
+    /// whole job is to tell "on this page" from "inherited", and a builder that could only write
+    /// one of them would leave half the chain untested.
+    fn boxed_page(
+        page: &[(&str, Vec<lopdf::Object>)],
+        inherited: &[(&str, Vec<lopdf::Object>)],
+    ) -> Document {
+        let mut document = Document::with_version("1.4");
+        let pages_id = document.new_object_id();
+        // The box is the subject here, so the font only has to be a real one: a Type1
+        // Helvetica with WinAnsi is what the fixtures use.
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let resources_id = document.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let content_id = document.add_object(Stream::new(
+            dictionary! {},
+            Content {
+                operations: Vec::new(),
+            }
+            .encode()
+            .unwrap(),
+        ));
+
+        let mut page_dict = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+        };
+        for (key, value) in page {
+            page_dict.set(key.to_string(), Object::Array(value.clone()));
+        }
+        let page_id = document.add_object(page_dict);
+
+        let mut pages_dict = dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+        };
+        for (key, value) in inherited {
+            pages_dict.set(key.to_string(), Object::Array(value.clone()));
+        }
+        document
+            .objects
+            .insert(pages_id, Object::Dictionary(pages_dict));
+
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        document.renumber_objects();
+        document
+    }
+
+    fn rect(values: [i64; 4]) -> Vec<lopdf::Object> {
+        values.iter().map(|value| Object::Integer(*value)).collect()
+    }
+
+    /// §3.1–§3.2: which box is the content box, in which order, through whose inheritance.
+    ///
+    /// Four properties, each of which is a way the wrong box has been chosen before:
+    ///
+    /// 1. `/CropBox` wins when the page states both;
+    /// 2. `/CropBox`'s absence falls back to `/MediaBox` (the default Table 30 names);
+    /// 3. both are resolved up the `/Parent` chain, so a document-wide box is not "absent";
+    /// 4. a box with swapped corners is normalised, or every edit on the page refuses.
+    ///
+    /// (3) is §3.3's reuse hazard made observable: `export.rs`'s `media_box` does not walk the
+    /// chain, so on an inherited box it returns US Letter's 612 whatever the page is. A resolver
+    /// that reused it would answer 612 to every question below.
+    #[test]
+    fn the_content_box_is_the_crop_box_defaulting_to_the_media_box_through_the_page_tree() {
+        let page_of = |document: &Document| page_id(document, 0).expect("page 0");
+
+        // (1) CropBox wins.
+        let both = boxed_page(
+            &[
+                ("MediaBox", rect([0, 0, 612, 792])),
+                ("CropBox", rect([10, 20, 300, 400])),
+            ],
+            &[],
+        );
+        assert_eq!(
+            content_box(&both, page_of(&both)).expect("both boxes stated"),
+            PdfRect {
+                x0: 10.0,
+                y0: 20.0,
+                x1: 300.0,
+                y1: 400.0
+            }
+        );
+
+        // (2) Absent CropBox defaults to the MediaBox.
+        let media_only = boxed_page(&[("MediaBox", rect([0, 0, 595, 842]))], &[]);
+        assert_eq!(
+            content_box(&media_only, page_of(&media_only)).expect("MediaBox states the box"),
+            PdfRect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 595.0,
+                y1: 842.0
+            },
+            "an A4 page must report A4, not a Letter fallback"
+        );
+
+        // (3) Both are inheritable. A page that states neither takes the /Pages node's box —
+        // and for the CropBox specifically, so the chain is walked once per attribute rather
+        // than once in total.
+        let inherited_media = boxed_page(&[], &[("MediaBox", rect([0, 0, 595, 842]))]);
+        assert_eq!(
+            content_box(&inherited_media, page_of(&inherited_media)).expect("inherited MediaBox"),
+            PdfRect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 595.0,
+                y1: 842.0
+            },
+            "an inherited box is not an absent one"
+        );
+        let inherited_crop = boxed_page(
+            &[("MediaBox", rect([0, 0, 612, 792]))],
+            &[("CropBox", rect([36, 36, 576, 756]))],
+        );
+        assert_eq!(
+            content_box(&inherited_crop, page_of(&inherited_crop)).expect("inherited CropBox"),
+            PdfRect {
+                x0: 36.0,
+                y0: 36.0,
+                x1: 576.0,
+                y1: 756.0
+            },
+            "an inherited CropBox must beat the page's own MediaBox"
+        );
+
+        // (4) Normalisation: the same rectangle with its corners swapped.
+        let swapped = boxed_page(&[("MediaBox", rect([612, 792, 0, 0]))], &[]);
+        assert_eq!(
+            content_box(&swapped, page_of(&swapped)).expect("swapped corners"),
+            PdfRect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 612.0,
+                y1: 792.0
+            },
+            "a reversed box must be normalised, or every edit on the page reports no room"
+        );
+    }
+
+    /// §3.2 step 3 and its neighbour: the resolver refuses rather than inventing a box.
+    ///
+    /// Two shapes, and they are different failures:
+    ///
+    /// * **no box anywhere** — a malformed page. Inventing Letter here would turn a malformed
+    ///   file into a wrong reflow decision;
+    /// * **a box that is present but unreadable** — and this one is the trap. Falling through to
+    ///   the next attribute would substitute the `/MediaBox` for a broken `/CropBox`, silently
+    ///   widening the region text may enter. The assertion is that it is an error, not that the
+    ///   MediaBox came back, because the MediaBox *would* come back if the fall-through were
+    ///   written the obvious way.
+    #[test]
+    fn a_page_without_a_readable_box_refuses_instead_of_inventing_one() {
+        let absent = boxed_page(&[], &[]);
+        let error = content_box(&absent, page_id(&absent, 0).expect("page 0"))
+            .expect_err("a page with no box anywhere is malformed, not Letter");
+        assert!(
+            error
+                .to_string()
+                .contains("neither a CropBox nor a MediaBox"),
+            "the refusal must say which attributes it looked for: {error}"
+        );
+
+        let mut broken = boxed_page(&[("MediaBox", rect([0, 0, 612, 792]))], &[]);
+        let page = page_id(&broken, 0).expect("page 0");
+        broken
+            .get_object_mut(page)
+            .expect("page object")
+            .as_dict_mut()
+            .expect("page dictionary")
+            .set("CropBox", Object::Array(vec![Object::Integer(1)]));
+        let error = content_box(&broken, page)
+            .expect_err("a malformed CropBox must not fall through to the MediaBox");
+        assert!(
+            error.to_string().contains("CropBox is not four numbers"),
+            "the refusal must name the attribute that is malformed: {error}"
+        );
     }
 }

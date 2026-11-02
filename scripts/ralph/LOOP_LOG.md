@@ -1265,3 +1265,77 @@ open defect: the Windows suite crashes intermittently*.
   - Next startable: **R-5** (the near-edge refusal, `fits-width`, stream byte-unchanged), then
     **R-6** (wire `reflow_tj_array` into the edit path). **T-8b** and **R-H2** remain open and
     block neither.
+
+## Iteration 27 — 2026-11-01 — R-5 (row A10's refusal case) — green
+
+- Task: R-5 — write row A10's refusal half against R-3's near-edge fixture: the refusal must come
+  from *this page's content box* through the `fits-width` gate, and the stream must be
+  byte-unchanged afterwards.
+- Test: `a_replacement_too_wide_for_the_content_box_refuses_and_writes_nothing` (red before: **yes**
+  — the behaviour did not exist; measured on the fixture, today's `reflow_tj_array` with the box's
+  right edge as a limit refuses as `R4-wrap` with a message about wrapping, and there was no
+  resolver at all, so `content_box` returned nothing). Two more guards:
+  `the_content_box_is_the_crop_box_defaulting_to_the_media_box_through_the_page_tree` and
+  `a_page_without_a_readable_box_refuses_instead_of_inventing_one` (both new code, so red before by
+  absence rather than by assertion).
+- Files: `src-tauri/src/editor/reflow.rs` (`reflow_line_within_content_box`, `content_box`,
+  `inherited_box`, `parse_box`, `ReflowRefused::measured`, three tests),
+  `src-tauri/src/editor/textlocate.rs` (`MAX_PARENT_DEPTH` now `pub(crate)`, one reason noted),
+  `docs/P2.8-reflow-DESIGN.md` (status, §6.1 test cell, an R-5 paragraph in §6.2),
+  `.github/workflows/ci.yml` (the `-lt` floor 527 -> 530 with the reason), `src-tauri/tests/
+  ci_workflow.rs` (the matching assertion), `scripts/ralph/{gate.sh,PROMPT.md,
+  IMPLEMENTATION_PLAN.md,LOOP_LOG.md}` (all four count carriers).
+- Gate: cargo test **530 passed / 92 ignored**, AND `--include-ignored` **622 passed / 0 ignored**,
+  clippy clean (`-D warnings`), tsc clean, vitest **69 passed**, `cargo fmt --check` clean. Both
+  counts moved by the measured amount: 527 -> 530 and 619 -> 622; **measured, not incremented**
+  (`--no-fail-fast`, summing libtest's own totals). `ignored` is unchanged at 92 because all
+  three new tests call code rather than PDFium.
+- Commit: see `git log` (this entry is in the commit it describes).
+- Learned:
+  - **The gate's own parity guard is what made "which file holds the pin" answerable, and the
+    answer moved.** `ci.yml`'s floor is a `-lt`, so it is direction-blind by construction: only a
+    *lowering* is caught by the property it claims, and a raising is caught only because the guard
+    is an equality on the literal. Both directions were mutated (530 -> 529, 530 -> 531) and both
+    were CAUGHT by `the_linux_job_pins_the_measured_passed_floor`. That is the AGENTS.md rule about
+    floors applied rather than quoted: a floor under the measured count would pass on a lost test,
+    so the number must equal the measurement, and `ignored` must stay put when no test is ignored.
+  - **A message is part of a refusal, so the widths the decision compared must travel with it.**
+    The first shape re-measured the two numbers at the seam with `FontMetrics::resolve`, which is a
+    *second* measurement of the same quantity — the same class of defect as the doc comment that
+    claims one thing while the code does another. `ReflowRefused` now carries `(needed, available)`
+    from the point of the comparison, and a mutation that swapped `available` for the run's own
+    advance (`old_width`) was CAUGHT. That number is exactly what R3 says changes.
+  - **The malformed-box case is the trap the obvious implementation walks into.** Writing
+    `inherited_box` to return `Option` — the signature the rest of this module uses — makes a
+    present-but-unreadable `/CropBox` indistinguishable from an absent one, so the resolver falls
+    through to the `/MediaBox` and silently widens the region text may enter. It is now
+    `Result<Option<_>>` and the mutation that restored the fall-through was CAUGHT by the second
+    assertion (the message names `CropBox`). §3.2 step 3 refuses to *invent* a box; this is the same
+    refusal one level down, and it needed its own test because the "no box anywhere" test cannot
+    see it.
+  - **`export.rs`'s `media_box` is a real reuse hazard and the A4 case is what makes it visible.**
+    It has a US-Letter fallback and does not walk the `/Parent` chain, so on an inherited A4 box it
+    answers 612. The resolver's guard uses an inherited **595 x 842** box for this reason: a
+    resolver that reused it would fail there, not on `reflow-line.pdf`, whose box is Letter either
+    way. §3.3 says this in prose; the test is what makes the prose checkable.
+  - **Six mutations, all in `src-tauri/src/editor/reflow.rs`, all CAUGHT and all restored green**:
+    `/MediaBox` before `/CropBox`; the `/Parent` walk deleted; the malformed fall-through; the box
+    replaced by `f32::INFINITY` as the limit; `available` reported as `old_width`; and
+    `.normalised()` dropped. `git diff --stat` named the guarded file in each run. The first three
+    are resolver properties and the last three are properties of the wrapper — which is also why
+    the resolver got its own tests: the wrapper's guard cannot observe which box was chosen, only
+    that *a* limit was applied.
+  - **`scripts/mutate.sh` needed `--lib` for the unit binary and nothing else.** Every invocation
+    was `--lib <test-name>`; passing `--manifest-path` as well (iteration 26's mistake) makes it
+    exit 3. The pin guards were run with `--test ci_workflow <name>` and
+    `MUTATE_RUNTIME_READ=.github/workflows/ci.yml`, which is the runtime-read class: `Compiling`
+    is neither required nor evidence there.
+  - **`MAX_PARENT_DEPTH` was `const` and private to `textlocate`; it is now `pub(crate)`.** Two
+    independent "how deep is a page tree" bounds would be two answers to one question, and the
+    content-box resolver walks the same chain for the same reason.
+  - **Row A10 stays `Missing` and the phase stays `[~]`.** R-6 has no caller in the edit path and
+    R-7 is forbidden without a confirmed installer (Q7/Q9). This iteration moves the refusal half
+    and closes nothing.
+  - Next startable: **R-6** (wire `reflow_tj_array`/`reflow_line_within_content_box` into the edit
+    path, with D-2 and an inverse restoring the exact pre-edit bytes), then **U-2**. **T-8b** and
+    **R-H2** remain open and block neither.

@@ -156,6 +156,11 @@ jobs:
           # count stays 90.
           #
           #
+          # Measured at 530, not 527: R-5 added three non-PDFium guards (527 -> 530) -- the
+          # content-box refusal on the near-edge fixture, the content-box resolver's four
+          # selection properties, and the resolver's refusal to invent a box. All three call
+          # code rather than opening PDFium, so the ignored count stays 92.
+          #
           # Measured at 527, not 526: T-8 added one non-PDFium guard (526 -> 527), the hand-built
           # `Tz 50` pen walk. It needs no library and its PDFium sibling is the ignored one above.
           #
@@ -169,8 +174,8 @@ jobs:
           # comparison and the crafted sample that proves its parser can see a defect. Both read
           # `.github/workflows/ci.yml` and `scripts/ralph/gate.sh` with `std::fs`, so neither
           # needs PDFium and the ignored count stays 90.
-          if [ "$passed" -lt 527 ]; then
-            echo "::error::only $passed tests ran; 527 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 530 ]; then
+            echo "::error::only $passed tests ran; 530 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

@@ -3290,7 +3290,10 @@ pub(crate) fn writable_resources_mut(
 
 /// How far up the `/Parent` chain resource inheritance is followed. PDF specifies no depth
 /// limit; the bound only stops a malformed cyclic tree from looping.
-const MAX_PARENT_DEPTH: usize = 64;
+///
+/// `pub(crate)` because P2.8's content-box resolver follows the same chain for `/CropBox` and
+/// `/MediaBox` (§3.2), and a second bound would be a second answer to "how deep is a page tree".
+pub(crate) const MAX_PARENT_DEPTH: usize = 64;
 
 /// Where the `/Font` map a page must be edited through actually is.
 enum ResourcesSlot {
