@@ -868,18 +868,42 @@ asserting positions**, not before R-1..R-3.
       `a_kerned_prefix_includes_the_kern` compares `moved_to` to a *hand-computed* expectation
       and would go on agreeing with itself. Not blocking R-4, which is at `Tz 100`.
 
-- [ ] **R-H2 Add `cargo fmt --check` to the gate.** **New work discovered 2026-11-01.** The
-      gate script runs `cargo test` (both shapes), `cargo clippy`, `tsc` and `vitest`, and CI runs
-      `cargo fmt --check`; the *local* gate does not. Measured: after R-2a landed, the committed
-      tree at `f01c792` was **not** `cargo fmt`-clean (`cargo fmt --check` named two `Tm`
+- [x] **R-H2 Add `cargo fmt --check` to the gate.** **Landed 2026-11-02 (`144f65c`, with
+      `7022633` updating the header it invalidated and `1183b45` adding the parity guard).** The
+      row as first written is kept below, because it names the drift it was filed for and that
+      drift was real; the citation is corrected here.
+
+      **What was actually built, cited by symbol rather than by description:**
+      - `scripts/ralph/gate.sh` runs `cargo fmt --check` in `src-tauri` alongside both
+        `cargo test` shapes, clippy with `-D warnings`, `tsc` and `vitest`. Its header comment
+        records the two drifts by commit, so a later reader does not have to re-derive why fmt
+        is not optional: it was in CI and absent from the gate until `144f65c`, and clippy ran
+        without `-D warnings` until `dfb8549`.
+      - `src-tauri/tests/gate_parity.rs :: the_gate_runs_the_checks_ci_requires` is the
+        acceptance test. It compares the `run:` bodies in `ci.yml` against the commands in the
+        gate and fails on a check present in one and absent from the other, with an explicit
+        `ci-exemptions` block for steps that cannot run locally. Two checks are additionally
+        pinned by name, so the comparison cannot be satisfied by excusing them: `cargo fmt
+        --check` and `cargo clippy --all-targets -- -D warnings`. The row asked for the
+        allow-list to be "non-empty-and-claimed rather than a wildcard", which is what that
+        pin does, and for the comparison to be by command rather than step name, which is what
+        `command_body` implements.
+      - The floor comment in that test reads **measured at 2**, and the assertion is `executed
+        >= 2`; lowering it is the drift, not a clean tree.
+      - `the_parity_check_reports_what_it_is_given` guards the comparator itself, so a matcher
+        that finds nothing cannot make the parity test pass by reading an empty set as
+        agreement.
+
+      **Corrected name:** this row named the test `the_gate_runs_every_check_ci_runs`. No such
+      test exists; the real name is `the_gate_runs_the_checks_ci_requires`. Recorded rather
+      than silently fixed, because a plan row citing a test that does not exist is the same
+      defect class the citation guards exist to catch — and it is exactly what happened here.
+
+      **Why the row was written in the first place, kept verbatim:** after R-2a landed, the
+      committed tree at `f01c792` was not `cargo fmt`-clean (`cargo fmt --check` named two `Tm`
       operator vectors in `testpdf.rs`), and nothing in the loop reported it. R-2b's own run
-      formatted them as a side effect, which is how the drift was found rather than avoided.
-      A gate that is a strict subset of CI's is a gate that can report green on a tree CI rejects.
-      Acceptance test first: `the_gate_runs_every_check_ci_runs` — compare the `run:` commands in
-      `ci.yml` against the commands in `scripts/ralph/gate.sh` and fail on a check present in one
-      and absent from the other, with an explicit allow-list for steps that cannot run locally.
-      **NEW ASSERTION:** that the comparison is by command, not by step name, and that the
-      allow-list is non-empty-and-claimed rather than a wildcard.
+      formatted them as a side effect, which is how the drift was found rather than avoided. A
+      gate that is a strict subset of CI's is a gate that can report green on a tree CI rejects.
 
 ## Loop hygiene (do every iteration)
 
