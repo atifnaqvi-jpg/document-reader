@@ -137,6 +137,14 @@ check exists because the carriers in the tree and the string the installer embed
 by different steps, and a mismatch would produce a download that is not the build described
 here.
 
+**The artifact is not stale, and that is a measurement rather than an assumption.** It was
+built at `1e6bfd8`; the tree has moved since. Every commit after it touches only
+`docs/RELEASE-NOTES.md` and `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`, and no document is
+compiled into the binary — the only `include_bytes!` in the crate is the font payload. So the
+installer is the same program as a build of the current tree; it differs from it only in not
+containing the notes that describe it. If a future commit changes code, this artifact stops
+being the hand-test target and a fresh dispatch is required.
+
 **What a human needs to confirm**, at minimum — the reflow path end to end, since that is the
 whole of P2.8:
 
