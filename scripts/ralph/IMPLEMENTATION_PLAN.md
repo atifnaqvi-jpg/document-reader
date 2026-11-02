@@ -775,13 +775,21 @@ confirmed installer), C-2 (line-level only), and the parity plan's §4 invariant
       Four mutants, all CAUGHT; the staleness one **survived first**, which is why
       `a_vector_leg_refuses_when_its_operations_changed_since` exists.
 
-- [ ] **U-2 Replay `ReflowOperation`.** U-1 acceptance (b), the only criterion X3 did not deliver.
-      Depends on the §7.4 ruling (share the persisted record, or a sibling leg).
-      Acceptance test first: `a_reflow_shaped_multi_operand_edit_is_one_undo`.
-      **NEW ASSERTION:** one undo restores the pre-reflow stream after a write that inserted a
-      `Td`, as a single entry — i.e. the `TJ` + `Td` + `TJ` vector is restored in one step, not
-      one step per operator. `undo_restores_the_do_and_drops_the_clone` covers a *different*
-      kind of grouped write (`Do` + clone), so it is not evidence for this.
+- [x] **U-2 Replay `ReflowOperation`.** Landed 2026-11-02. U-1 acceptance (b).
+      **The §7.4 ruling resolved itself into ruling A**: the persisted record and the inverse are
+      the *same* leg (`ContentOperation.ops`), not a sibling. `ReflowOperation` stays what it
+      is — an in-memory description of the write, no `serde` impl, and its own doc says undo is
+      not wired — and `OpVector` is the persistable form of the same three operations. That is
+      why no new mechanism was needed: R-6's vector leg already replayed.
+      Acceptance test: `a_reflow_shaped_multi_operand_edit_is_one_undo`. It asserts the write
+      inserted a `Td`; that the inverse is **one** leg covering **3** operations rather than one
+      entry per operator; that the leg survives a `serde_json` round trip (the claim "persisted"
+      depends on); and that one undo restores the exact pre-reflow stream in one splice.
+      `undo_restores_the_do_and_drops_the_clone` covers a *different* grouped write (`Do` +
+      clone, operator count unchanged) and was not treated as evidence.
+      Mutants, both CAUGHT: the splice restoring nothing, and `ops` marked `skip_serializing`.
+      The second is the load-bearing one — the in-memory path stays green under it, so only the
+      round-trip assertion can see a leg that never reaches the UI.
 
 - [ ] **R-7 Row A10 `Missing → Have`, and the 1.0.0 bump.** Last, and only after a confirmed
       installer (Q9). Bumping to 1.0.0 before that is forbidden by Q7's intent even though Q7
