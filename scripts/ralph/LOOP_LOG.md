@@ -1339,3 +1339,60 @@ open defect: the Windows suite crashes intermittently*.
   - Next startable: **R-6** (wire `reflow_tj_array`/`reflow_line_within_content_box` into the edit
     path, with D-2 and an inverse restoring the exact pre-edit bytes), then **U-2**. **T-8b** and
     **R-H2** remain open and block neither.
+
+## Iteration 28 — 2026-11-02 — T-8b (the reflow's own `Tz`) — green
+
+- **Task:** `reflow_tj_array` measured both its replacement width and its `TJ` kern term in
+  unscaled text space, so on a `Tz != 100` page it reported a tail at the `Tz 100` answer.
+- **Test:** `a_reflows_reported_tail_origin_matches_the_ink_at_tz_50` (`#[ignore]`d) and its
+  no-library sibling `the_reflows_tail_position_carries_the_horizontal_scale`. **Red before:
+  yes** — the plain sibling reported **136.704** against 104.352; the ignored sibling failed at
+  the *ink* assertion (`C` drawn at **133.704** against 104.352), so the write really did land
+  the tail where the wrong number said, not merely report wrongly.
+- **Files:** `src-tauri/src/editor/reflow.rs`, `src-tauri/src/editor/textlocate.rs`
+  (`RawRun::horizontal_scale` + walker accessor), `src-tauri/src/editor/textedit.rs` (test
+  literal), `src-tauri/tests/ci_workflow.rs`, `.github/workflows/ci.yml`, `scripts/ralph/gate.sh`,
+  `scripts/ralph/PROMPT.md`, `scripts/ralph/IMPLEMENTATION_PLAN.md`,
+  `docs/P2.8-reflow-DESIGN.md`.
+- **Gate:** `cargo test` **531 passed / 93 ignored**, AND `--include-ignored` **624 passed / 0
+  ignored**, clippy `-D warnings` clean, `cargo fmt --check` clean, tsc clean, vitest **69
+  passed**. Counts measured with `--no-fail-fast` and summed from libtest's own totals, then set
+  in all four carriers in this commit.
+- **Commit:** see below.
+- **Learned:**
+  - **The task text named half the defect.** It said the kern term omitted `Tz`; the *replacement
+    measurement* omitted it too, and that is the larger half — 29.352 pt against 3.000. Fixing
+    only `kern_after_target` would have left the acceptance test red at 133.704 and read as "the
+    fix did not work". When a task names one arithmetic omission in a function, check every other
+    `* Tf` in the same function before writing the fix.
+  - **`shift` was correct for the wrong reason and is now correct for the right one.** It
+    subtracted `run.origin.0 + old_width + kern` from `moved_to`, and before the fix both sides
+    carried the same unscaled kern, so the difference was right by cancellation. The plain guard
+    asserts `shift == scaled_growth` independently, so the two halves cannot cancel into a pass
+    again.
+  - **A `Tz 0` page reaches `measure_scaled` as `scale == 0.0`, not as a `None` metrics answer.**
+    Returning `Some(0.0)` there would satisfy `new_width <= old_width` and refuse as **R1**, whose
+    message names the wrong remedy ("not wider") for a page whose advance axis has collapsed.
+    `measure_scaled` returns `None` in that case instead, which routes to the existing
+    `NotOneArray` refusal rather than inventing a gate this module does not own — `DegenerateText`
+    is `textedit`'s. No test drives this today; recorded rather than papered over.
+  - **Mutation evidence, all in `reflow.rs` (`git diff` named it each time, `cmp -l` confirmed
+    the bytes changed):** dropping `* scale` from the width (CAUGHT by the plain sibling), from
+    the kern term (CAUGHT), and the width again against the `#[ignore]`d sibling (CAUGHT). All
+    restored and re-run green — each is a pair, not a single red run.
+  - **The `ci.yml` pins were mutated in the guarded file, not the guard.** The ignored pin is an
+    equality, so it was mutated **both** ways (**93 -> 92** and **93 -> 94**); the `passed` floor
+    was mutated **down** to 530. All three were CAUGHT by
+    `the_linux_job_does_not_force_pdfium_tests_without_a_library` — the Linux guard, *not*
+    `the_windows_job_asks_for_ignored_tests_and_counts_them`, which reports a false SURVIVED for
+    this pin (the memory note from `ddd9615`). Restored: 8/8 green.
+  - **`scripts/ralph/gate.sh` refuses to run while it is dirty**, so the pins had to be *edited*
+    here and the six commands run individually first. They all passed; `gate.sh`'s own run is the
+    post-commit confirmation, not a pre-commit substitute.
+  - Next startable: **R-6** — still the only path to closing row A10, and it still needs the
+    §7.4 inverse-record ruling before it can be written test-first (a `ReflowOperation` that undo
+    replays must have a persisted shape, and U-2 is blocked on the same ruling). **R-H2** is
+    mechanically already satisfied — `gate.sh` runs `cargo fmt --check` at line 115 and
+    `gate_parity.rs` asserts it cannot be exempted — but its task text still says `[ ]` and its
+    named test `the_gate_runs_every_check_ci_runs` does not exist under that name; left for the
+    user to close rather than checked on a name that does not match.

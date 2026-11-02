@@ -2755,6 +2755,7 @@ mod tests {
             style_class: font.to_string(),
             marked_content: Vec::new(),
             rise: 0.0,
+            horizontal_scale: 1.0,
             xobject_refusal: None,
         }
     }

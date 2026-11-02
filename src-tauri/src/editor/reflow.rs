@@ -347,9 +347,26 @@ pub fn reflow_tj_array(
     let metrics = FontMetrics::resolve(document, page_id, &run.font_key);
     let measure = |text: &str| -> Option<f32> { metrics.advance(text, run.font_size) };
 
-    let old_width =
-        measure(&run.text).ok_or_else(|| ReflowRefused::new(ReflowRefusal::NotOneArray, target))?;
-    let new_width = measure(replacement)
+    // T-8b: the font metrics are **unscaled** text space — `advance` is the font's own `w0` sum at
+    // `Tf`, with no `Tz`. The line's origins and advances are *scaled*, because the walk applied
+    // `Tz/100` to every glyph advance and every `TJ` kern (ISO 32000-1 9.4.3, 9.4.4). A replacement
+    // measured unscaled and then placed in scaled space is `1 - Tz/100` too wide, and at `Tz 50`
+    // on `kerned-line-tz.pdf` that reported a tail at 136.704 that the ink draws at 104.352.
+    let scale = run.horizontal_scale;
+    let measure_scaled = |text: &str| -> Option<f32> {
+        let width = measure(text)?;
+        // `Tz 0` collapses the advance axis: the run cannot be laid out at all, and the gate that
+        // says so (`DegenerateText`) is `textedit`'s, not reflow's. Reporting a zero width here
+        // would satisfy `new_width <= old_width` and refuse as R1, naming the wrong remedy.
+        if scale <= 0.0 {
+            return None;
+        }
+        Some(width * scale)
+    };
+
+    let old_width = measure_scaled(&run.text)
+        .ok_or_else(|| ReflowRefused::new(ReflowRefusal::NotOneArray, target))?;
+    let new_width = measure_scaled(replacement)
         .ok_or_else(|| ReflowRefused::new(ReflowRefusal::NotOneArray, target))?;
 
     // R1: an equal-or-narrower replacement moves nothing, and moving nothing is not reflow.
@@ -389,13 +406,14 @@ pub fn reflow_tj_array(
     // moves the tail in the original line and must move with the replacement. Omitting it makes
     // `moved_to` an intention rather than the position the ink lands on — the R8b.1 failure in a
     // different disguise. The numbers are thousandths of an em and are subtracted (ISO 32000-1
-    // 9.4.3). Everything here is unscaled text space: `Tz` does not enter, and this module is at
-    // `Tz 100` until the reader's own `Tz` factor lands (design R10.1, plan T-8).
+    // 9.4.3), and the resulting displacement is scaled by `Tz/100` like every other advance on the
+    // line (9.4.4) — the same factor the reader's own kern term carries since T-8, so the two
+    // sides of this module cannot disagree about where a kerned tail starts (T-8b).
     let kern_after_target = -items[fragment_index + 1..]
         .iter()
         .take_while(|item| !matches!(item, Object::String(_, _)))
         .filter_map(|item| item.as_float().ok())
-        .map(|number| number / 1000.0 * run.font_size)
+        .map(|number| number / 1000.0 * run.font_size * scale)
         .sum::<f32>();
     let prefix_before_target = run.origin.0 - line_origin;
     // Where the `Td` must put the pen: the tail's start **before** its kern. The number stays in
@@ -407,7 +425,9 @@ pub fn reflow_tj_array(
     let moved_to = line_origin + tail_pen + kern_after_target;
     let offset = td_offset(line_origin, tail_pen);
     // The tail sat at the old prefix, which carried the same kern, so the displacement is exactly
-    // the growth: a `shift` that added the kern would overstate the move.
+    // the growth: a `shift` that added the kern would overstate the move. T-8b: both operands are
+    // scaled, so this is the *scaled* growth — it was the correct number before the scale entered
+    // the widths too, but only because both sides were unscaled by the same factor.
     let shift = moved_to - (run.origin.0 + old_width + kern_after_target);
 
     // Split the array at the tail: everything up to and including the target in one `TJ`, an
@@ -651,6 +671,7 @@ mod tests {
             style_class: "Helvetica".to_string(),
             marked_content: Vec::new(),
             rise: 0.0,
+            horizontal_scale: 1.0,
             page_origin: (x, 700.0),
             page_scale: Some(1.0),
             frame: crate::editor::geometry::RunFrame::PAGE,
@@ -1399,6 +1420,129 @@ pub enum SomethingElse {
             (w_after - w_before).abs() < 0.05,
             "the control line moved {:.3} pt",
             w_after - w_before
+        );
+    }
+
+    /// T-8b: the reflow's own measurements carry `Tz`, so the position it reports is the
+    /// position a scaled page's ink lands on.
+    ///
+    /// `kerned-line-tz.pdf` is `Tz 50`, `Td 72 700`, `TJ [(AB) -250 (CD)]` at `Tf 24`. The reader
+    /// places `CD` at **91.008** (T-8: `72 + 16.008 + 3`), so its origin is *scaled* text space.
+    /// Widening `AB` to `ABab` grows the line by **29.352** and the 3 pt kern stays in the tail's
+    /// prefix, so the tail's ink starts at **104.352**. Unscaled arithmetic reports and writes
+    /// **136.704** — the `Tz 100` answer, 32.352 pt too far right, of which 29.352 is the width
+    /// factor and 3.000 the kern factor.
+    ///
+    /// This runs without PDFium on purpose: the defect is arithmetic, and the `#[ignore]`d sibling
+    /// below is the only test that also compares against ink. Linux CI never runs that one.
+    #[test]
+    fn the_reflows_tail_position_carries_the_horizontal_scale() {
+        const SIZE: f32 = 24.0;
+        const UNSCALED_AB: f32 = (667.0 + 667.0) / 1000.0 * SIZE; // 32.016
+        const UNSCALED_ABAB: f32 = (667.0 + 667.0 + 556.0 + 556.0) / 1000.0 * SIZE; // 58.704
+        const UNSCALED_KERN: f32 = 250.0 / 1000.0 * SIZE; // 6.000
+        const LINE_ORIGIN: f32 = 72.0;
+        let scale = crate::editor::testpdf::KERNED_LINE_TZ as f32 / 100.0;
+
+        let source = fixture("kerned-line-tz.pdf");
+        let document = Document::load(&source).expect("fixture loads");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+        let ab = runs.iter().find(|run| run.text == "AB").expect("AB");
+        let cd = runs.iter().find(|run| run.text == "CD").expect("CD");
+
+        // Precondition: the reader *is* scaled, so `origin` is not the unscaled pen. Without
+        // this a fixture that lost its `Tz` would make every number below agree with itself.
+        assert!(
+            (cd.origin.0 - (LINE_ORIGIN + UNSCALED_AB * scale + UNSCALED_KERN * scale)).abs()
+                < 0.05,
+            "the reader puts `CD` at {:.3}; a scaled walk puts it at {:.3}",
+            cd.origin.0,
+            LINE_ORIGIN + UNSCALED_AB * scale + UNSCALED_KERN * scale
+        );
+
+        let (_, applied) = reflow_tj_array(&document, 0, page, &runs, &ab.id, "ABab", 1000.0)
+            .expect("a wider replacement in one array is case (a)");
+
+        let scaled = LINE_ORIGIN + UNSCALED_ABAB * scale + UNSCALED_KERN * scale;
+        let unscaled = LINE_ORIGIN + UNSCALED_ABAB + UNSCALED_KERN;
+        assert!(
+            (unscaled - scaled).abs() > 0.05,
+            "`Tz {}` moves the answer only {:.3} pt — this fixture could not tell the two \
+             readings apart",
+            crate::editor::testpdf::KERNED_LINE_TZ,
+            unscaled - scaled
+        );
+        assert!(
+            (applied.moved_to - scaled).abs() < 0.05,
+            "the reflow reports its tail at {:.3}; a scaled walk puts it at {:.3} \
+             (the `Tz 100` answer is {:.3})",
+            applied.moved_to,
+            scaled,
+            unscaled
+        );
+        // The move is the *scaled* growth: comparing against the unscaled one would put the
+        // tail a further 13.344 pt right without changing the reported number.
+        let scaled_growth = (UNSCALED_ABAB - UNSCALED_AB) * scale;
+        assert!(
+            (applied.shift - scaled_growth).abs() < 0.01,
+            "the tail moved {} pt; the scaled growth is {scaled_growth}",
+            applied.shift
+        );
+    }
+
+    /// T-8b's acceptance test: the position the reflow **reports** is the position the ink
+    /// **lands on**, at a horizontal scaling that is not 100.
+    ///
+    /// `a_kerned_prefix_includes_the_kern` compares `moved_to` to a hand-computed expectation at
+    /// `Tz 100`, where every `Tz/100` factor is arithmetically invisible; it agrees with itself
+    /// whatever the reflow does. The quantity that must be compared to ink is `moved_to`, not
+    /// `shift` — `shift` is the growth, and a report that is the unscaled answer can still move
+    /// by a plausible number.
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn a_reflows_reported_tail_origin_matches_the_ink_at_tz_50() {
+        const SIZE: f32 = 24.0;
+        const UNSCALED_AB: f32 = (667.0 + 667.0) / 1000.0 * SIZE;
+        const UNSCALED_ABAB: f32 = (667.0 + 667.0 + 556.0 + 556.0) / 1000.0 * SIZE;
+        const UNSCALED_KERN: f32 = 250.0 / 1000.0 * SIZE;
+        const LINE_ORIGIN: f32 = 72.0;
+        let scale = crate::editor::testpdf::KERNED_LINE_TZ as f32 / 100.0;
+
+        let source = fixture("kerned-line-tz.pdf");
+        let mut document = Document::load(&source).expect("fixture loads");
+        let page = page_id(&document, 0).expect("page 0");
+        let runs = locate_runs(&document, page).expect("runs");
+        let ab = runs.iter().find(|run| run.text == "AB").expect("AB");
+
+        let c_before = at(&ink(&source), 'C', 700.0);
+        assert!(
+            (c_before - (LINE_ORIGIN + UNSCALED_AB * scale + UNSCALED_KERN * scale)).abs() < 0.05,
+            "`CD` is not scaled where 9.4.3 puts it: `C` drew at {c_before:.3}, expected {:.3}",
+            LINE_ORIGIN + UNSCALED_AB * scale + UNSCALED_KERN * scale
+        );
+
+        let (content, applied) = reflow_tj_array(&document, 0, page, &runs, &ab.id, "ABab", 1000.0)
+            .expect("a wider replacement in one array is case (a)");
+        write_level(&mut document, page, &[], &content).expect("write page");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let edited = directory.path().join("reflowed-tz.pdf");
+        document.save(&edited).expect("save");
+
+        let c_after = at(&ink(&edited), 'C', 700.0);
+        let expected = LINE_ORIGIN + UNSCALED_ABAB * scale + UNSCALED_KERN * scale;
+        assert!(
+            (c_after - expected).abs() < 0.05,
+            "the write put `C` at {c_after:.3}; a scaled walk puts it at {expected:.3} \
+             (`Tz 100` would give {:.3})",
+            LINE_ORIGIN + UNSCALED_ABAB + UNSCALED_KERN
+        );
+        assert!(
+            (applied.moved_to - c_after).abs() < 0.05,
+            "the reflow reports its tail at {:.3}; the renderer drew it at {c_after:.3} — off by \
+             {:.3} pt",
+            applied.moved_to,
+            applied.moved_to - c_after
         );
     }
 

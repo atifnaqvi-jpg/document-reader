@@ -134,6 +134,19 @@ pub struct RawRun {
     /// merging must compare the **ink** baseline, which is `origin.1 + rise`, or a superscript
     /// pairs to the box below the one it is drawn in.
     pub rise: f32,
+    /// The horizontal scaling (`Tz`) in force as a **factor**, `1.0` for `Tz 100` (P2.8 T-8b).
+    ///
+    /// `origin`, [`Self::advance`] and [`Self::advance_exact`] are already *scaled* text space:
+    /// every glyph advance and every `TJ` kern on the line carries `Tz/100` (ISO 32000-1 9.4.3,
+    /// 9.4.4), so the walk that produced them applied it. `advance` is scaled but the font's own
+    /// `w0` sum is not, so a consumer that needs the unscaled width — or that must multiply a
+    /// *new* string's unscaled AFM width into scaled text space, which the reflow does — has no
+    /// other place to get the factor from.
+    ///
+    /// Before this field existed the reflow measured replacements unscaled and reported a
+    /// `Tz 100` position for a scaled page: measured at 136.704 against the correct 104.352 on
+    /// `kerned-line-tz.pdf` (`Tz 50`).
+    pub horizontal_scale: f32,
     /// The run's origin in **page space**, i.e. the text-space origin composed with the CTM
     /// (P2.7.4).
     ///
@@ -907,6 +920,7 @@ fn walk_level<'a>(
                 ),
                 marked_content: marked_content.clone(),
                 rise: walker.rise(),
+                horizontal_scale: walker.horizontal_scale(),
                 xobject_refusal: None,
             });
         }
@@ -963,6 +977,7 @@ fn placeholder_run(
         style_class: String::new(),
         marked_content: Vec::new(),
         rise: 0.0,
+        horizontal_scale: 1.0,
         xobject_refusal: Some(reason),
     }
 }
@@ -1351,6 +1366,16 @@ impl TextMatrixWalk {
     /// by the run so pairing can compare the line the ink actually sits on (P2.7.1 ruling B-5).
     fn rise(&self) -> f32 {
         self.rise
+    }
+
+    /// The horizontal scaling (`Tz`) in force, as a factor rather than a percentage.
+    ///
+    /// Converted here rather than at each caller so no consumer can apply `Tz` as if it were
+    /// `100`-based: `origin`, `advance` and `advance_exact` on a run are already scaled, and the
+    /// reflow needs the same factor to scale a *new* string's unscaled width into that space
+    /// (P2.8 T-8b).
+    fn horizontal_scale(&self) -> f32 {
+        self.horizontal_scale / 100.0
     }
 }
 

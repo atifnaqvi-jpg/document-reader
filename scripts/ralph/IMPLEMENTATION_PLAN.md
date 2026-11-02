@@ -810,7 +810,26 @@ asserting positions**, not before R-1..R-3.
       (b) at `Tz 50` the reflow still reports `moved_to = 136.704` for `ABab`, which is correct
       only because `shift` compares two quantities that carry the same unscaled kern.
 
-- [ ] **T-8b Reflow's kern term omits `Tz` too.** Discovered 2026-11-01 while landing T-8.
+- [x] **T-8b Reflow's kern term omits `Tz` too.** Landed 2026-11-02. The omission was wider than
+      the task text: `kern_after_target` *and* the replacement measurement were both unscaled.
+      Measuring `AB -> ABab` unscaled and then placing it in the reader's scaled text space left
+      the reported tail at **136.704** where the ink draws **104.352** — 32.352 pt, of which
+      29.352 is the width factor and 3.000 the kern factor. Fixing only the kern term, as the
+      task named, would have left 29.352 pt uncorrected and the acceptance test red.
+      `RawRun` gained `horizontal_scale` (the `Tz` factor, populated from the walk); `reflow`
+      multiplies both its measured widths and its kern term by it, so the two sides of the module
+      cannot disagree about where a kerned tail starts.
+      Acceptance test: `a_reflows_reported_tail_origin_matches_the_ink_at_tz_50`, which compares
+      `moved_to` against PDFium's `C` origin and asserts the `Tz 100` reading differs first. It is
+      `#[ignore]`d, so `the_reflows_tail_position_carries_the_horizontal_scale` states the same
+      property over code paths with no library, which is what keeps it in the Linux job.
+      Mutation-verified three times, mutant in `reflow.rs` each time: dropping the scale from the
+      width, from the kern term, and the same against the `#[ignore]`d sibling — all CAUGHT, all
+      restored green. Counts 530 -> **531** and 622 -> **624** (ignored 92 -> **93**), measured
+      across all four pin carriers. The `ci.yml` ignored pin was mutated both ways to 92 and 94
+      and the `passed` floor to 530; each failed the Linux guard, restored green.
+      Original text follows.
+
       `reflow_tj_array` computes `kern_after_target` as `number / 1000.0 * run.font_size` with no
       `horizontal_scale / 100` factor, and its own comment records the omission ("Everything here
       is unscaled text space: `Tz` does not enter"). That was true only while the reader shared
@@ -818,9 +837,6 @@ asserting positions**, not before R-1..R-3.
       `n/1000 x Tf x (1 - Tz/100)` — 3 pt at `Tz 50`.
       Measured, not argued: `reflow_tj_array` on `kerned-line-tz.pdf` with `AB -> ABab` reports
       `moved_to = 136.704`, the `Tz 100` answer, on a page at `Tz 50`.
-      Acceptance test first: `a_reflows_reported_tail_origin_matches_the_ink_at_tz_50` — compare
-      `applied.moved_to` against PDFium's glyph origin on `kerned-line-tz.pdf`, with the
-      `Tz 100` reading asserted different first so a fixture that lost its `Tz` cannot pass.
       **NEW ASSERTION:** that `moved_to`, not merely `shift`, is the quantity compared to ink.
       `a_kerned_prefix_includes_the_kern` compares `moved_to` to a *hand-computed* expectation
       and would go on agreeing with itself. Not blocking R-4, which is at `Tz 100`.
