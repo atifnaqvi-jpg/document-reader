@@ -177,6 +177,25 @@ release, and nothing in CI can satisfy it: rule 1 asks for a human on the instal
 The earlier 0.6.0–0.9.0 tags were pre-releases because each was an intermediate step and a
 "latest release" badge would have claimed more than the build delivered. This one is not.
 
+**Both installers, so a size difference is not later read as a different tree.** The published
+asset was built by the tag-triggered run, not by the dispatch whose build was hand-tested. Two
+NSIS builds of one commit do not produce identical bytes.
+
+| Fact | Value |
+|---|---|
+| Tag | `v1.0.0` → `1e6bfd85bd38a21dec1873655effbbf558ee04a9` |
+| Dispatch run (hand-tested) | `41461007177`, artifact `13149701933`, 10,375,381 bytes |
+| Tag run (published) | `41508308763`, triggered by the tag push at the same commit |
+| Release asset | `Document.Reader_1.0.0_x64-setup.exe`, 10,371,633 bytes, asset `702965834` |
+
+The published asset differs from the hand-tested artifact by **3,748 bytes** and by no commit:
+both runs are at `1e6bfd8`. 0.9.0 recorded the same phenomenon at 19,260 bytes on one tree, so the
+cause is the NSIS build environment rather than the source — the embedded build timestamp alone
+moves it. The delta is recorded, not explained away: what a human ran is the dispatch artifact,
+and the release carries a rebuild of the identical tree.
+
+The tag run reached step 10, *Assert the PDFium tests actually ran*, successfully.
+
 ---
 
 ## 1.0.1
