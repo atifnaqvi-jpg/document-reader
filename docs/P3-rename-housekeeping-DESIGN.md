@@ -1,6 +1,8 @@
 # Rename housekeeping — product name and bundle identifier → **DocuPro**
 
-Status: **DESIGN — APPROVED 2026-11-03, implementation in progress.** Governed by the stage gate in
+Status: **SHIPPED 2026-11-03 — tag `v1.0.1` at `330a4ad`.** Hand-tested by the user on the
+installer from dispatch `41651299040` (HAND TEST PASSED: name checks, Add/Remove double entry,
+migration notice, library survival). Governed by the stage gate in
 `docs/P3-PLAN.md` §4: design, freeze decisions, sign-off, then implementation. This doc covers
 the **Rename housekeeping** row of `docs/P3-PLAN.md` §1, ruling **R5** in `docs/DECISIONS.md` §9,
 target version **1.0.1** (reserved by the tree). Requirements source: the report at

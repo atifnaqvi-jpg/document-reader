@@ -200,14 +200,13 @@ The tag run reached step 10, *Assert the PDFium tests actually ran*, successfull
 
 ## 1.0.1
 
-**Development version. This section describes the R5 rename to "DocuPro". No build has been
-hand-run for it and none is published.**
-
-This section exists for the same mechanical reason `0.9.1` did: the tree version must stay ahead
-of every published tag. `v1.0.0` now points at `1e6bfd8`, and
-`the_tree_version_is_ahead_of_every_published_tag` requires the carriers to name something
-higher. Leaving them at `1.0.0` makes that guard unsatisfiable by construction for every commit
-after the tag — which is exactly what it reported once the tag was pushed, before this bump.
+**Released 2026-11-03. This section describes the R5 rename to DocuPro.** Tag `v1.0.1` points at
+`330a4ad`, the commit the hand-tested installer was built from (dispatch `41651299040`, artifact
+`13237103980`); the installer is `DocuPro_1.0.1_x64-setup.exe`, 10,359,989 bytes, sha256
+`b7cbe7eb…decab03d`. **Hand-confirmed by the user on 2026-11-03: name checks, Add/Remove double
+entry, migration notice, library survival — all pass.** The eight P3.1 commits that landed on top
+of `330a4ad` before the tag was cut are the recorded staleness delta; none of them is in this
+artifact, and the tag message says so rather than eliding it.
 
 **What 1.0.1 contains.** R5 (`docs/DECISIONS.md` §9 item 5, scheduled as 1.0.1 in
 `docs/P3-PLAN.md`): the product name and bundle identifier change together in one housekeeping
@@ -242,8 +241,39 @@ deliberate now, costly later.
 - Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
   and `release-windows.yml`.
 
-There is no changelog beyond that, because nothing has shipped under this number. The next
-section below is the last release.
+That is the whole of it: this number shipped the rename and the migration, and nothing else.
+
+---
+
+## 1.0.2
+
+**Development version. Nothing is built or published under it, and nothing is scheduled to be.**
+
+This section exists for the mechanical reason `0.9.1` and `1.0.1` did, and the guard proves it:
+`v1.0.1` now points at `330a4ad` while `HEAD` is untagged, and
+`the_tree_version_is_ahead_of_every_published_tag` requires the carriers to name something
+higher than the highest published tag. Left at `1.0.1`, that guard is unsatisfiable by
+construction for every commit after the tag.
+
+**1.0.2 is RESERVED for the first user-facing P3.1 release, and for nothing else.** The P3.1
+plan schedules the phase at **1.1.0** (`docs/P3-PLAN.md` §1), so this reservation is not a claim
+that annotations ship under 1.0.2 — it is a hold. Two reasons it is written down rather than
+left implicit:
+
+1. A bare patch bump is the obvious thing for any small intervening change to take. Taking it
+   would spend the number that the first P3.1 artefact a user actually installs should carry.
+2. Annotations breadth is nine rows and one design; the first row a user can feel may land well
+   before the phase completes. That is the build this number is held for, at the point the
+   phase's own version schedule is re-ruled — not silently, here.
+
+**No feature lands under 1.0.2, and no other row may claim it.** If the phase schedule holds at
+1.1.0, 1.0.2 is skipped and the tree goes from 1.0.1 to 1.1.0 directly; a reserved number that
+was never used is a smaller problem than a shipped artefact carrying a number that meant
+"whatever landed that week".
+
+- The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+- Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
+  and `release-windows.yml`.
 
 ---
 

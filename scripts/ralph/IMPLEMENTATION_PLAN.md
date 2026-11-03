@@ -950,6 +950,49 @@ asserting positions**, not before R-1..R-3.
       formatted them as a side effect, which is how the drift was found rather than avoided. A
       gate that is a strict subset of CI's is a gate that can report green on a tree CI rejects.
 
+## H4b. R5 rename housekeeping → 1.0.1 — task list
+
+Design: `docs/P3-rename-housekeeping-DESIGN.md` (frozen, approved 2026-11-03). Decisions
+D-R1..D-R9, ruling R5 in `docs/DECISIONS.md` §9 item 5.
+
+- [x] **R5 Product name and bundle identifier → DocuPro, with the library migration.**
+      Landed `330a4ad` ("P3 R5: rename to DocuPro in one commit, with the library migration it
+      requires"). `productName` and `identifier` changed together, because the identifier *is*
+      the Windows upgrade identity and the data-directory name; changing it is what forces the
+      migration, so shipping one without the other would move the name and lose the library.
+      **The migration is copy-never-move** (D-R4/D-R5): `migrate_legacy_data_dir` copies
+      `com.documentreader.app/library.db` into `com.docupro.app` before `Db::open`, skips when
+      the destination already holds a database (so a second launch cannot overwrite a library
+      the user has since edited), and leaves the old file in place so the operation is
+      idempotent, crash-safe and reversible by hand.
+      **Hand-tested 2026-11-03 by the user on the dispatched installer — HAND TEST PASSED:**
+      name checks, Add/Remove double entry, migration notice, library survival. That is rule 1
+      satisfied for this row: the gate alone does not close a phase, a human on the installer
+      does.
+      **Evidence:**
+      - dispatch `41651299040` (workflow_dispatch, build-only) at `330a4ad`
+      - artifact `13237103980`, `document-reader-windows-installer`
+      - installer `DocuPro_1.0.1_x64-setup.exe`, 10,359,989 bytes,
+        sha256 `b7cbe7eb…decab03d`
+      - tag `v1.0.1` at `330a4ad` — the commit the artifact was built from, per the
+        0.9.0 provenance rule. The eight P3.1 commits on top of it are the recorded staleness
+        delta, in the tag message.
+      **Guards:** `the_product_name_is_stated_once_and_agrees_everywhere`
+      (`src-tauri/tests/product_name.rs`) reads `productName` and asserts the window title,
+      `index.html` `<title>`, the Toolbar label and the README heading all carry that exact
+      string, and that `identifier` is reverse-DNS — mutation: change one site to `Docu PRO`
+      and it fails naming that site. `a_moved_database_is_copied_before_it_is_opened`
+      (`src-tauri/src/editor/migrate.rs`) runs against two temp dirs so it never touches a real
+      profile — mutation: delete the copy call and it fails with the empty-library symptom
+      (D-R4), not a compile error.
+      **Accepted consequence, hand-observed rather than assumed** (DECISIONS §9.5): the
+      identifier change makes an existing hand-test install a *different* application to the
+      installer, so both entries appear in Add/Remove until the old one is removed. Deliberate
+      now while the install base is hand-test machines only; costly later.
+      **Not renamed:** repository, git remote, crate (`document-reader`) and npm name stay
+      (D-R7/N6) — R5 names the *product*, and none of those is read at runtime to build a path
+      or a title.
+
 ## H5. P3.1 annotations breadth → 1.1.0 — task list
 
 Design: `docs/P3.1-annotations-DESIGN.md` (frozen, approved 2026-11-03). Decisions D-A1..D-A10.

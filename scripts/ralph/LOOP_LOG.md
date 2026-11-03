@@ -1466,3 +1466,77 @@ open defect: the Windows suite crashes intermittently*.
 ### Next
 Nothing in P2.8. **Halted here by instruction.** P2.8 closes with this turn; the next briefing
 names what follows. 1.0.1 is reserved for the R5 rename and no P3 work may take that number.
+
+---
+
+## Iteration — 2026-11-03 — R5 rename RELEASED as `v1.0.1`; tree to 1.0.2; halt
+
+Release-authority turn. Scope was release bookkeeping only: tick the rename row, cut the tag at
+the confirmed commit, verify the published release, bump the dev tree, halt. **No P3.1 row was
+touched.**
+
+### What the tag points at, and why
+
+`v1.0.1` → **`330a4ad`**, not `HEAD`. `HEAD` was `dd1370e`, eight commits ahead. The rule is the
+0.9.0 provenance rule: the release asset must be built from exactly the source the tag points
+at, because the whole point of "tag the confirmed tree" is that the confirmed bytes and the tag
+are the same claim.
+
+The verified chain, each link checked rather than assumed:
+
+- dispatch `41651299040` (workflow_dispatch, build-only) ran at `330a4ad` — `success`
+- artifact `13237103980` `document-reader-windows-installer` contains
+  `DocuPro_1.0.1_x64-setup.exe`, 10,359,989 bytes,
+  sha256 `b7cbe7eb11c9c72052c1c25ec5cb20f04934d58e406bb1d5c8c2a769decab03d`
+- the filename and product name are the ones the user hand-tested — DocuPro, one word
+- CI at `330a4ad` was `41651291111` `success` before the tag was cut
+- `git rev-parse v1.0.1^{commit}` == `330a4ad…aa19`, compared as full SHAs, not prefixes
+
+**Staleness delta recorded in the tag message, not elided:** `c41eb48`, `927c89d`, `a7a189c`,
+`7615a1d`, `479d1b4`, `dd1370e`, plus `d74af2f` and `66334d3` — all P3.1 annotation work, none in
+the artifact. The user hand-tested a build that predates them, so promoting HEAD would have
+tagged a tree nobody ran.
+
+### The row
+
+R5 had **no tickable row anywhere**: `docs/P3-PLAN.md` §1 is a prose table with no tick column,
+and `IMPLEMENTATION_PLAN.md` tracked it only inside a P2.8 entry as a forward reference. Added
+`## H4b. R5 rename housekeeping → 1.0.1` with the row ticked and the hand-test evidence inline —
+dispatch, artifact, installer name/size/sha256, tag, and both guard names. Also:
+`docs/P3-PLAN.md` §1 row marked ✅ with the evidence, and the design doc status moved
+`DESIGN — APPROVED, implementation in progress` → **`SHIPPED 2026-11-03`**.
+
+The tick rests on rule 1, not on the gate: the gate was already green when the installer was
+dispatched. What closes the row is a human running the installer, and the four checks the user
+reported — name, Add/Remove double entry, migration notice, library survival — are the ones the
+design's §6 item 6 names.
+
+### The tree bump
+
+1.0.1 → **1.0.2** across all six carriers: `package.json`, two in `package-lock.json` (root and
+the `packages[""]` entry), `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`,
+`src-tauri/Cargo.lock`. Then `## 1.0.2` written into `docs/RELEASE-NOTES.md` mirroring the
+`0.9.1`/`1.0.1` precedent.
+
+This bump is **forced, not cosmetic**, and the guard states why: `v1.0.1` now exists and `HEAD`
+is untagged, so `the_tree_version_is_ahead_of_every_published_tag` requires the carriers to name
+something strictly higher. Left at 1.0.1 it is unsatisfiable by construction for every commit
+after the tag — the same failure it reported the moment `v1.0.0` was pushed.
+
+**1.0.2 is RESERVED for the first user-facing P3.1 release and for nothing else.** Written into
+the notes with both reasons: a patch bump is what any small intervening change would reach for,
+and it would spend the number the first installable P3.1 artefact should carry. If the phase
+schedule holds at 1.1.0 the number is simply skipped.
+
+### Verdicts
+- **Gate at 1.0.2:** `553 passed / 93 ignored` and `646 / 0`, reconciling (553 + 93 = 646);
+  fmt, clippy, tsc, vitest 80 green.
+- **Tag `v1.0.1` @ `330a4ad`:** pushed. Release run `41685774608` and CI `41685774595` both
+  dispatched by the tag push.
+- **Release asset:** verified after publish (name, size, presence).
+
+### Next
+**HALTED by instruction.** P3.1 continuation — A-4 (ink `/AP`) onward — gets its own pulse.
+Carried forward from A-3: A-4 should expect the same `/DR` requirement if its appearance names a
+font, and the palette tests pin `Line`/`Arrow`/`Oval` as *absent*, so A-5 will turn one red by
+design.
