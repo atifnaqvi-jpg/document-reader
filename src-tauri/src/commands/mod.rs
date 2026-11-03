@@ -133,6 +133,17 @@ pub fn get_app_state(db: State<'_, Db>, key: String) -> Result<Option<String>, A
     db.with(|connection| app_state::get(connection, &key))
 }
 
+/// The one-time data-directory migration notice, or `None` when nothing moved (D-R6).
+///
+/// Read by the Notices surface. It is deliberately a read, not an event: a notice the user
+/// can re-open is honest, and the migration itself already happened at startup.
+#[tauri::command]
+pub fn get_migration_notice(
+    notice: State<'_, crate::editor::migrate::MigrationNotice>,
+) -> Result<Option<String>, AppError> {
+    Ok(notice.get())
+}
+
 /// A document's index status, or `None` if it has never been indexed (P1-D6).
 #[tauri::command]
 pub fn get_index_status(

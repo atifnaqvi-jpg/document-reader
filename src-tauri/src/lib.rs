@@ -16,11 +16,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let db_path = app
+            let data_dir = app
                 .path()
                 .app_data_dir()
-                .map(|dir| dir.join("library.db"))
                 .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
+
+            // The identifier changed in 1.0.1, and `app_data_dir()` is derived from it, so an
+            // install that predates the rename has its library one directory across. Copy it
+            // across before `Db::open` can create an empty one (D-R4).
+            let legacy_dir = data_dir
+                .parent()
+                .map(|parent| parent.join(editor::migrate::LEGACY_IDENTIFIER));
+            let migration = match legacy_dir {
+                Some(legacy) => editor::migrate::migrate_legacy_data_dir(&data_dir, &legacy),
+                None => editor::migrate::MigrationOutcome::NotNeeded,
+            };
+            // D-R6: shown once, on the surface the user already reads. It is carried through
+            // managed state rather than printed, because a Windows GUI user sees no stderr.
+            app.manage(editor::migrate::MigrationNotice::new(migration.notice()));
+
+            let db_path = data_dir.join("library.db");
 
             let db = Db::open(&db_path).map_err(|e| {
                 format!("cannot open library database at {}: {e}", db_path.display())
@@ -50,6 +65,7 @@ pub fn run() {
             commands::remove_bookmark,
             commands::set_app_state,
             commands::get_app_state,
+            commands::get_migration_notice,
             commands::index_document,
             commands::get_index_status,
             commands::get_document_page_render,

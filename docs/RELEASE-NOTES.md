@@ -200,8 +200,8 @@ The tag run reached step 10, *Assert the PDFium tests actually ran*, successfull
 
 ## 1.0.1
 
-**Development version, reserved for the R5 rename to "docu PRO". No build has been hand-run for
-it and none is published.**
+**Development version. This section describes the R5 rename to "DocuPro". No build has been
+hand-run for it and none is published.**
 
 This section exists for the same mechanical reason `0.9.1` did: the tree version must stay ahead
 of every published tag. `v1.0.0` now points at `1e6bfd8`, and
@@ -209,14 +209,34 @@ of every published tag. `v1.0.0` now points at `1e6bfd8`, and
 higher. Leaving them at `1.0.0` makes that guard unsatisfiable by construction for every commit
 after the tag — which is exactly what it reported once the tag was pushed, before this bump.
 
-**What 1.0.1 is reserved for.** R5 (`docs/DECISIONS.md` §9 item 5, scheduled as 1.0.1 in
-`docs/P3-PLAN.md`): the product name and bundle identifier change together to "docu PRO" in one
-housekeeping phase. The identifier is the Windows upgrade identity, so hand-test installs update
-by reinstall and both entries appear in Add/Remove. That is accepted and on record while the
-install base is hand-test machines only — deliberate now, costly later.
+**What 1.0.1 contains.** R5 (`docs/DECISIONS.md` §9 item 5, scheduled as 1.0.1 in
+`docs/P3-PLAN.md`): the product name and bundle identifier change together in one housekeeping
+phase. The name is **DocuPro** — one word, no space, nothing appended, as the user re-ruled on
+2026-11-03. The identifier becomes **`com.docupro.app`**.
 
-**No P3 feature lands under 1.0.1.** The reservation is a reservation, not a claim: nothing here
-says 1.0.1 ships the rename, only that the number is not available to anything else.
+**The upgrade moves the library, and this version copies it across.** `app_data_dir()` resolves
+to `data_dir()/{bundle_identifier}`, so changing the identifier moves `library.db` from
+`com.documentreader.app` to `com.docupro.app`. `editor/migrate.rs` copies the old database into
+the new directory at startup, before the database is opened (`migrate_legacy_data_dir`). It is a
+copy, never a move: the old file stays where it is, so the operation is idempotent, safe across a
+crash, and reversible by hand. A destination that already holds a database is left alone, so a
+second launch cannot overwrite a library the user has since edited.
+
+**The migration is visible, once.** The About/notices surface reports where the library came
+from (`MigrationNotice`, `get_migration_notice`). A migration nobody can see is indistinguishable
+from one that failed.
+
+**What 1.0.1 does not do.** It does not rename the repository, the git remote, the crate
+(`document-reader`) or the npm package. Those are independent of the product name (D-R7) and a
+separate ruling would be needed.
+
+**The Add/Remove consequence is accepted, and hand-observed rather than assumed.** The
+identifier is the Windows upgrade identity, so an existing hand-test install is a *different*
+application to the installer: both entries appear in Add/Remove Programs until the old one is
+removed. That is on record as accepted while the install base is hand-test machines only —
+deliberate now, costly later.
+
+**No P3 feature lands under 1.0.1.** Annotations breadth (P3.1) targets 1.1.0.
 
 - The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
 - Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`

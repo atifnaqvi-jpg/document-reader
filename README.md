@@ -1,4 +1,4 @@
-# Document Reader
+# DocuPro
 
 A local-first personal library reader for desktop. Open, read, and search
 your own documents — nothing leaves your machine.
@@ -121,7 +121,7 @@ work regardless.
 
 **Troubleshooting.** If a PDF reports `PDFIUM_UNAVAILABLE`:
 
-- Confirm the DLL is actually present: `Test-Path "$env:LOCALAPPDATA\Programs\Document Reader\pdfium.dll"`.
+- Confirm the DLL is actually present: `Test-Path "$env:LOCALAPPDATA\Programs\DocuPro\pdfium.dll"`.
 - Check architecture: the fetch script downloads **Windows x64**. An ARM64 build
   cannot load it.
 - Set `PDFIUM_LIBRARY_PATH` to an absolute path to bypass resolution entirely.

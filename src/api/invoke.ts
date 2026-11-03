@@ -66,6 +66,14 @@ export const getAppState = (key: string) =>
   invoke<string | null>("get_app_state", { key });
 
 /**
+ * The one-time data-directory migration notice, or `null` when nothing moved (D-R6).
+ *
+ * Read on demand rather than pushed, so the notice survives a remount and stays re-readable.
+ */
+export const getMigrationNotice = () =>
+  invoke<string | null>("get_migration_notice");
+
+/**
  * A document's index status (P1-D6). `null` means never indexed. Read after a remount,
  * because the `index://progress` event may have fired while the pane was unmounted.
  */

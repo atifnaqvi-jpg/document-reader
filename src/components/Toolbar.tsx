@@ -38,7 +38,7 @@ export function Toolbar({
   return (
     <header className="toolbar">
       <div className="toolbar-left">
-        <span className="app-name">Document Reader</span>
+        <span className="app-name">DocuPro</span>
         <Menu
           busy={busy}
           entry={entry}

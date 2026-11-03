@@ -11,7 +11,8 @@
  */
 
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { installFakeBackend } from "../test/tauri";
 import { Notices } from "./Notices";
 
 function renderNotices() {
@@ -58,5 +59,32 @@ describe("the bundled-font notice", () => {
     expect(dialog).toBeTruthy();
     screen.getByRole("button", { name: "Close notices" }).click();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * D-R6: when the bundle identifier changed in 1.0.1, the user's library was copied from the
+ * old data directory without them asking. A migration nobody can see is indistinguishable
+ * from one that failed, so the About surface has to say it.
+ */
+describe("the data-directory migration notice", () => {
+  const backend = installFakeBackend();
+  afterEach(() => backend.teardown());
+
+  it("shows the migration line when the backend reports one", async () => {
+    backend.on("get_migration_notice", () =>
+      "Your library was copied from an earlier installation at C:\\old\\library.db.",
+    );
+    renderNotices();
+    expect(await screen.findByRole("status")).toHaveTextContent(/earlier installation/);
+  });
+
+  it("stays silent on a fresh install", async () => {
+    backend.on("get_migration_notice", () => null);
+    renderNotices();
+    // Give the effect's promise a turn before asserting absence, so this cannot pass merely
+    // by having rendered before the read resolved.
+    await Promise.resolve();
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

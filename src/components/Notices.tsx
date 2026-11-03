@@ -11,6 +11,10 @@
  * fails a test rather than only a review.
  */
 
+import { useEffect, useState } from "react";
+
+import { getMigrationNotice } from "../api/invoke";
+
 const FACES = [
   "Liberation Sans: Regular, Bold, Italic, Bold Italic",
   "Liberation Serif: Regular, Bold, Italic, Bold Italic",
@@ -18,6 +22,28 @@ const FACES = [
 ];
 
 export function Notices({ onClose }: { onClose: () => void }) {
+  // D-R6: when the bundle identifier changed, the user's library was copied from the old
+  // data directory. That happened without them asking, so it is stated here rather than
+  // only logged -- a migration nobody can see is indistinguishable from one that failed.
+  const [migration, setMigration] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    // Started inside a resolved promise so a missing IPC boundary (the About surface is
+    // renderable in tests and in a plain webview) rejects into the catch instead of throwing
+    // synchronously out of the effect.
+    Promise.resolve()
+      .then(() => getMigrationNotice())
+      .then((notice) => {
+        if (live) setMigration(notice);
+      })
+      .catch(() => {
+        // The notice is informational; failing to read it must not break the About surface.
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   return (
     <div className="notices-backdrop" role="presentation" onClick={onClose}>
       <section
@@ -35,7 +61,13 @@ export function Notices({ onClose }: { onClose: () => void }) {
         </header>
 
         <div className="notices-body">
-          <p>Document Reader edits PDFs on this machine. It sends nothing over the network.</p>
+          <p>DocuPro edits PDFs on this machine. It sends nothing over the network.</p>
+
+          {migration ? (
+            <p className="notices-migration" role="status">
+              {migration}
+            </p>
+          ) : null}
 
           <h3>Bundled fonts</h3>
           <p>
