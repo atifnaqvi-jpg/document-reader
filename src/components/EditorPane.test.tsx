@@ -134,3 +134,25 @@ describe("EditorPane: absent document", () => {
     expect(container).toBeEmptyDOMElement();
   });
 });
+
+describe("EditorPane: the palette reaches the P3.1 kinds", () => {
+  // A plan row is only landed when the type is reachable from the palette: a kind with a
+  // dictionary builder and no tool is not shipped, however green its backend tests are.
+  it("offers a button for every free-text and markup tool", () => {
+    const { backend } = renderPane(0);
+    open = backend;
+    for (const label of ["Highlight", "Underline", "Strike out", "Squiggly", "Text box", "Callout", "Typewriter"]) {
+      expect(screen.getByRole("button", { name: label }), label).toBeInTheDocument();
+    }
+  });
+
+  it("does not offer a tool whose writer still refuses", () => {
+    // A-5 and A-6 have not landed. Offering the button would let the user draw a mark that
+    // the save then rejects, which is worse than not offering it.
+    const { backend } = renderPane(0);
+    open = backend;
+    for (const label of ["Line", "Arrow", "Oval"]) {
+      expect(screen.queryByRole("button", { name: label }), label).not.toBeInTheDocument();
+    }
+  });
+});

@@ -22,6 +22,7 @@ use crate::model::{AnnotationKind, AppError};
 /// only `/Subtype` and the appearance differ, so one builder covers them and a
 /// new markup tool is a new arm rather than a new code path.
 pub fn annotation_dictionary(
+    document: &mut Document,
     kind: AnnotationKind,
     rect: PdfRect,
     color: (f32, f32, f32),
@@ -119,7 +120,63 @@ pub fn annotation_dictionary(
         // P3.1 rows land one type at a time. Refusing is the only honest answer for a kind
         // whose dictionary builder has not been written: a wrong subtype would put a shape on
         // the page that is not what the user drew, and the save would report success.
-        AnnotationKind::FreeText(_) | AnnotationKind::Line { .. } | AnnotationKind::Oval => {
+        // Free text needs an appearance stream (D-A8): no viewer synthesises a text box from
+        // a rect, so the text has to be drawn into `/AP /N` or it is invisible outside Adobe.
+        // The dictionary still records `/Rect`, `/C` and `/DA` -- `/DA` is what an editor
+        // reopening this annotation uses when the user edits the text.
+        AnnotationKind::FreeText(mode) => {
+            use crate::editor::annotate::appearance;
+
+            // `contents` is the text. A free-text annotation with no text is a frame with
+            // nothing in it, so it is refused rather than written: the user would see an
+            // empty box they cannot explain.
+            let text = contents.unwrap_or_default();
+            if text.trim().is_empty() {
+                return Err(AppError::Other(
+                    "a free-text annotation needs text".to_string(),
+                ));
+            }
+
+            let width = rect.width();
+            let height = rect.height();
+            let appearance_stream =
+                appearance::free_text_appearance(text, width, height, color, mode);
+            let appearance_id = document.add_object(appearance_stream);
+
+            // `/DA` is resolved against the annotation's own `/DR`, not against the page and
+            // not against the appearance stream's `/Resources` (ISO 32000-1 12.7.3.3). Without
+            // `/DR` the `/Helv` in `/DA` names a font the editor cannot look up, so it would
+            // fall back to a default and re-lay-out edited text in the wrong font and width.
+            let font_id = document.add_object(appearance::free_text_font());
+
+            dictionary! {
+                "Type" => "Annot",
+                "Subtype" => "FreeText",
+                "Rect" => rect_array,
+                // The text is stored in both `/Contents` (what a comment pane lists) and the
+                // appearance (what the page shows). They are written from the same string, so
+                // they cannot drift.
+                "Contents" => Object::string_literal(text),
+                "C" => Object::Array(vec![
+                    Object::Real(color.0),
+                    Object::Real(color.1),
+                    Object::Real(color.2),
+                ]),
+                "DA" => Object::string_literal(appearance::FREE_TEXT_DA),
+                "DR" => dictionary! {
+                    "Font" => dictionary! {
+                        appearance::FREE_TEXT_FONT => Object::Reference(font_id),
+                    },
+                },
+                "F" => Object::Integer(4),
+                "AP" => dictionary! {
+                    "N" => Object::Reference(appearance_id),
+                },
+            }
+        }
+        // Still refusing. Each is its own row (A-5, A-6): a wrong subtype would put a mark on
+        // the page that is not what the user drew, and the save would report success.
+        AnnotationKind::Line { .. } | AnnotationKind::Oval => {
             return Err(AppError::Other(format!(
                 "`{}` annotations are not written yet (P3.1)",
                 kind.as_str()
@@ -374,6 +431,7 @@ mod tests {
         assert_eq!(page_annotation_count(&document, page_id), 0);
 
         let annotation = annotation_dictionary(
+            &mut document,
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
@@ -392,6 +450,7 @@ mod tests {
         let page_id = first_page(&document);
         for _ in 0..3 {
             let annotation = annotation_dictionary(
+                &mut document,
                 AnnotationKind::Highlight,
                 sample_rect(),
                 (1.0, 0.9, 0.2),
@@ -409,6 +468,7 @@ mod tests {
         let mut document = one_page_pdf();
         let page_id = first_page(&document);
         let annotation = annotation_dictionary(
+            &mut document,
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
@@ -450,6 +510,7 @@ mod tests {
         let mut document = one_page_pdf();
         let page_id = first_page(&document);
         let annotation = annotation_dictionary(
+            &mut document,
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
@@ -489,8 +550,15 @@ mod tests {
         ] {
             let mut document = one_page_pdf();
             let page_id = first_page(&document);
-            let annotation =
-                annotation_dictionary(kind, sample_rect(), (1.0, 0.0, 0.0), 0.4, None).unwrap();
+            let annotation = annotation_dictionary(
+                &mut document,
+                kind,
+                sample_rect(),
+                (1.0, 0.0, 0.0),
+                0.4,
+                None,
+            )
+            .unwrap();
             attach_annotation(&mut document, page_id, annotation).unwrap();
 
             let reloaded = Document::load_mem(&save_to_bytes(&mut document).unwrap()).unwrap();
@@ -573,22 +641,31 @@ mod tests {
 
     #[test]
     fn rejects_a_dead_click_rect() {
+        let mut document = one_page_pdf();
         let click = PdfRect {
             x0: 10.0,
             y0: 10.0,
             x1: 10.0,
             y1: 10.0,
         };
-        let error =
-            annotation_dictionary(AnnotationKind::Highlight, click, (1.0, 0.9, 0.2), 0.4, None)
-                .unwrap_err();
+        let error = annotation_dictionary(
+            &mut document,
+            AnnotationKind::Highlight,
+            click,
+            (1.0, 0.9, 0.2),
+            0.4,
+            None,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("too small"));
     }
 
     #[test]
     fn blank_contents_are_not_written() {
         // An empty /Contents would show a tooltip-less icon and adds nothing.
+        let mut document = one_page_pdf();
         let annotation = annotation_dictionary(
+            &mut document,
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),
@@ -607,6 +684,7 @@ mod tests {
         let mut document = one_page_pdf();
         let page_id = first_page(&document);
         let existing = annotation_dictionary(
+            &mut document,
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.0, 0.0),
@@ -625,6 +703,7 @@ mod tests {
             .set(b"Annots", Object::Reference(array_id));
 
         let annotation = annotation_dictionary(
+            &mut document,
             AnnotationKind::Underline,
             sample_rect(),
             (0.0, 0.0, 1.0),
@@ -653,6 +732,7 @@ mod tests {
         let mut document = one_page_pdf();
         let page_id = first_page(&document);
         let annotation = annotation_dictionary(
+            &mut document,
             AnnotationKind::Highlight,
             sample_rect(),
             (1.0, 0.9, 0.2),

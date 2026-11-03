@@ -537,6 +537,62 @@ mod tests {
     /// A squiggly is left for the viewer to synthesise, so flattening must not claim to
     /// have baked it.
     ///
+    /// The same data-loss trap as the squiggly above, for the same reason: a free text's
+    /// appearance is text, which the flattening pass cannot draw, so it must not be counted
+    /// as drawn -- or the export deletes it and the text is gone.
+    #[test]
+    fn flattening_does_not_count_free_text_as_drawn() {
+        let mut document = blank_page_pdf();
+        let page_id = document.get_pages().values().next().copied().unwrap();
+        let rect = PdfRect {
+            x0: 72.0,
+            y0: 600.0,
+            x1: 272.0,
+            y1: 660.0,
+        };
+        let row = Annotation {
+            id: "free-text-1".to_string(),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::FreeText(crate::model::FreeTextMode::Textbox),
+            data: format!(
+                r##"{{"v":1,"rect":[{},{},{},{}],"color":"#111418"}}"##,
+                rect.x0, rect.y0, rect.x1, rect.y1
+            ),
+            text: Some("do not lose me".to_string()),
+            created_at: 0,
+            modified_at: 0,
+        };
+
+        let dictionary = crate::editor::lopdf_write::annotation_dictionary(
+            &mut document,
+            row.kind,
+            rect,
+            (0.07, 0.08, 0.09),
+            1.0,
+            row.text.as_deref(),
+        )
+        .unwrap();
+        crate::editor::lopdf_write::attach_annotation(&mut document, page_id, dictionary).unwrap();
+
+        let flattened = flatten_annotations(&mut document, std::slice::from_ref(&row)).unwrap();
+        assert_eq!(flattened, 0, "free text was counted as flattened");
+
+        let reloaded =
+            Document::load_mem(&crate::editor::lopdf_write::save_to_bytes(&mut document).unwrap())
+                .unwrap();
+        let page = reloaded.get_pages().values().next().copied().unwrap();
+        let annotations = reloaded.get_page_annotations(page).unwrap();
+        assert_eq!(annotations.len(), 1, "flattening deleted the free text");
+        assert_eq!(
+            annotations[0]
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"FreeText"
+        );
+    }
+
     /// This is not a cosmetic rule. `flatten_annotations` decides what was drawn and then
     /// deletes exactly those annotations, because a baked mark plus a live annotation would
     /// draw twice. A kind that is counted as drawn but emits no content-stream operations
@@ -567,6 +623,7 @@ mod tests {
 
         // Attach it first, so "left alone" and "deleted" are distinguishable outcomes.
         let dictionary = crate::editor::lopdf_write::annotation_dictionary(
+            &mut document,
             AnnotationKind::Squiggly,
             rect,
             (0.82, 0.14, 0.18),

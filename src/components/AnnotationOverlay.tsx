@@ -24,6 +24,7 @@ import {
   pointToPdf,
 } from "../state/geometry";
 import type { SweepKind, UiRect } from "../state/geometry";
+import type { FreeTextData } from "../api/types";
 
 /**
  * Draws saved annotations over the rendered page and captures new ones (P2-D8).
@@ -61,6 +62,13 @@ const DRAG_TOOLS: AnnotationKind[] = [
   "ink",
 ];
 
+/** The tools whose value is typed text: they sweep a box and then ask for content. */
+const FREE_TEXT_TOOLS: AnnotationKind[] = ["textbox", "callout", "typewriter"];
+
+function isFreeText(kind: AnnotationKind): boolean {
+  return FREE_TEXT_TOOLS.includes(kind);
+}
+
 export function AnnotationOverlay({
   metrics,
   annotations,
@@ -75,6 +83,21 @@ export function AnnotationOverlay({
   // written rather than left empty. Held in UI pixels for placement only.
   const [notePrompt, setNotePrompt] = useState<{ x: number; y: number } | null>(null);
   const [noteText, setNoteText] = useState("");
+  // A free-text tool sweeps a box, then asks for the text that goes in it. Held like the note
+  // prompt because the reason is the same: the text is the annotation's only content, so it
+  // must be known before the row is written.
+  const [freeTextPrompt, setFreeTextPrompt] = useState<{
+    rect: UiRect;
+    kind: AnnotationKind;
+  } | null>(null);
+  const [freeText, setFreeText] = useState("");
+  // A callout's leader line needs a target. Set after the text is confirmed, and the next
+  // click places it: a callout with no target is a text box, which is a different mark.
+  const [awaitingTarget, setAwaitingTarget] = useState<UiRect | null>(null);
+  // The callout's text has to outlive the prompt that collected it: the prompt closes first
+  // and the leader target is placed afterwards, so the text cannot live in prompt state that
+  // is cleared on close.
+  const calloutText = useRef("");
   const surfaceRef = useRef<HTMLDivElement | null>(null);
 
   /** Pointer position relative to the overlay, which is what all geometry assumes. */
@@ -92,6 +115,13 @@ export function AnnotationOverlay({
       // A note is a single click, not a drag: its blob stores a point.
       const point = localPoint(event);
 
+      // Once the box is drawn and its text confirmed, the next click places the callout's
+      // leader target. Handled before the drag path so the click does not start a new box.
+      if (awaitingTarget) {
+        void commitCallout(point);
+        return;
+      }
+
       if (activeTool === "note") {
         // Capture first, write on confirm: a note with no text is a pin with nothing pinned
         // to it, and the DB row is the only place the text can live.
@@ -100,7 +130,7 @@ export function AnnotationOverlay({
         return;
       }
 
-      if (!DRAG_TOOLS.includes(activeTool)) return;
+      if (!DRAG_TOOLS.includes(activeTool) && !isFreeText(activeTool)) return;
       (event.target as HTMLElement).setPointerCapture(event.pointerId);
       start.current = point;
       if (activeTool === "ink") setInkPoints([point]);
@@ -143,6 +173,14 @@ export function AnnotationOverlay({
       setDraft(null);
       if (!isDrawable(rect, metrics.scale)) return;
 
+      // A free-text tool does not write on release: its content is the text, and a box with
+      // no text is refused by the writer. The prompt collects it first.
+      if (isFreeText(activeTool)) {
+        setFreeText("");
+        setFreeTextPrompt({ rect, kind: activeTool });
+        return;
+      }
+
       // Each tool has its own blob shape (D4). One object carrying every field would
       // work at runtime and rot the moment a tool's geometry changes, so the branch
       // is explicit.
@@ -160,6 +198,50 @@ export function AnnotationOverlay({
       await create(metrics.pageNumber, activeTool, data, null);
     },
     [activeTool, metrics, localPoint, inkPoints, create, style],
+  );
+
+  /** Writes the free-text row once its text is known. */
+  const commitFreeText = useCallback(async () => {
+    if (!freeTextPrompt || !metrics) return;
+    const text = freeText.trim();
+    // Refused rather than written: the writer refuses an empty free text, and an empty frame
+    // is a mark the user cannot explain. The button is disabled too, so this is the guard
+    // behind the guard.
+    if (!text) return;
+    const { rect, kind } = freeTextPrompt;
+    setFreeTextPrompt(null);
+    setFreeText("");
+
+    if (kind === "callout") {
+      // A callout is not written yet: its leader target is a second click, so hand the box to
+      // that step rather than writing a box now and a callout later.
+      calloutText.current = text;
+      setAwaitingTarget(rect);
+      return;
+    }
+
+    const pdf = pageRectToPdf(rect, metrics);
+    const data: FreeTextData = { v: 1, rect: pdf, color: style.color };
+    await create(metrics.pageNumber, kind, data, text);
+  }, [freeTextPrompt, freeText, metrics, create, style.color]);
+
+  /** Writes a callout once its leader target has been placed. */
+  const commitCallout = useCallback(
+    async (point: { x: number; y: number }) => {
+      if (!awaitingTarget || !metrics) return;
+      const rect = awaitingTarget;
+      const [x, y] = pointToPdf(point.x, point.y, metrics.scale, metrics.pageHeightPoints);
+      setAwaitingTarget(null);
+      const pdf = pageRectToPdf(rect, metrics);
+      const data: FreeTextData = {
+        v: 1,
+        rect: pdf,
+        color: style.color,
+        callout: [x, y],
+      };
+      await create(metrics.pageNumber, "callout", data, calloutText.current);
+    },
+    [awaitingTarget, metrics, create, style.color],
   );
 
   /** Commits a note once its text is known, then clears the prompt. */
@@ -273,6 +355,51 @@ export function AnnotationOverlay({
               Cancel
             </button>
           </div>
+        </div>
+      ) : null}
+
+      {/* Positioned over the box the user swept, so the text is typed where it will appear. */}
+      {freeTextPrompt ? (
+        <div
+          className="annotation-note-prompt"
+          style={{ left: freeTextPrompt.rect.x, top: freeTextPrompt.rect.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <textarea
+            autoFocus
+            value={freeText}
+            placeholder={freeTextPrompt.kind === "callout" ? "Callout text" : "Text"}
+            onChange={(event) => setFreeText(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter commits; Shift+Enter is a newline, the same convention notes use.
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void commitFreeText();
+              }
+            }}
+          />
+          <div className="annotation-note-prompt-actions">
+            <button type="button" onClick={() => void commitFreeText()} disabled={!freeText.trim()}>
+              {freeTextPrompt.kind === "callout" ? "Next: point at it" : "Add text"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFreeTextPrompt(null);
+                setFreeText("");
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Tells the user what the next click does. Without it the callout box vanishes and the
+          next click appears to do nothing. */}
+      {awaitingTarget ? (
+        <div className="annotation-note-prompt" style={{ left: awaitingTarget.x, top: awaitingTarget.y }}>
+          <span>Click the thing this callout points at.</span>
         </div>
       ) : null}
 
@@ -448,6 +575,39 @@ function AnnotationMark({
           <NoteEditor annotation={annotation} style={{ left: box.x + side, top: box.y }} />
         ) : null}
       </>
+    );
+  }
+
+  // Free text draws its box and its text. The box is drawn even for a typewriter, whose
+  // writer emits no frame: the viewer still needs to show where the text sits while it is
+  // selected, or the mark cannot be targeted to edit.
+  if (annotation.kind === "textbox" || annotation.kind === "callout" || annotation.kind === "typewriter") {
+    const rect = (data as FreeTextData).rect;
+    if (!rect) return null;
+    const box = pdfToPage(
+      { x0: rect[0], y0: rect[1], x1: rect[2], y1: rect[3] },
+      metrics.scale,
+      metrics.pageHeightPoints,
+    );
+    return (
+      <button
+        type="button"
+        className={`${className} kind-free-text`}
+        onClick={onSelect}
+        title={annotation.text ?? undefined}
+        aria-label={`${annotation.kind} annotation`}
+        style={{
+          left: box.x,
+          top: box.y,
+          width: box.width,
+          height: box.height,
+          borderColor: colour,
+          color: colour,
+          pointerEvents: "auto",
+        }}
+      >
+        <span className="annotation-free-text">{annotation.text}</span>
+      </button>
     );
   }
 

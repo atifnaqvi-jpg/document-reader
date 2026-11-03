@@ -96,7 +96,21 @@ export interface ShapeData {
   color?: string;
 }
 
-export type AnnotationData = HighlightData | NoteData | InkData | ShapeData;
+/**
+ * A free-text box. `rect` is the box and the annotation's `text` is what goes in it, so the
+ * text lives in one place rather than being duplicated into the blob.
+ *
+ * `callout` is the leader line's target point and is present only for a callout: the writer
+ * refuses a callout without one rather than drawing a box, because a box is a different mark.
+ */
+export interface FreeTextData {
+  v: 1;
+  rect: [number, number, number, number];
+  color?: string;
+  callout?: [number, number];
+}
+
+export type AnnotationData = HighlightData | NoteData | InkData | ShapeData | FreeTextData;
 
 /** Mirrors `model::Annotation` (P2-D4). `text` is denormalised for the FTS index (D5). */
 export interface Annotation {

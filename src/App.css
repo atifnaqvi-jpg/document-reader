@@ -435,6 +435,26 @@ button:disabled {
   display: block;
 }
 
+/* A free-text box: the frame is the writer's, but the viewer draws it too so the mark is
+   visible and targetable while it is selected. */
+.kind-free-text {
+  border: 1px solid;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 2px 3px;
+  background: none;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: left;
+  overflow: hidden;
+}
+
+.annotation-free-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .kind-note,
 .kind-shape {
   position: absolute;

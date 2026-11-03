@@ -29,6 +29,9 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
   { kind: "strikeout", label: "Strike out", hint: "Drag over text" },
   { kind: "squiggly", label: "Squiggly", hint: "Drag under text" },
   { kind: "note", label: "Note", hint: "Click to place, then type" },
+  { kind: "textbox", label: "Text box", hint: "Drag a box, then type" },
+  { kind: "callout", label: "Callout", hint: "Drag a box, then drag from it to point" },
+  { kind: "typewriter", label: "Typewriter", hint: "Drag a box, then type" },
   { kind: "ink", label: "Ink", hint: "Drag to draw" },
   { kind: "rect", label: "Box", hint: "Drag to draw a box" },
 ];

@@ -12,9 +12,11 @@
 
 use lopdf::{Document, Object};
 
+pub mod appearance;
+
 use crate::editor::geometry::PdfRect;
 use crate::editor::lopdf_write;
-use crate::model::{Annotation, AnnotationKind, AppError};
+use crate::model::{Annotation, AnnotationKind, AppError, FreeTextMode};
 
 /// The `data` blob shape this module understands. `v` is explicit so a future
 /// tool can change the geometry without guessing at older rows.
@@ -48,6 +50,10 @@ struct ShapeBlob {
     rect: [f32; 4],
     #[serde(default)]
     color: Option<String>,
+    /// A callout's leader-line target, in PDF points. Absent for every other kind, and absent
+    /// for a callout blob written before A-3, which the writer refuses rather than guesses at.
+    #[serde(default)]
+    callout: Option<[f32; 2]>,
 }
 
 /// Writes every annotation for one document into `bytes`, returning new bytes.
@@ -70,7 +76,7 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
             // an unrelated page.
             continue;
         };
-        let Some(mut dictionary) = dictionary_for(annotation)? else {
+        let Some(mut dictionary) = dictionary_for(&mut document, annotation)? else {
             continue;
         };
         // `/NM` is the annotation's stable name in the file. Without it an annotation on
@@ -199,13 +205,20 @@ pub fn appearance_for(annotation: &Annotation) -> Result<Option<Appearance>, App
         // been written yet must produce *no* appearance rather than fall through to a
         // rectangle: drawing a line as a filled box would be a silent wrongness, and the
         // palette cannot offer these tools until their row is ticked.
+        //
+        // Free text is not flattenable yet either, but for a different reason: its appearance
+        // is text, and the flattening pass draws shapes. Left for the same reason as ink --
+        // a box around the text is not the text.
         AnnotationKind::FreeText(_) | AnnotationKind::Line { .. } | AnnotationKind::Oval => {
             Ok(None)
         }
     }
 }
 
-fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, AppError> {
+fn dictionary_for(
+    document: &mut lopdf::Document,
+    annotation: &Annotation,
+) -> Result<Option<lopdf::Dictionary>, AppError> {
     let blob: serde_json::Value = serde_json::from_str(&annotation.data).map_err(|error| {
         AppError::Other(format!(
             "annotation {} has malformed data: {error}",
@@ -250,6 +263,7 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
                 .fold(rect, |acc, next| union(acc, rect_from(next)));
 
             Ok(Some(lopdf_write::annotation_dictionary(
+                document,
                 annotation.kind,
                 union,
                 color,
@@ -257,11 +271,9 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
                 contents,
             )?))
         }
-        // See the appearance match above: a kind with no dictionary builder yet is not
-        // written at all, rather than written as something it is not.
-        AnnotationKind::FreeText(_) | AnnotationKind::Line { .. } | AnnotationKind::Oval => {
-            Ok(None)
-        }
+        // A kind with no dictionary builder yet is not written at all, rather than written as
+        // something it is not. Free text has a builder now, so it is not in this arm.
+        AnnotationKind::Line { .. } | AnnotationKind::Oval => Ok(None),
         AnnotationKind::Note => {
             // A note's anchor is its /Rect; the blob for a note stores a point.
             let parsed: serde_json::Value = blob;
@@ -296,6 +308,7 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
             // `is_drawable` is false for a bare point, so the note path must not go
             // through the rect guard: the dictionary builder gives it an icon box.
             Ok(Some(lopdf_write::annotation_dictionary(
+                document,
                 AnnotationKind::Note,
                 PdfRect {
                     x0: anchor.x0,
@@ -315,6 +328,7 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
                 AppError::Other(format!("annotation {}: {error}", annotation.id))
             })?;
             Ok(Some(lopdf_write::annotation_dictionary(
+                document,
                 AnnotationKind::Rect,
                 rect_from(&parsed.rect),
                 parse_color(parsed.color.as_deref()),
@@ -351,6 +365,56 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
                 Err(error) if error.to_string().contains("no drawable strokes") => Ok(None),
                 Err(error) => Err(error),
             }
+        }
+        // A free-text annotation is the first kind whose *text* is part of its appearance, so
+        // the blob's `rect` is the box and `contents` is what goes in it. A callout adds a
+        // leader line (`/CL`) from the box to the point it refers to; that line is the only
+        // thing distinguishing it from a text box.
+        AnnotationKind::FreeText(mode) => {
+            let parsed: ShapeBlob = serde_json::from_value(blob).map_err(|error| {
+                AppError::Other(format!("annotation {}: {error}", annotation.id))
+            })?;
+            let rect = rect_from(&parsed.rect);
+            let mut dictionary = lopdf_write::annotation_dictionary(
+                document,
+                AnnotationKind::FreeText(mode),
+                rect,
+                parse_color(parsed.color.as_deref()),
+                1.0,
+                contents,
+            )?;
+
+            // `/IT` is written only where it is not the default; see `appearance::it_value`.
+            if let Some(it) = appearance::it_value(mode) {
+                dictionary.set("IT", Object::Name(it.as_bytes().to_vec()));
+            }
+
+            // The leader line is a two-point array from the box's anchor to the target. A
+            // callout without one is a text box, so it is refused rather than written as a
+            // callout that looks like a box: the user drew a callout and would get a box.
+            if mode == FreeTextMode::Callout {
+                let Some(target) = parsed.callout else {
+                    return Err(AppError::Other(
+                        "a callout needs a target point for its leader line".to_string(),
+                    ));
+                };
+                let normalised = rect.normalised();
+                // The line runs from the middle of the box's bottom edge to the target: a
+                // leader from a corner reads as an arrow that points at the box rather than
+                // at the thing the box is talking about.
+                let anchor_x = (normalised.x0 + normalised.x1) / 2.0;
+                dictionary.set(
+                    "CL",
+                    Object::Array(vec![
+                        Object::Real(anchor_x),
+                        Object::Real(normalised.y0),
+                        Object::Real(target[0]),
+                        Object::Real(target[1]),
+                    ]),
+                );
+            }
+
+            Ok(Some(dictionary))
         }
     }
 }
@@ -689,6 +753,173 @@ mod tests {
         assert_eq!(annotation_count(&bytes), 0);
     }
 
+    /// A-3's acceptance row, on the bytes rather than on the structs: save a free-text row,
+    /// reopen the file, and read the dictionary a viewer would read.
+    #[test]
+    fn a_textbox_writes_freetext_with_an_appearance_and_no_it_key() {
+        let annotations = vec![free_text_row(
+            FreeTextMode::Textbox,
+            r##"{"v":1,"rect":[72,600,272,660],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        assert_eq!(
+            dictionary
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"FreeText"
+        );
+        // A text box is the viewer's default, so `/IT` is absent rather than written as the
+        // default. An explicit `/FreeText` would look like a distinction to a later reader.
+        assert!(
+            dictionary.get(b"IT").is_err(),
+            "a text box must not write /IT"
+        );
+        assert_appearance_is_a_non_empty_form(dictionary);
+        // `/DA` names the standard-14 font, so an editor reopening the annotation can resolve
+        // the `Tf` it would use to re-lay-out edited text.
+        let da = dictionary.get(b"DA").and_then(Object::as_str).unwrap();
+        assert!(
+            String::from_utf8_lossy(da).contains("/Helv"),
+            "/DA must name the standard-14 font, got {da:?}"
+        );
+        // `/DA` is resolved against the annotation's `/DR`. A `/DA` naming a font the `/DR`
+        // does not declare is a reference to nothing: an editor reopening this would fall back
+        // to a default and re-lay-out the text in the wrong font. This assertion is the
+        // difference between "the string says Helv" and "Helv can be looked up".
+        let resources_fonts = dictionary
+            .get(b"DR")
+            .and_then(Object::as_dict)
+            .and_then(|dr| dr.get(b"Font"))
+            .and_then(Object::as_dict)
+            .expect("/DR /Font is how /DA's font name resolves");
+        let declared = resources_fonts
+            .get(appearance::FREE_TEXT_FONT.as_bytes())
+            .expect("/DR must declare the font /DA names")
+            .as_reference()
+            .expect("the declared font is a reference to a font dictionary");
+        let font = document.get_object(declared).unwrap().as_dict().unwrap();
+        assert_eq!(
+            font.get(b"BaseFont").and_then(Object::as_name).unwrap(),
+            b"Helvetica"
+        );
+    }
+
+    #[test]
+    fn a_typewriter_writes_the_typewriter_it_key() {
+        let annotations = vec![free_text_row(
+            FreeTextMode::Typewriter,
+            r##"{"v":1,"rect":[72,600,272,660],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        assert_eq!(
+            dictionary.get(b"IT").and_then(Object::as_name).unwrap(),
+            b"FreeTextTypewriter"
+        );
+        assert_appearance_is_a_non_empty_form(dictionary);
+    }
+
+    #[test]
+    fn only_a_callout_writes_a_leader_line() {
+        let callout = free_text_row(
+            FreeTextMode::Callout,
+            r##"{"v":1,"rect":[72,600,272,660],"color":"#000000","callout":[400,500]}"##,
+        );
+        let saved = apply_annotations(&sample_pdf(), &[callout]).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+        let leader = dictionary.get(b"CL").and_then(Object::as_array).unwrap();
+        assert_eq!(leader.len(), 4, "/CL is two points");
+        // The line starts at the middle of the box's bottom edge and ends at the target.
+        assert_eq!(leader[0].as_float().unwrap(), 172.0);
+        assert_eq!(leader[1].as_float().unwrap(), 600.0);
+        assert_eq!(leader[2].as_float().unwrap(), 400.0);
+        assert_eq!(leader[3].as_float().unwrap(), 500.0);
+
+        // A text box in the same shape must have no `/CL`: a leader line on a box that has
+        // nothing to point at tells the viewer to draw an arrow to nowhere.
+        let textbox = free_text_row(
+            FreeTextMode::Textbox,
+            r##"{"v":1,"rect":[72,600,272,660],"color":"#000000"}"##,
+        );
+        let saved = apply_annotations(&sample_pdf(), &[textbox]).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        assert!(
+            only_annotation(&document).get(b"CL").is_err(),
+            "a text box must not write /CL"
+        );
+    }
+
+    #[test]
+    fn a_callout_without_a_target_is_refused() {
+        // Not written as a plain box: the user drew a callout, and a box is a different mark.
+        let callout = free_text_row(
+            FreeTextMode::Callout,
+            r##"{"v":1,"rect":[72,600,272,660],"color":"#000000"}"##,
+        );
+        let error = apply_annotations(&sample_pdf(), &[callout]).unwrap_err();
+        assert!(error.to_string().contains("leader line"), "got {error}");
+    }
+
+    #[test]
+    fn a_free_text_annotation_with_no_text_is_refused() {
+        // An empty frame is a mark the user cannot explain and cannot select meaningfully.
+        let empty = free_text_row(
+            FreeTextMode::Textbox,
+            r##"{"v":1,"rect":[72,600,272,660],"color":"#000000"}"##,
+        );
+        let mut empty = empty;
+        empty.text = None;
+        let error = apply_annotations(&sample_pdf(), &[empty]).unwrap_err();
+        assert!(error.to_string().contains("needs text"), "got {error}");
+    }
+
+    fn free_text_row(mode: FreeTextMode, data: &str) -> Annotation {
+        Annotation {
+            id: format!("free-text-{}", mode_text(mode)),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::FreeText(mode),
+            data: data.to_string(),
+            text: Some("a note in the margin".to_string()),
+            created_at: 0,
+            modified_at: 0,
+        }
+    }
+
+    fn mode_text(mode: FreeTextMode) -> &'static str {
+        match mode {
+            FreeTextMode::Textbox => "textbox",
+            FreeTextMode::Callout => "callout",
+            FreeTextMode::Typewriter => "typewriter",
+        }
+    }
+
+    fn only_annotation(document: &Document) -> &lopdf::Dictionary {
+        let page_id = *document.get_pages().values().next().unwrap();
+        let annotations = document.get_page_annotations(page_id).unwrap();
+        assert_eq!(annotations.len(), 1, "expected exactly one annotation");
+        annotations[0]
+    }
+
+    fn assert_appearance_is_a_non_empty_form(dictionary: &lopdf::Dictionary) {
+        let normal = dictionary
+            .get(b"AP")
+            .and_then(Object::as_dict)
+            .and_then(|ap| ap.get(b"N"))
+            .expect("/AP /N is what a non-Adobe viewer draws");
+        assert!(
+            normal.as_reference().is_ok(),
+            "/AP /N must be a stream reference, not an inline dictionary"
+        );
+    }
+
     #[test]
     fn pre_existing_foreign_annotations_are_preserved() {
         // An annotation made in another app is not in our DB and must survive.
@@ -696,6 +927,7 @@ mod tests {
         let mut document = Document::load_mem(&original).unwrap();
         let page_id = *document.get_pages().values().next().unwrap();
         let foreign = lopdf_write::annotation_dictionary(
+            &mut document,
             AnnotationKind::Highlight,
             PdfRect {
                 x0: 10.0,
