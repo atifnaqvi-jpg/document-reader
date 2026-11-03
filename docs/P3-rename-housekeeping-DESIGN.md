@@ -1,12 +1,19 @@
-# Rename housekeeping — product name and bundle identifier → **docu PRO**
+# Rename housekeeping — product name and bundle identifier → **DocuPro**
 
-Status: **DESIGN — frozen pending user sign-off. No code written.** Governed by the stage gate in
+Status: **DESIGN — APPROVED 2026-11-03, implementation in progress.** Governed by the stage gate in
 `docs/P3-PLAN.md` §4: design, freeze decisions, sign-off, then implementation. This doc covers
 the **Rename housekeeping** row of `docs/P3-PLAN.md` §1, ruling **R5** in `docs/DECISIONS.md` §9,
 target version **1.0.1** (reserved by the tree). Requirements source: the report at
 `docs/reference/acrobat/acrobat-reader-feature-extraction-report.md` — this phase is
 branding housekeeping and claims **nothing** from the report's capability catalog; the report
 sections it does not cite are not applicable, and that is stated rather than left ambiguous.
+
+> **Name ruling, 2026-11-03.** R5 originally read *docu PRO*; the user re-ruled the name on
+> 2026-11-03 as **DocuPro**, one word, exactly that spelling, with nothing appended — no
+> platform word, no qualifier. An intermediate name (`DocuProOpenClaw`) was carried in one
+> relay and **withdrawn by the user before any commit landed**; it never reached the tree, and
+> no file in this repository has ever contained it. D-R1 records the ruling; this note exists
+> so a later reader who finds the withdrawn name in a chat log knows it was never in force.
 
 > **What this phase is not.** It is not a product rename of the codebase, the repository, the
 > crate, or the npm package. R5 names the *product*; the tree keeps the identifiers that
@@ -23,8 +30,8 @@ itself only a guess until it was read off the config.
 | # | Fact | Consequence |
 |---|------|-------------|
 | **N1** | `src-tauri/tauri.conf.json` carries the name in **four** places: `productName: "Document Reader"`, `identifier: "com.documentreader.app"`, `app.windows[0].title: "Document Reader"`, and (indirectly) the installer filename Tauri derives from `productName`. | Four edits, one commit; a partial edit yields an installer named one thing and a window titled another. |
-| **N2** | The NSIS bundler names the artifact `{productName}_{version}_x64-setup.exe`; the published 1.0.0 asset was `Document.Reader_1.0.0_x64-setup.exe` — a **period**, not a space, because GitHub rewrites spaces in asset names. The bytes on disk carry the space. | The local filename and the published asset name differ by one character. Any guard must compare the right one; `docs/RELEASE-NOTES.md` §1.0.0 already records both. |
-| **N3** | `tauri-utils 2.10.0` (its config module): the identifier "must contain only alphanumeric characters (A-Z, a-z, and 0-9), hyphens (-), and periods (.)", and "must be unique across applications since it is used in system configurations like the bundle ID and path to the webview data directory". | A space is not legal in an identifier. `docu PRO` cannot appear in the identifier verbatim; the identifier needs its own spelling. |
+| **N2** | The NSIS bundler names the artifact `{productName}_{version}_x64-setup.exe`. The published 1.0.0 asset was `Document.Reader_1.0.0_x64-setup.exe` while the disk file carried a **space** (`Document Reader_1.0.0_x64-setup.exe`), because GitHub rewrites spaces in asset names. | The disk and published names differ **only when `productName` contains a space**. `DocuPro` does not, so from 1.0.1 the two forms coincide exactly — see D-R8, whose earlier two-form rule this fact retires. |
+| **N3** | `tauri-utils 2.10.0` (its config module): the identifier "must contain only alphanumeric characters (A-Z, a-z, and 0-9), hyphens (-), and periods (.)", and "must be unique across applications since it is used in system configurations like the bundle ID and path to the webview data directory". | Under the current ruling this is a **legal** value: `DocuPro` has no space and is pure alphanumeric, so the identifier constraint no longer forces anything. `com.docupro.app` is therefore chosen for **lower-case convention and upgrade identity**, not because the constraint demands it. Stated plainly because the earlier draft of this fact justified the identifier by a space that no longer exists. |
 | **N4** | `tauri 2.12.0` (its path module's desktop implementation): `app_data_dir()` resolves to `data_dir()/{bundle_identifier}`. There is no `appDirectoriesOverride` in this config and no migration code anywhere in `src-tauri/src/`. | **Changing the identifier moves the database.** The library at `%APPDATA%\com.documentreader.app\library.db` becomes unreachable at `%APPDATA%\<new-id>\library.db`. This is the phase's one real correctness obligation, and it is not a cosmetic concern. |
 | **N5** | `src-tauri/src/lib.rs` joins `app_data_dir()` with `library.db` in `setup()`, and the path is not user-configurable. | The move has exactly one destination and one source; a one-shot migration is a bounded, testable operation rather than a search problem. |
 | **N6** | The crate name (`src-tauri/Cargo.toml` `name = "document-reader"`), the npm name (`package.json` `"name": "document-reader"`), and the repository name are **independent** of `productName` and of the identifier. None is read at runtime to build a path or a title. | They may stay. Renaming them is optional churn, and R5 does not ask for it. |
@@ -39,15 +46,15 @@ Sign-off on this table authorises implementation. D-R1 through D-R9 are the phas
 
 | ID | Decision | Rationale |
 |----|----------|-----------|
-| **D-R1** | The product/display name is exactly **docu PRO** — lower-case `docu`, one space, upper-case `PRO`, as the user wrote it in R5. It is not title-cased to `Docu PRO`, not `DocuPro`, not `docu pro`, and not expanded. | R5 is the ruling and the spelling is the user's. A name is the one string where "improving" it is a defect. |
+| **D-R1** | The product/display name is exactly **DocuPro** — capital `D`, capital `P`, one word, no space, no hyphen, and nothing appended: not `docu PRO`, not `Docu Pro`, not `DocuProOpenClaw`, and not qualified by a platform or edition word. | The user re-ruled the name on 2026-11-03 and stated the spelling explicitly, including "no platform word or anything else appended". A name is the one string where "improving" it is a defect, and an appended qualifier is the specific failure the ruling names. |
 | **D-R2** | `productName` and `identifier` change **together in one atomic commit**. No commit may contain one without the other. | N4: a partial change is not a cosmetic slip. `productName` alone renames the installer and install directory; `identifier` alone moves the data directory, leaving an install that looks unchanged and has lost its library. The pair is the change. |
-| **D-R3** | The bundle identifier becomes **`com.docupro.app`**. Proposed for approval; the user may replace it and D-R3 is rewritten before implementation. | Reverse-DNS, legal under N3 (alphanumerics and periods only; no space, which N3 forbids), and carries no vendor domain we do not own. It is deliberately **not** `com.documentreader.app`, because an identifier that survives the rename defeats the point of recording the upgrade consequence. **See D-R4 for why changing it costs a migration.** |
+| **D-R3** | The bundle identifier becomes **`com.docupro.app`**. Approved by the user on 2026-11-03. | Reverse-DNS, legal under N3, and derived from the ruling name so the two cannot drift apart. It is deliberately **not** `com.documentreader.app`, because an identifier that survives the rename defeats the point of recording the upgrade consequence. Lower-case is convention for reverse-DNS identifiers rather than a constraint, since N3 would accept `com.DocuPro.app` — recorded because the earlier draft wrongly justified the lower case by a space constraint that no longer applies. **See D-R4 for why changing it costs a migration.** |
 | **D-R4** | The identifier change **moves the app data directory** (N4). The phase therefore ships a **one-shot migration**: at startup, if the new `app_data_dir()` holds no `library.db` and the old `%APPDATA%\com.documentreader.app\library.db` exists, copy it across *before* opening the database. The old directory is left in place, untouched. | Without this, an existing hand-test install silently opens an empty library — data loss from the user's point of view, and the worst possible outcome for a housekeeping phase. Leaving the old copy means the migration is idempotent and reversible by hand if it ever goes wrong; deleting the source would make a failed copy unrecoverable. |
 | **D-R5** | Migration is **copy, never move, never delete**, and it is **skipped silently when the new directory already has a database** — a second launch must not overwrite a library the user has since edited. | Idempotency is the only property that makes a startup migration safe across crashes. "Already migrated" and "fresh install" must reach the same no-op. |
 | **D-R6** | The migrated state is **visible, once**, in the Notices/About surface — a dated line naming the old database path. Not a modal, not a blocking dialog. | The user's library moved without them asking. Rule 5 (silent skips are banned) applies to silent *successes* too; a migration the user cannot see is indistinguishable from one that did not happen. |
 | **D-R7** | The git repository name, the git remote, the crate name `document-reader`, and the npm package name `document-reader` are **NOT renamed** in this phase, and not without a separate explicit user ruling. | N6: none affects the runtime or the user. Renaming the remote would break every existing clone, every CI trigger and every recorded commit reference in these documents — a large, irreversible-in-practice change for zero product effect. Called out as a decision rather than an omission so a later reader does not "finish the job". |
-| **D-R8** | The installer filename follows `productName` automatically (N2) and is **not** overridden. Its expected form is recorded in the release notes as `docu PRO_1.0.1_x64-setup.exe` on disk and `docu.PRO_1.0.1_x64-setup.exe` as published. | Overriding the artifact name would decouple two things Tauri keeps consistent for free, and would make the release notes' provenance table describe a name no future build produces. |
-| **D-R9** | Window title, `index.html` title, the Toolbar label, and the Notices privacy sentence all become **docu PRO**, and the Notices sentence is reworded so it still reads as a sentence — `docu PRO edits PDFs on this machine.` The README heading and the install-directory path follow. | N7/N8. The sentence is prose; a blind token replace of a name inside a sentence is how "PRO edits PDFs" ships. The README path is a factual claim (N8) and is the one occurrence whose staleness would mislead. |
+| **D-R8** | The installer filename follows `productName` automatically (N2) and is **not** overridden. Its expected form is **`DocuPro_1.0.1_x64-setup.exe`** on disk **and** as published — one name, not two. | Overriding the artifact name would decouple two things Tauri keeps consistent for free, and would make the release notes' provenance table describe a name no future build produces. N2's space-rewrite rule applied only to a name containing a space; `DocuPro` has none, so the earlier two-form rule in this row is retired rather than carried forward as folklore. |
+| **D-R9** | Window title, `index.html` title, the Toolbar label, and the Notices privacy sentence all become **DocuPro**, and the Notices sentence reads `DocuPro edits PDFs on this machine.` The README heading and the install-directory path follow. | N7/N8. The sentence is still prose and is still checked as a sentence, but the one-word name removes the specific hazard the earlier draft had to guard — there is no leading lower-case token that a blind replace could strand. The README path is a factual claim (N8) and is the one occurrence whose staleness would mislead. |
 
 ## 3. What changes, file by file
 
@@ -72,9 +79,9 @@ with it so no commit in the history shows a half-renamed product.
 | Migration overwrites a newer library on second launch | D-R5: skip when the destination exists; tested by running it twice |
 | Migration half-completes on a crash | Copy to a temp name then rename; the source is never deleted, so a retry converges |
 | Four name sites drift out of sync | name guard (§5), mirroring the version-carrier guard that exists for exactly this reason |
-| The published asset name differs from the disk name | D-R8 records both; a guard compares the disk form, which is the one a build produces |
+| The published asset name differs from the disk name | D-R8: under `DocuPro` the two forms coincide (N2), so there is one name to check and one name to record |
 | Someone "finishes" the rename by moving the remote | D-R7 states the boundary; a later reader finds the decision, not an omission |
-| `docu PRO` contains a space where an identifier is required | N3: the identifier has its own spelling (D-R3); the space lives only in display strings |
+| A later reader reintroduces a qualifier, e.g. a platform word | D-R1 names the failure explicitly; the name guard (§5) compares against `productName`, so any appended word fails at the config, not at review |
 
 ## 5. New guard (acceptance)
 
@@ -102,12 +109,23 @@ fail with the empty-library symptom (D-R4), not with a compile error.
 6. Installer built by build-only dispatch, **user hand-confirms**, then tag — the recorded
    0.9.0/Q9 order. The user must confirm the Add/Remove double-entry and the migrated library.
 
-## 7. Open for sign-off
+## 7. Sign-off record
 
-1. **The identifier `com.docupro.app` (D-R3)** — approve, or supply a replacement. It is the
-   Windows upgrade identity and the data-directory name; changing it after release repeats
-   the migration cost.
-2. **D-R4's migration** — confirm that copying the old database across is wanted, rather than
-   accepting a fresh empty library on upgrade. The design recommends the copy; the alternative
-   is legitimate for a hand-test-only install base and cheaper, but it loses the library.
-3. **D-R7's boundary** — confirm the repository and crate names stay `document-reader`.
+**Approved 2026-11-03.** Both freeze tables were signed off: this phase's D-R1 through D-R9
+(including the copy-never-move migration machinery, D-R4/D-R5) and the P3.1 tables D-A1 through
+D-A10 in `docs/P3.1-annotations-DESIGN.md`.
+
+The three questions this section previously carried are resolved rather than dropped:
+
+1. **The identifier (D-R3)** — approved as `com.docupro.app` under the re-ruled name. It is the
+   Windows upgrade identity and the data-directory name; changing it after release repeats the
+   migration cost.
+2. **The migration (D-R4)** — approved. The copy ships; the "accept an empty library" alternative
+   was considered and rejected because it loses the user's library.
+3. **The boundary (D-R7)** — approved. The repository, remote, crate and npm names stay
+   `document-reader` until a separate ruling says otherwise.
+
+**One consequence still to be confirmed by hand, not by CI:** the upgrade installs over
+`Document Reader` as a *different* application. Add/Remove Programs will list both until the old
+entry is removed, and the user accepted that consequence in `docs/DECISIONS.md` §9 item 5. The
+hand-test checklist in §6 item 6 asks for it to be observed, not assumed.
