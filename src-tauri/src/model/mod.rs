@@ -126,7 +126,9 @@ pub enum AnnotationKind {
     FreeText(FreeTextMode),
     Ink,
     /// P3.1 (D-A4): a straight line, or the same line with a head at its second end.
-    Line { arrow: bool },
+    Line {
+        arrow: bool,
+    },
     /// P3.1 (D-A4): the old `shape` name, which `parse` aliases here on read.
     Rect,
     Oval,

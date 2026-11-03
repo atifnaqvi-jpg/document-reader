@@ -162,14 +162,33 @@ export interface SubstitutionNote {
 /** Style key per tool (D10), matching the `annotation.style.<tool>` scheme. */
 export const styleKey = (tool: AnnotationKind) => `annotation.style.${tool}`;
 
+/**
+ * Defaults for every tool the enum names (D-A4). Total by type, so adding a kind without a
+ * default is a compile error rather than an `undefined` reaching the style picker.
+ */
 const DEFAULT_STYLES: Record<AnnotationKind, ToolStyle> = {
   highlight: { color: "#fff3b0", opacity: 0.4 },
   underline: { color: "#1f6feb", opacity: 1 },
   strikeout: { color: "#d1242f", opacity: 1 },
+  squiggly: { color: "#d1242f", opacity: 1 },
   note: { color: "#f5a623", opacity: 1 },
+  textbox: { color: "#111418", opacity: 1 },
+  callout: { color: "#111418", opacity: 1 },
+  typewriter: { color: "#111418", opacity: 1 },
   ink: { color: "#111418", opacity: 1 },
-  shape: { color: "#1f6feb", opacity: 1 },
+  line: { color: "#d1242f", opacity: 1 },
+  arrow: { color: "#d1242f", opacity: 1 },
+  rect: { color: "#1f6feb", opacity: 1 },
+  oval: { color: "#1f6feb", opacity: 1 },
 };
+
+/**
+ * The stored style key for a tool. `rect` reads the key its predecessor wrote (D-A4's
+ * one-way `shape` alias), so a colour picked before the rename is still picked after it
+ * rather than silently reverting to the default.
+ */
+const styleKeysFor = (tool: AnnotationKind): string[] =>
+  tool === "rect" ? [styleKey(tool), "annotation.style.shape"] : [styleKey(tool)];
 
 /** Reads a persisted style, falling back to the built-in default for that tool. */
 function parseStyle(raw: string | null, tool: AnnotationKind): ToolStyle {
@@ -336,7 +355,9 @@ export function EditorProvider({
   useEffect(() => {
     if (!activeTool) return;
     let cancelled = false;
-    getAppState(styleKey(activeTool))
+    const [key, legacyKey] = styleKeysFor(activeTool);
+    getAppState(key)
+      .then((raw) => (raw === null && legacyKey ? getAppState(legacyKey) : raw))
       .then((raw) => {
         if (!cancelled) setStyleState(parseStyle(raw, activeTool));
       })

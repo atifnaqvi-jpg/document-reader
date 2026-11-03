@@ -573,4 +573,52 @@ describe("EditorProvider: selection is a range of runs", () => {
     expect(next.result.current.selection).toHaveLength(0);
     expect(next.result.current.selectedRun).toBeNull();
   });
+
+  /**
+   * D-A4's `shape` -> `rect` alias, on the frontend side. The Rust enum aliases stored *rows*;
+   * this aliases the stored *style key*. Without it a colour a user picked before the rename
+   * silently reverts to the default, because `annotation.style.rect` has never been written.
+   */
+  describe("the retired `shape` style key", () => {
+    it("is still read for the rect tool", async () => {
+      const backend = installFakeBackend();
+      backend.on("list_annotations", () => []);
+      // Only the OLD key exists, as on an install that predates the rename.
+      backend.on("get_app_state", (args) =>
+        args.key === "annotation.style.shape"
+          ? JSON.stringify({ color: "#123456", opacity: 1 })
+          : null,
+      );
+
+      const { result } = renderHook(() => useEditor(), {
+        wrapper: ({ children }) => (
+          <EditorProvider documentId="doc-1" page={0}>
+            {children}
+          </EditorProvider>
+        ),
+      });
+      act(() => result.current.setActiveTool("rect"));
+
+      await waitFor(() => expect(result.current.style.color).toBe("#123456"));
+    });
+
+    it("is not consulted for tool that never had it", async () => {
+      const backend = installFakeBackend();
+      backend.on("list_annotations", () => []);
+      backend.on("get_app_state", () => JSON.stringify({ color: "#123456", opacity: 1 }));
+
+      const { result } = renderHook(() => useEditor(), {
+        wrapper: ({ children }) => (
+          <EditorProvider documentId="doc-1" page={0}>
+            {children}
+          </EditorProvider>
+        ),
+      });
+      act(() => result.current.setActiveTool("highlight"));
+
+      await waitFor(() => expect(result.current.style.color).toBe("#123456"));
+      const asked = backend.callsTo("get_app_state").map((a) => a.key);
+      expect(asked).not.toContain("annotation.style.shape");
+    });
+  });
 });
