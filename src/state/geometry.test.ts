@@ -15,11 +15,13 @@ import { describe, expect, it } from "vitest";
 import {
   MARK_RULE_THICKNESS,
   NOTE_ICON_POINTS,
+  SQUIGGLY_AMPLITUDE,
   dragToRect,
   isDrawable,
   markHeight,
   markOffset,
   noteAnchorRect,
+  squigglyPolyline,
   pageToPdf,
   pdfToPage,
   pointToPdf,
@@ -177,5 +179,47 @@ describe("geometry: note anchors", () => {
 
   it("returns null rather than guessing when the point is absent", () => {
     expect(noteAnchorRect(undefined)).toBeNull();
+  });
+
+  describe("squiggly", () => {
+    // The defect this covers: a squiggly rendered through the shared sweep path becomes a
+    // solid bar. A bar and a wave have the same bounding box, so only the point list can
+    // tell them apart.
+    it("oscillates above and below its centre line", () => {
+      const height = 6;
+      const points = squigglyPolyline(60, height)
+        .split(" ")
+        .map((pair) => Number(pair.split(",")[1]));
+      expect(points.length).toBeGreaterThan(4);
+      expect(new Set(points).size).toBeGreaterThan(1);
+      // Symmetric about the centre: a wave that only dipped would be an underline.
+      const mid = height / 2;
+      expect(points.filter((y) => y < mid).length).toBeGreaterThan(0);
+      expect(points.filter((y) => y > mid).length).toBeGreaterThan(0);
+    });
+
+    it("spans the full width it is given", () => {
+      const pairs = squigglyPolyline(60, 6).split(" ");
+      expect(pairs[0].split(",")[0]).toBe("0");
+      expect(pairs[pairs.length - 1].split(",")[0]).toBe("60");
+    });
+
+    it("draws nothing for a degenerate box", () => {
+      expect(squigglyPolyline(0, 6)).toBe("");
+      expect(squigglyPolyline(60, 0)).toBe("");
+    });
+
+    it("sits at the bottom of the swept area, like an underline", () => {
+      // The wave marks the text baseline, not the middle of the drag.
+      const height = 30;
+      const offset = markOffset("squiggly", height);
+      expect(offset).toBe(height - markHeight("squiggly", height));
+      expect(offset).toBeGreaterThan(0);
+      expect(offset).toBeLessThan(markOffset("underline", height));
+    });
+
+    it("is tall enough to show its amplitude", () => {
+      expect(markHeight("squiggly", 100)).toBe(SQUIGGLY_AMPLITUDE * 2 + MARK_RULE_THICKNESS);
+    });
   });
 });

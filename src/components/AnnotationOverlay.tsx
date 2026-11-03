@@ -12,10 +12,12 @@ import type {
 import { parseAnnotationData } from "../api/types";
 import { useEditor } from "../state/EditorProvider";
 import {
+  MARK_RULE_THICKNESS,
   dragToRect,
   isDrawable,
   markHeight,
   markOffset,
+  squigglyPolyline,
   noteAnchorRect as noteAnchorRectPoints,
   pageToPdf,
   pdfToPage,
@@ -50,7 +52,14 @@ export interface PageMetrics {
 }
 
 /** How a tool is captured. Determines what the pointer gesture produces. */
-const DRAG_TOOLS: AnnotationKind[] = ["highlight", "underline", "strikeout", "rect", "ink"];
+const DRAG_TOOLS: AnnotationKind[] = [
+  "highlight",
+  "underline",
+  "strikeout",
+  "squiggly",
+  "rect",
+  "ink",
+];
 
 export function AnnotationOverlay({
   metrics,
@@ -301,7 +310,12 @@ function AnnotationMark({
   const colour = "color" in data && data.color ? data.color : "#f5a623";
   const className = `annotation-mark kind-${annotation.kind}${selected ? " selected" : ""}`;
 
-  if (annotation.kind === "highlight" || annotation.kind === "underline" || annotation.kind === "strikeout") {
+  if (
+    annotation.kind === "highlight" ||
+    annotation.kind === "underline" ||
+    annotation.kind === "strikeout" ||
+    annotation.kind === "squiggly"
+  ) {
     const rects = (data as HighlightData).rects ?? [];
     const opacity = (data as HighlightData).opacity ?? 0.4;
     return (
@@ -319,6 +333,30 @@ function AnnotationMark({
             metrics.pageHeightPoints,
           );
           const kind = annotation.kind as SweepKind;
+          // A squiggly is the one sweep whose shape is not a rectangle: it is a wave, so it
+          // is drawn as a polyline rather than a styled span. Rendering it as a span would
+          // paint a solid bar, which is a different mark (a highlight, effectively).
+          if (kind === "squiggly") {
+            const height = markHeight(kind, box.height);
+            return (
+              <svg
+                key={index}
+                className="annotation-rect"
+                style={{ left: box.x, top: box.y + markOffset(kind, box.height) }}
+                width={box.width}
+                height={height}
+                aria-hidden="true"
+              >
+                <polyline
+                  points={squigglyPolyline(box.width, height)}
+                  fill="none"
+                  stroke={colour}
+                  strokeWidth={MARK_RULE_THICKNESS}
+                  opacity={opacity}
+                />
+              </svg>
+            );
+          }
           return (
             <span
               key={index}

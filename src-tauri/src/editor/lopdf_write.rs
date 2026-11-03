@@ -480,6 +480,10 @@ mod tests {
             (AnnotationKind::Highlight, b"Highlight".as_slice()),
             (AnnotationKind::Underline, b"Underline".as_slice()),
             (AnnotationKind::Strikeout, b"Strikeout".as_slice()),
+            // D-A4: the fourth markup type. It shares underline's geometry but keeps its own
+            // subtype, because a viewer that synthesises the wave needs to be told which mark
+            // it is -- /QuadPoints alone cannot distinguish a squiggle from a rule.
+            (AnnotationKind::Squiggly, b"Squiggly".as_slice()),
             (AnnotationKind::Note, b"Text".as_slice()),
             (AnnotationKind::Rect, b"Square".as_slice()),
         ] {

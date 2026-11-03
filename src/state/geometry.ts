@@ -126,10 +126,16 @@ export function isDrawable(rect: UiRect, scale: number): boolean {
  * The tools that sweep out a rectangle over text. Ink, notes and shapes carry their own
  * geometry and are not covered by the two functions below.
  */
-export type SweepKind = "highlight" | "underline" | "strikeout";
+export type SweepKind = "highlight" | "underline" | "strikeout" | "squiggly";
 
 /** Thickness of the rule underline and strikeout draw, in UI pixels. */
 export const MARK_RULE_THICKNESS = 2;
+
+/** Peak deviation of the squiggly wave from its centre line, in UI pixels. */
+export const SQUIGGLY_AMPLITUDE = 2;
+
+/** Horizontal distance between squiggly crests, in UI pixels. */
+export const SQUIGGLY_WAVELENGTH = 6;
 
 /**
  * How tall a sweep mark is drawn inside its rect, in UI pixels.
@@ -138,6 +144,10 @@ export const MARK_RULE_THICKNESS = 2;
  * they stay a fixed thickness however tall the user's drag was.
  */
 export function markHeight(kind: SweepKind, boxHeight: number): number {
+  // A squiggly is a wave inside the box, so it needs vertical room to oscillate. It gets a
+  // band at the bottom of the swept area rather than the full height: the wave marks the
+  // baseline of the text, the same place an underline goes.
+  if (kind === "squiggly") return SQUIGGLY_AMPLITUDE * 2 + MARK_RULE_THICKNESS;
   return kind === "highlight" ? boxHeight : MARK_RULE_THICKNESS;
 }
 
@@ -158,8 +168,33 @@ export function markHeight(kind: SweepKind, boxHeight: number): number {
  */
 export function markOffset(kind: SweepKind, boxHeight: number): number {
   if (kind === "highlight") return 0;
+  if (kind === "squiggly") {
+    return Math.max(0, boxHeight - markHeight("squiggly", boxHeight));
+  }
   if (kind === "strikeout") return Math.max(0, boxHeight / 2 - MARK_RULE_THICKNESS / 2);
   return Math.max(0, boxHeight - MARK_RULE_THICKNESS);
+}
+
+/**
+ * The polyline a squiggly draws, in UI pixels relative to its own box.
+ *
+ * A squiggly is a wave, and every other sweep kind is either a fill or a straight rule, so
+ * this is the one mark that cannot be expressed as a styled `div`. Generated here rather
+ * than in JSX so the shape is arithmetic a test can assert on -- jsdom has no layout, so a
+ * rendered-SVG test could not tell a wave from a straight line.
+ */
+export function squigglyPolyline(width: number, height: number): string {
+  if (width <= 0 || height <= 0) return "";
+  const mid = height / 2;
+  const points: string[] = [];
+  const steps = Math.max(2, Math.round(width / SQUIGGLY_WAVELENGTH) * 2);
+  for (let step = 0; step <= steps; step += 1) {
+    const x = (width * step) / steps;
+    // Alternate above and below the centre: crest at odd steps, trough at even ones.
+    const y = step % 2 === 0 ? mid - SQUIGGLY_AMPLITUDE : mid + SQUIGGLY_AMPLITUDE;
+    points.push(`${x},${y}`);
+  }
+  return points.join(" ");
 }
 
 /**

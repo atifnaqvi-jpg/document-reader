@@ -27,6 +27,7 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
   { kind: "highlight", label: "Highlight", hint: "Drag over text" },
   { kind: "underline", label: "Underline", hint: "Drag under text" },
   { kind: "strikeout", label: "Strike out", hint: "Drag over text" },
+  { kind: "squiggly", label: "Squiggly", hint: "Drag under text" },
   { kind: "note", label: "Note", hint: "Click to place, then type" },
   { kind: "ink", label: "Ink", hint: "Drag to draw" },
   { kind: "rect", label: "Box", hint: "Drag to draw a box" },

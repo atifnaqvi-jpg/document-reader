@@ -58,7 +58,14 @@ pub fn flatten_annotations(
             if row.kind == AnnotationKind::Ink {
                 continue;
             }
-            if crate::editor::annotate::appearance_for(row)?.is_some() {
+            // Only a row this pass can actually emit operations for may be counted as drawn:
+            // the row is deleted after `append_marks`, so counting one that emits nothing
+            // would delete it without redrawing it. Squiggly is such a row -- the flattening
+            // match cannot draw a wave, so it must be left for the viewer's own synthesis
+            // from /QuadPoints.
+            if row.kind != AnnotationKind::Squiggly
+                && crate::editor::annotate::appearance_for(row)?.is_some()
+            {
                 drawn.push(row);
             }
         }
@@ -487,6 +494,109 @@ pub fn export_with_flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::geometry::PdfRect;
+
+    /// An openable one-page PDF with an empty content stream. Local rather than shared:
+    /// the equivalent helper in `lopdf_write`'s tests is private to that module, and
+    /// widening it to `pub(crate)` to reach it here would expose test scaffolding to the
+    /// shipping build.
+    fn blank_page_pdf() -> Document {
+        let mut document = Document::with_version("1.4");
+        let pages_id = document.new_object_id();
+        let content = document.add_object(Stream::new(lopdf::Dictionary::new(), Vec::new()));
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ]),
+            "Contents" => Object::Reference(content),
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => Object::Integer(1),
+            }),
+        );
+        // `/Root` must reference a real Catalog object. An inline dictionary parses but
+        // leaves `get_pages()` empty, which then fails the test for an unrelated reason.
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        document.trailer.set("Root", Object::Reference(catalog_id));
+        document.renumber_objects();
+        document
+    }
+
+    /// A squiggly is left for the viewer to synthesise, so flattening must not claim to
+    /// have baked it.
+    ///
+    /// This is not a cosmetic rule. `flatten_annotations` decides what was drawn and then
+    /// deletes exactly those annotations, because a baked mark plus a live annotation would
+    /// draw twice. A kind that is counted as drawn but emits no content-stream operations
+    /// therefore gets **deleted and never redrawn**, and the export silently loses it.
+    #[test]
+    fn flattening_does_not_count_a_squiggly_as_drawn() {
+        let mut document = blank_page_pdf();
+        let page_id = document.get_pages().values().next().copied().unwrap();
+        let rect = PdfRect {
+            x0: 72.0,
+            y0: 700.0,
+            x1: 300.0,
+            y1: 720.0,
+        };
+        let row = Annotation {
+            id: "squiggle-1".to_string(),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::Squiggly,
+            data: format!(
+                r##"{{"v":1,"rects":[[{},{},{},{}]],"color":"#d1242f","opacity":1.0}}"##,
+                rect.x0, rect.y0, rect.x1, rect.y1
+            ),
+            text: None,
+            created_at: 0,
+            modified_at: 0,
+        };
+
+        // Attach it first, so "left alone" and "deleted" are distinguishable outcomes.
+        let dictionary = crate::editor::lopdf_write::annotation_dictionary(
+            AnnotationKind::Squiggly,
+            rect,
+            (0.82, 0.14, 0.18),
+            1.0,
+            None,
+        )
+        .unwrap();
+        crate::editor::lopdf_write::attach_annotation(&mut document, page_id, dictionary).unwrap();
+
+        let flattened = flatten_annotations(&mut document, std::slice::from_ref(&row)).unwrap();
+        assert_eq!(flattened, 0, "a squiggly was counted as flattened");
+
+        let reloaded =
+            Document::load_mem(&crate::editor::lopdf_write::save_to_bytes(&mut document).unwrap())
+                .unwrap();
+        let page = reloaded.get_pages().values().next().copied().unwrap();
+        let annotations = reloaded.get_page_annotations(page).unwrap();
+        assert_eq!(
+            annotations.len(),
+            1,
+            "flattening deleted the squiggly instead of leaving it for the viewer"
+        );
+        assert_eq!(
+            annotations[0]
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"Squiggly"
+        );
+    }
 
     #[test]
     fn text_is_escaped_for_a_pdf_literal() {
