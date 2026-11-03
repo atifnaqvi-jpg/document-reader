@@ -72,9 +72,9 @@ fi
 # 2026-11-02 (R-7): +1 in both shapes, 524/93 -> 525/93 and 617/0 -> 618/0, for
 # `the_parity_matrix_promotes_a10_only_with_a_recorded_installer`. It reads two Markdown files
 # and never opens PDFium, so the ignored pin stays 93.
-PIN_PLAIN_PASSED=533
+PIN_PLAIN_PASSED=536
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=626
+PIN_IGNORED_PASSED=629
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

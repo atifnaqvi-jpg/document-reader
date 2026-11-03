@@ -55,9 +55,16 @@ export type AnnotationKind =
   | "highlight"
   | "underline"
   | "strikeout"
+  | "squiggly"
   | "note"
+  | "textbox"
+  | "callout"
+  | "typewriter"
   | "ink"
-  | "shape";
+  | "line"
+  | "arrow"
+  | "rect"
+  | "oval";
 
 /**
  * Geometry of an annotation, stored as schema-versioned JSON (P2-D4) so a new tool
@@ -115,9 +122,16 @@ export const ANNOTATION_KINDS: AnnotationKind[] = [
   "highlight",
   "underline",
   "strikeout",
+  "squiggly",
   "note",
+  "textbox",
+  "callout",
+  "typewriter",
   "ink",
-  "shape",
+  "line",
+  "arrow",
+  "rect",
+  "oval",
 ];
 
 /**

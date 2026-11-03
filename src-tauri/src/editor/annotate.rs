@@ -124,7 +124,10 @@ pub fn appearance_for(annotation: &Annotation) -> Result<Option<Appearance>, App
     }
 
     match annotation.kind {
-        AnnotationKind::Highlight | AnnotationKind::Underline | AnnotationKind::Strikeout => {
+        AnnotationKind::Highlight
+        | AnnotationKind::Underline
+        | AnnotationKind::Strikeout
+        | AnnotationKind::Squiggly => {
             let parsed: HighlightBlob = serde_json::from_value(blob).map_err(|error| {
                 AppError::Other(format!("annotation {}: {error}", annotation.id))
             })?;
@@ -178,12 +181,12 @@ pub fn appearance_for(annotation: &Annotation) -> Result<Option<Appearance>, App
                 opacity: 1.0,
             }))
         }
-        AnnotationKind::Shape => {
+        AnnotationKind::Rect => {
             let parsed: ShapeBlob = serde_json::from_value(blob).map_err(|error| {
                 AppError::Other(format!("annotation {}: {error}", annotation.id))
             })?;
             Ok(Some(Appearance {
-                kind: AnnotationKind::Shape,
+                kind: AnnotationKind::Rect,
                 rect: rect_from(&parsed.rect).normalised(),
                 color: parse_color(parsed.color.as_deref()),
                 opacity: 1.0,
@@ -192,6 +195,13 @@ pub fn appearance_for(annotation: &Annotation) -> Result<Option<Appearance>, App
         // Ink is flattened from its stroke paths by `export`, not from a bounding box: a
         // filled rectangle over an ink annotation would be a different mark.
         AnnotationKind::Ink => Ok(None),
+        // P3.1 rows land one type at a time (D-A1/D-A2). A kind whose geometry builder has not
+        // been written yet must produce *no* appearance rather than fall through to a
+        // rectangle: drawing a line as a filled box would be a silent wrongness, and the
+        // palette cannot offer these tools until their row is ticked.
+        AnnotationKind::FreeText(_) | AnnotationKind::Line { .. } | AnnotationKind::Oval => {
+            Ok(None)
+        }
     }
 }
 
@@ -216,7 +226,10 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
     let contents = annotation.text.as_deref();
 
     match annotation.kind {
-        AnnotationKind::Highlight | AnnotationKind::Underline | AnnotationKind::Strikeout => {
+        AnnotationKind::Highlight
+        | AnnotationKind::Underline
+        | AnnotationKind::Strikeout
+        | AnnotationKind::Squiggly => {
             let parsed: HighlightBlob = serde_json::from_value(blob).map_err(|error| {
                 AppError::Other(format!("annotation {}: {error}", annotation.id))
             })?;
@@ -243,6 +256,11 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
                 opacity,
                 contents,
             )?))
+        }
+        // See the appearance match above: a kind with no dictionary builder yet is not
+        // written at all, rather than written as something it is not.
+        AnnotationKind::FreeText(_) | AnnotationKind::Line { .. } | AnnotationKind::Oval => {
+            Ok(None)
         }
         AnnotationKind::Note => {
             // A note's anchor is its /Rect; the blob for a note stores a point.
@@ -292,12 +310,12 @@ fn dictionary_for(annotation: &Annotation) -> Result<Option<lopdf::Dictionary>, 
                 contents,
             )?))
         }
-        AnnotationKind::Shape => {
+        AnnotationKind::Rect => {
             let parsed: ShapeBlob = serde_json::from_value(blob).map_err(|error| {
                 AppError::Other(format!("annotation {}: {error}", annotation.id))
             })?;
             Ok(Some(lopdf_write::annotation_dictionary(
-                AnnotationKind::Shape,
+                AnnotationKind::Rect,
                 rect_from(&parsed.rect),
                 parse_color(parsed.color.as_deref()),
                 1.0,
@@ -537,7 +555,7 @@ mod tests {
             ),
             annotation(
                 0,
-                AnnotationKind::Shape,
+                AnnotationKind::Rect,
                 r##"{"v":1,"rect":[72.0,600.0,300.0,640.0],"color":"#00ff00"}"##,
                 None,
             ),

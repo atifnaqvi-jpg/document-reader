@@ -50,7 +50,7 @@ export interface PageMetrics {
 }
 
 /** How a tool is captured. Determines what the pointer gesture produces. */
-const DRAG_TOOLS: AnnotationKind[] = ["highlight", "underline", "strikeout", "shape", "ink"];
+const DRAG_TOOLS: AnnotationKind[] = ["highlight", "underline", "strikeout", "rect", "ink"];
 
 export function AnnotationOverlay({
   metrics,
@@ -139,7 +139,7 @@ export function AnnotationOverlay({
       // is explicit.
       const pdf = pageRectToPdf(rect, metrics);
       const data: AnnotationData =
-        activeTool === "shape"
+        activeTool === "rect"
           ? { v: 1, rect: pdf, color: style.color }
           : {
               v: 1,

@@ -96,6 +96,19 @@ pub struct SearchHit {
     pub annotation_id: Option<String>,
 }
 
+/// How a free-text annotation is anchored (D-A4). The four names are the report's
+/// own: a sticky note is `note`, and these are the three that are set *in* the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FreeTextMode {
+    /// A framed box that does not grow to fit its text.
+    Textbox,
+    /// A box with a leader line to the point it refers to.
+    Callout,
+    /// Text typed anywhere, with no visible box.
+    Typewriter,
+}
+
 /// Tools a user can place on a page (P2-D4). `atype` in the database is the
 /// serialised form of this enum, so adding a tool never needs a migration --
 /// only the JSON blob's `v` may need to grow (see [`Annotation::data`]).
@@ -105,9 +118,18 @@ pub enum AnnotationKind {
     Highlight,
     Underline,
     Strikeout,
+    /// P3.1 (D-A1): a wavy underline. Same `/QuadPoints` geometry as `underline`.
+    Squiggly,
     Note,
+    /// P3.1 (D-A4): any of the three in-page text tools; the mode picks the dictionary
+    /// subtype and whether an appearance stream is written (D-A8).
+    FreeText(FreeTextMode),
     Ink,
-    Shape,
+    /// P3.1 (D-A4): a straight line, or the same line with a head at its second end.
+    Line { arrow: bool },
+    /// P3.1 (D-A4): the old `shape` name, which `parse` aliases here on read.
+    Rect,
+    Oval,
 }
 
 impl AnnotationKind {
@@ -116,9 +138,16 @@ impl AnnotationKind {
             AnnotationKind::Highlight => "highlight",
             AnnotationKind::Underline => "underline",
             AnnotationKind::Strikeout => "strikeout",
+            AnnotationKind::Squiggly => "squiggly",
             AnnotationKind::Note => "note",
+            AnnotationKind::FreeText(FreeTextMode::Textbox) => "textbox",
+            AnnotationKind::FreeText(FreeTextMode::Callout) => "callout",
+            AnnotationKind::FreeText(FreeTextMode::Typewriter) => "typewriter",
             AnnotationKind::Ink => "ink",
-            AnnotationKind::Shape => "shape",
+            AnnotationKind::Line { arrow: false } => "line",
+            AnnotationKind::Line { arrow: true } => "arrow",
+            AnnotationKind::Rect => "rect",
+            AnnotationKind::Oval => "oval",
         }
     }
 
@@ -127,9 +156,20 @@ impl AnnotationKind {
             "highlight" => Some(AnnotationKind::Highlight),
             "underline" => Some(AnnotationKind::Underline),
             "strikeout" => Some(AnnotationKind::Strikeout),
+            "squiggly" => Some(AnnotationKind::Squiggly),
             "note" => Some(AnnotationKind::Note),
+            "textbox" => Some(AnnotationKind::FreeText(FreeTextMode::Textbox)),
+            "callout" => Some(AnnotationKind::FreeText(FreeTextMode::Callout)),
+            "typewriter" => Some(AnnotationKind::FreeText(FreeTextMode::Typewriter)),
             "ink" => Some(AnnotationKind::Ink),
-            "shape" => Some(AnnotationKind::Shape),
+            "line" => Some(AnnotationKind::Line { arrow: false }),
+            "arrow" => Some(AnnotationKind::Line { arrow: true }),
+            "rect" => Some(AnnotationKind::Rect),
+            "oval" => Some(AnnotationKind::Oval),
+            // D-A4: `shape` is retired as a *name*, not as a row. Rows written by a build
+            // before P3.1 say `shape`; they become `rect` here, on read, so no DB migration
+            // is needed and a downgrade still finds rows it understands.
+            "shape" => Some(AnnotationKind::Rect),
             _ => None,
         }
     }
@@ -347,5 +387,57 @@ mod tests {
         assert_eq!(json["id"], "id");
         assert_eq!(json["format"], "pdf");
         assert_eq!(json["path"], "C:/docs/t.pdf");
+    }
+
+    /// D-A4: every kind survives a round trip through its stored name. The database stores
+    /// `as_str()`, so a name that cannot be parsed back is a row that silently changes kind
+    /// on the next read -- and the palette would offer a tool whose own rows are unrecognisable.
+    #[test]
+    fn every_annotation_kind_round_trips_through_its_stored_name() {
+        let kinds = [
+            AnnotationKind::Highlight,
+            AnnotationKind::Underline,
+            AnnotationKind::Strikeout,
+            AnnotationKind::Squiggly,
+            AnnotationKind::Note,
+            AnnotationKind::FreeText(FreeTextMode::Textbox),
+            AnnotationKind::FreeText(FreeTextMode::Callout),
+            AnnotationKind::FreeText(FreeTextMode::Typewriter),
+            AnnotationKind::Ink,
+            AnnotationKind::Line { arrow: false },
+            AnnotationKind::Line { arrow: true },
+            AnnotationKind::Rect,
+            AnnotationKind::Oval,
+        ];
+        for kind in kinds {
+            assert_eq!(
+                AnnotationKind::parse(kind.as_str()),
+                Some(kind),
+                "`{}` does not parse back to the kind that wrote it",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// D-A4: `shape` is retired as a *name*, not as a row. A build before P3.1 wrote `shape`,
+    /// and those rows must read as `rect` without a database migration.
+    #[test]
+    fn the_retired_shape_name_reads_as_rect() {
+        assert_eq!(AnnotationKind::parse("shape"), Some(AnnotationKind::Rect));
+        assert_ne!(
+            AnnotationKind::Rect.as_str(),
+            "shape",
+            "writing `shape` again would make the alias a two-way door and re-create the old name"
+        );
+    }
+
+    /// The two line kinds differ only by their arrow, so the distinction has to survive
+    /// serialisation or every arrow silently becomes a plain line.
+    #[test]
+    fn an_arrow_is_not_a_plain_line() {
+        assert_ne!(
+            AnnotationKind::Line { arrow: false }.as_str(),
+            AnnotationKind::Line { arrow: true }.as_str()
+        );
     }
 }

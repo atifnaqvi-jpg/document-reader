@@ -43,12 +43,16 @@ pub fn annotation_dictionary(
     ];
 
     let mut dictionary = match kind {
-        AnnotationKind::Highlight | AnnotationKind::Underline | AnnotationKind::Strikeout => {
+        AnnotationKind::Highlight
+        | AnnotationKind::Underline
+        | AnnotationKind::Strikeout
+        | AnnotationKind::Squiggly => {
             let subtype = match kind {
                 AnnotationKind::Highlight => "Highlight",
                 AnnotationKind::Underline => "Underline",
                 AnnotationKind::Strikeout => "Strikeout",
-                _ => unreachable!("arm is restricted to the three markup kinds"),
+                AnnotationKind::Squiggly => "Squiggly",
+                _ => unreachable!("arm is restricted to the markup kinds"),
             };
             dictionary! {
                 "Type" => "Annot",
@@ -94,7 +98,7 @@ pub fn annotation_dictionary(
                 "F" => Object::Integer(4),
             }
         }
-        AnnotationKind::Shape => dictionary! {
+        AnnotationKind::Rect => dictionary! {
             "Type" => "Annot",
             "Subtype" => "Square",
             "Rect" => Object::Array(rect_array),
@@ -111,6 +115,15 @@ pub fn annotation_dictionary(
             return Err(AppError::Other(
                 "ink annotations are written from their stroke list".to_string(),
             ))
+        }
+        // P3.1 rows land one type at a time. Refusing is the only honest answer for a kind
+        // whose dictionary builder has not been written: a wrong subtype would put a shape on
+        // the page that is not what the user drew, and the save would report success.
+        AnnotationKind::FreeText(_) | AnnotationKind::Line { .. } | AnnotationKind::Oval => {
+            return Err(AppError::Other(format!(
+                "`{}` annotations are not written yet (P3.1)",
+                kind.as_str()
+            )))
         }
     };
 
@@ -468,7 +481,7 @@ mod tests {
             (AnnotationKind::Underline, b"Underline".as_slice()),
             (AnnotationKind::Strikeout, b"Strikeout".as_slice()),
             (AnnotationKind::Note, b"Text".as_slice()),
-            (AnnotationKind::Shape, b"Square".as_slice()),
+            (AnnotationKind::Rect, b"Square".as_slice()),
         ] {
             let mut document = one_page_pdf();
             let page_id = first_page(&document);

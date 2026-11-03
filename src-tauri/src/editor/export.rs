@@ -97,8 +97,16 @@ fn append_marks(
         let (alpha_op, width) = match appearance.kind {
             AnnotationKind::Highlight => ("ca", None),
             AnnotationKind::Underline | AnnotationKind::Strikeout => ("CA", Some(1.0_f32)),
-            AnnotationKind::Note | AnnotationKind::Shape => ("CA", None),
-            AnnotationKind::Ink => continue,
+            AnnotationKind::Note | AnnotationKind::Rect => ("CA", None),
+            // Ink is flattened from its stroke paths by its own pass. Squiggly is a wavy line
+            // that this flattening path can only approximate as a straight one, so it is left
+            // to the viewer's own synthesis from /QuadPoints rather than drawn wrong. The
+            // remaining P3.1 kinds have no flattening yet.
+            AnnotationKind::Ink
+            | AnnotationKind::Squiggly
+            | AnnotationKind::FreeText(_)
+            | AnnotationKind::Line { .. }
+            | AnnotationKind::Oval => continue,
         };
 
         operations.push(Operation::new("q", vec![]));
@@ -135,7 +143,7 @@ fn append_marks(
                 operations.push(Operation::new("l", vec![rect.x1.into(), y.into()]));
                 operations.push(Operation::new("S", vec![]));
             }
-            AnnotationKind::Shape => {
+            AnnotationKind::Rect => {
                 // Filled, matching how PDFium renders an unfilled-by-spec /Square with a /C
                 // in the app's own viewer.
                 operations.push(Operation::new(
@@ -163,7 +171,13 @@ fn append_marks(
                 ));
                 operations.push(Operation::new("f", vec![]));
             }
-            AnnotationKind::Ink => {}
+            // Unreachable by construction: the alpha/width match above `continue`s for these,
+            // so this arm exists only to keep the two matches exhaustive together.
+            AnnotationKind::Ink
+            | AnnotationKind::Squiggly
+            | AnnotationKind::FreeText(_)
+            | AnnotationKind::Line { .. }
+            | AnnotationKind::Oval => {}
         }
 
         operations.push(Operation::new("Q", vec![]));

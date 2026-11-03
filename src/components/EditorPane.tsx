@@ -29,7 +29,7 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
   { kind: "strikeout", label: "Strike out", hint: "Drag over text" },
   { kind: "note", label: "Note", hint: "Click to place, then type" },
   { kind: "ink", label: "Ink", hint: "Drag to draw" },
-  { kind: "shape", label: "Box", hint: "Drag to draw a box" },
+  { kind: "rect", label: "Box", hint: "Drag to draw a box" },
 ];
 
 /** Colours offered per tool; a full picker would be its own change, not a P2 need. */

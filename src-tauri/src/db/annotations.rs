@@ -226,7 +226,7 @@ fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Annotation> {
     // An unknown `atype` means the row was written by a newer build; surfacing it
     // as a hard error would make one stray row poison the whole page. Shape is
     // the nearest safe stand-in because it renders from rectangles only.
-    let kind = AnnotationKind::parse(&atype).unwrap_or(AnnotationKind::Shape);
+    let kind = AnnotationKind::parse(&atype).unwrap_or(AnnotationKind::Rect);
     Ok(Annotation {
         id: row.get(0)?,
         document_id: row.get(1)?,
@@ -458,7 +458,7 @@ mod tests {
 
         let listed = list_for_page(&connection, "d1", 1).unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].kind, AnnotationKind::Shape);
+        assert_eq!(listed[0].kind, AnnotationKind::Rect);
     }
 
     #[test]
