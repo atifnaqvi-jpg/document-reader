@@ -978,7 +978,15 @@ family. Then drawing, where D-A8 forces appearance-stream work.
       the *tool* would otherwise silently revert a colour the user had picked.
       **Refusals in place:** `annotation_dictionary` → `Err`; appearance + flattening → skip.
 
-- [ ] **A-2 Squiggly: the fourth markup type.** `/Subtype /Squiggly`, same `/QuadPoints` geometry
+- [x] **A-2 Squiggly: the fourth markup type.** Landed `927c89d`, pins corrected `a7a189c`.
+      `/Subtype /Squiggly` with the same `/QuadPoints` geometry as underline. The row's value was
+      a data-loss bug it exposed: `flatten_annotations` counted squiggly as drawn, emitted no
+      operations for it, then deleted it — so "flatten on save" destroyed every squiggly. The
+      `drawn` push is now gated on the pass actually being able to draw the row.
+      **Guards:** `flattening_does_not_count_a_squiggly_as_drawn` (mutant: count it → FAILED);
+      frontend `oscillates above and below its centre line` (mutant: straight line → FAILED — a
+      bar and a wave share a bounding box, so only the point list distinguishes them).
+- [x] *A-2 original wording, kept for the record:* `/Subtype /Squiggly`, same `/QuadPoints` geometry
       as underline, same `/F 4`. `annotation_dictionary` already emits the subtype (A-1 added the
       arm); what is missing is the blob's `HighlightBlob` acceptance, the palette entry, and the
       flattening decision.
@@ -990,7 +998,27 @@ family. Then drawing, where D-A8 forces appearance-stream work.
       the same `QuadPoints` as an underline over the same rects, and the flattened appearance
       stream contains **no** stroke for it.
 
-- [ ] **A-3 The note family: textbox, callout, typewriter (D-A4/D-A8).** Three `FreeTextMode`s
+- [x] **A-3 The note family: textbox, callout, typewriter (D-A4/D-A8).** Landed `479d1b4`,
+      pins `7615a1d`, CI `41670506900` green with no skipped step. `annotate/appearance.rs` builds
+      the `/AP /N` stream: wrapped lines, `/BBox` the user's box, standard-14 Helvetica in its own
+      `/Resources`. `/IT` is written only where it is not the default (typewriter
+      `/FreeTextTypewriter`; a text box gets no key; a callout is free text with a leader line,
+      not its own IT value). `/CL` is written for callout only. Two refusals: empty free text and
+      a callout with no target — both would otherwise save a mark that is not what the user drew.
+      **`/DR` was the subtle part:** `/DA`'s font name is resolved against the *annotation's* own
+      `/DR`, not the page and not the appearance's `/Resources` (ISO 32000-1 12.7.3.3), so
+      `annotation_dictionary` now writes both from one constant. Without it an editor reopening
+      the annotation falls back to a default font and re-lays-out the text at the wrong width.
+      `annotation_dictionary` gained a `&mut Document` because an appearance stream is a new
+      object; D-A5/D-A6 will need the same shape.
+      **Guards:** `a_textbox_writes_freetext_with_an_appearance_and_no_it_key` (mutants: `/AP /N`
+      → null FAILED, `/DR` dropped FAILED), `a_typewriter_writes_the_typewriter_it_key` (mutant:
+      `/IT` on a text box FAILED), `only_a_callout_writes_a_leader_line` (mutant: corner anchor
+      FAILED), `a_callout_without_a_target_is_refused`, `a_free_text_annotation_with_no_text_is_refused`
+      (mutant: refusal removed FAILED), `flattening_does_not_count_free_text_as_drawn` (mutant:
+      appearance claimed FAILED — A-2's data-loss trap in a new kind), palette reachability tests
+      (mutants: typewriter entry removed FAILED, unfinished Oval offered FAILED).
+- [x] *A-3 original wording, kept for the record:* Three `FreeTextMode`s
       sharing `FreeText(FreeTextMode)`. Dictionary subtypes `/FreeText` for all three; the mode
       picks `/IT` (`/FreeTextTypewriter` for typewriter) and whether a leader line (`/CL`) is
       written for callout.
