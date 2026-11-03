@@ -171,8 +171,18 @@ fn cited_paths(text: &str) -> Citations {
 }
 
 /// The documents that make claims about the shipped body and the programme: the phase contract,
-/// the audit that supersedes the plan, the plan itself, and the review whose §A is the record.
-const GOVERNED_DOCS: [&str; 7] = [
+/// the audit that supersedes the plan, the plan itself, the review whose §A is the record, and
+/// every P3 phase design.
+///
+/// A P3 design is governed **from the moment it is written, not from the moment it is
+/// implemented**. Its decisions table is the contract a later phase is judged against, and its
+/// §1 facts are claims about this tree; a design that cites a module it intends to create, or a
+/// crate API that moved, is wrong before a line of code exists. `docs/P3.1-annotations-DESIGN.md`
+/// is the case in point: writing it turned up that `docs/P2-DESIGN.md` F1 had overstated the
+/// `pub(crate)` boundary, which is exactly the drift this list is here to catch.
+const GOVERNED_DOCS: [&str; 9] = [
+    "docs/P3-rename-housekeeping-DESIGN.md",
+    "docs/P3.1-annotations-DESIGN.md",
     "docs/P2.7.1-mcid-DESIGN.md",
     "docs/P2.7.4-transform-DESIGN.md",
     "docs/P2.7.3-xobject-DESIGN.md",

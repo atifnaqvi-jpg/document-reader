@@ -6,6 +6,12 @@ Status: **APPROVED in principle** by the user on 2026-11-01 (rulings recorded in
 before code, user sign-off, then implementation — the stage gate that has governed
 every phase since P2.4.
 
+> **Design docs written 2026-11-03, awaiting sign-off:** the rename housekeeping
+> (`docs/P3-rename-housekeeping-DESIGN.md`) and P3.1 annotations
+> (`docs/P3.1-annotations-DESIGN.md`). Both are **design only — no code has been written for
+> either phase**, per the stage gate. Sign-off is on the two frozen decisions tables, and on
+> the bundle identifier the rename doc proposes (D-R3).
+
 > **Entry condition: SATISFIED 2026-11-02.** P2.8 closed with tag `v1.0.0` at `1e6bfd8` —
 > the user hand-confirmed the installer (build-only dispatch `41461007177`), the tag run
 > published a full release carrying `Document Reader_1.0.0_x64-setup.exe`, R-7 is ticked,
