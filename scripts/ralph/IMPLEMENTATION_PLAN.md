@@ -950,6 +950,91 @@ asserting positions**, not before R-1..R-3.
       formatted them as a side effect, which is how the drift was found rather than avoided. A
       gate that is a strict subset of CI's is a gate that can report green on a tree CI rejects.
 
+## H5. P3.1 annotations breadth → 1.1.0 — task list
+
+Design: `docs/P3.1-annotations-DESIGN.md` (frozen, approved 2026-11-03). Decisions D-A1..D-A10.
+A row is `[x]` only when its gate is green **and** the type is in the palette the user can
+actually reach — a dictionary builder with no tool is not a shipped type (Q9 in spirit: an
+untested thing must not be built upon).
+
+**The standing rule for every row below, and the reason row 1 wrote refusals rather than
+catch-alls:** a kind whose builder does not exist yet must refuse loudly. `annotation_dictionary`
+returns `Err`, the appearance and flattening matches skip it. Silent substitution — drawing a
+line as a box, a squiggle as a straight line — is the failure mode this phase is most exposed to,
+because every type shares one blob and one writer.
+
+**Rows are ordered by proven capability, not by the palette's visual order.** The highlight
+family first: `/QuadPoints` + `/F` handling is already proven by the shipped four. Then the note
+family. Then drawing, where D-A8 forces appearance-stream work.
+
+- [x] **A-1 AnnotationKind to 13 types, `shape` retired as a name.** Landed `d74af2f`, fixed
+      `66334d3`. `FreeText(FreeTextMode)` covers textbox/callout/typewriter; `Line { arrow }`
+      covers line/arrow; `Rect`/`Oval`. `parse` aliases stored `shape` rows to `rect` on read —
+      no DB migration, and `Rect::as_str()` never writes `shape` again.
+      **Guards:** `every_annotation_kind_round_trips_through_its_stored_name`,
+      `the_retired_shape_name_reads_as_rect` (mutant: alias removed → FAILED),
+      `an_arrow_is_not_a_plain_line`. Frontend side: `styleKeysFor` falls `rect` back to the
+      persisted `annotation.style.shape` key (mutant: alias removed → FAILED), because renaming
+      the *tool* would otherwise silently revert a colour the user had picked.
+      **Refusals in place:** `annotation_dictionary` → `Err`; appearance + flattening → skip.
+
+- [ ] **A-2 Squiggly: the fourth markup type.** `/Subtype /Squiggly`, same `/QuadPoints` geometry
+      as underline, same `/F 4`. `annotation_dictionary` already emits the subtype (A-1 added the
+      arm); what is missing is the blob's `HighlightBlob` acceptance, the palette entry, and the
+      flattening decision.
+      **The refusal to keep:** `export`'s flattening pass must NOT draw squiggly — it can only
+      render a straight line, which is a different mark. Leave it to viewer synthesis from
+      `/QuadPoints` (D-A8: markup needs no `/AP`). A-1 already skips it; this row must not
+      "improve" that.
+      **NEW ASSERTION:** a squiggly round-trips through save→reopen with subtype `Squiggly` and
+      the same `QuadPoints` as an underline over the same rects, and the flattened appearance
+      stream contains **no** stroke for it.
+
+- [ ] **A-3 The note family: textbox, callout, typewriter (D-A4/D-A8).** Three `FreeTextMode`s
+      sharing `FreeText(FreeTextMode)`. Dictionary subtypes `/FreeText` for all three; the mode
+      picks `/IT` (`/FreeTextTypewriter` for typewriter) and whether a leader line (`/CL`) is
+      written for callout.
+      **D-A8 applies:** these need `/AP`, because no viewer synthesises free text from a rect.
+      `/DA` must name a font from the bundled set, or the text is invisible in other viewers —
+      this is the row where `appearance.rs` starts.
+      **NEW ASSERTION:** saved file's dictionary carries `/Subtype /FreeText`, `/IT` for the
+      typewriter, `/CL` only for callout, and a non-empty `/AP /N` stream.
+
+- [ ] **A-4 Ink `/AP` (D-A8).** Ink exists (P2) but writes `/InkList` only. D-A8 requires an
+      appearance stream so non-Adobe viewers draw it.
+      **NEW ASSERTION:** `/AP /N` present and its content stream contains one path per stroke.
+
+- [ ] **A-5 Line and arrow (D-A3: lopdf-only, pdfium cannot author these).** `/Subtype /Line`
+      with `/L` (two points); arrow adds `/LE [/None /OpenArrow]` (or the ruled head style).
+      **NEW ASSERTION:** `/L` matches the dragged endpoints; arrow sets `/LE`, plain line does
+      not; a plain line's `/LE` is absent rather than `[/None /None]`.
+
+- [ ] **A-6 Oval (D-A3 lopdf-only).** `/Subtype /Circle` with `/Rect`; the oval is inscribed in
+      the rect. **NEW ASSERTION:** subtype `Circle`, and the rect is preserved unmodified (an
+      inscribed oval must not rewrite the rect to its bounds).
+
+- [ ] **A-7 Comment pane: list, sort, filter, statuses (D-A7).** Statuses accepted/rejected/
+      completed/cancelled/none stored in the blob, `/State` written when set.
+      **NEW ASSERTION:** each status survives a round trip and writes `/State`; a status change
+      pushes exactly one undo entry (D-A6).
+
+- [ ] **A-8 Reply chains (D-A5/D-A6).** Blob gains `parent`; a reply is a `note` with a parent.
+      `/IRT` written on save. Delete-parent cascades.
+      **NEW ASSERTION:** `/IRT` names the parent's `/NM`; deleting the parent removes the reply;
+      the reply's text is in the FTS index.
+
+- [ ] **A-9 XFDF import/export (D-A9/D-A10).** **NEW ASSERTION:** export → import into a copy →
+      equality; second import adds **zero** rows and reports its skip count.
+
+- [ ] **A-10 Search resolves a hit in each text-bearing type (D-A12).**
+      **NEW ASSERTION:** a query matching a textbox/callout/typewriter/reply body returns that
+      annotation's page and id.
+
+**Not scheduled:** polygon/cloud (D-A1 names them; they need the same lopdf path as line and can
+follow without a new ruling).
+
+---
+
 ## Loop hygiene (do every iteration)
 
 - [ ] Update `LOOP_LOG.md` with the iteration record.
