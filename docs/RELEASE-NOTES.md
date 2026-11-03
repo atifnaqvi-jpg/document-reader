@@ -208,6 +208,16 @@ entry, migration notice, library survival — all pass.** The eight P3.1 commits
 of `330a4ad` before the tag was cut are the recorded staleness delta; none of them is in this
 artifact, and the tag message says so rather than eliding it.
 
+**The published asset is a rebuild, not the hand-tested bytes.** The tag-triggered run
+`41685774608` rebuilt the installer from `330a4ad` rather than re-attaching the dispatched
+artifact, so the download is 10,360,210 bytes — 221 bytes larger — with sha256
+`d940a12f…79da73`. The hand-tested file was `b7cbe7eb…decab03d` at 10,359,989 bytes. Same source
+commit, same `productName`, same `1.0.1` version resource; the difference is NSIS/makensis
+non-determinism, not different code, and `v1.0.0` has the identical delta (published `de78e8f3`,
+recorded `af18fca8`). The provenance rule is about the **source commit**, which is exact and
+verified; it does not and cannot make the binary reproducible. Recorded because a sha256 in the
+tag message that does not match the download looks like tampering until someone explains it.
+
 **What 1.0.1 contains.** R5 (`docs/DECISIONS.md` §9 item 5, scheduled as 1.0.1 in
 `docs/P3-PLAN.md`): the product name and bundle identifier change together in one housekeeping
 phase. The name is **DocuPro** — one word, no space, nothing appended, as the user re-ruled on

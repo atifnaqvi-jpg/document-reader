@@ -1533,7 +1533,15 @@ schedule holds at 1.1.0 the number is simply skipped.
   fmt, clippy, tsc, vitest 80 green.
 - **Tag `v1.0.1` @ `330a4ad`:** pushed. Release run `41685774608` and CI `41685774595` both
   dispatched by the tag push.
-- **Release asset:** verified after publish (name, size, presence).
+- **Release asset:** `DocuPro_1.0.1_x64-setup.exe`, published, 10,360,210 bytes. Release
+  `v1.0.1` is `draft: false`, `prerelease: false`, published 2026-11-03T18:04:33Z.
+- **Rebuild delta found and recorded, not waved past.** The published asset is **not** the bytes
+  the user tested: the tag run rebuilds rather than re-attaching the dispatched artifact, so it
+  is 221 bytes larger, sha256 `d940a12f…79da73` against the tested `b7cbe7eb…decab03d`. Same
+  source commit, same `productName`, same `1.0.1` resource — NSIS non-determinism. `v1.0.0` has
+  the identical delta (published `de78e8f3`, recorded `af18fca8`), so this is a standing property
+  of the pipeline, not a defect introduced here. Written into the release notes because a
+  mismatched sha256 reads as tampering until it is explained.
 
 ### Next
 **HALTED by instruction.** P3.1 continuation — A-4 (ink `/AP`) onward — gets its own pulse.
