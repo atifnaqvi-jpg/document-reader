@@ -72,9 +72,17 @@ fi
 # 2026-11-02 (R-7): +1 in both shapes, 524/93 -> 525/93 and 617/0 -> 618/0, for
 # `the_parity_matrix_promotes_a10_only_with_a_recorded_installer`. It reads two Markdown files
 # and never opens PDFium, so the ignored pin stays 93.
-PIN_PLAIN_PASSED=537
+# 2026-11-02 (A-3): +16 in both shapes, 537/93 -> 553/93 and 630/0 -> 646/0. The 16 is
+# accounted for, and it is two groups. Ten are `annotate/appearance.rs`'s own tests: that file
+# was written earlier in this row and its tests had never been billed into a pin, so the first
+# time they counted they showed up as an unexplained jump. Six are new here -- five in
+# `annotate.rs` for the acceptance row (`/Subtype /FreeText`, `/IT` for the typewriter only,
+# `/CL` for callout only, plus the two refusals) and one in `export.rs` for the flattening
+# data-loss guard. 10 + 6 = 16. The ignored count is unchanged at 93, which is the check that
+# matters: no PDFium-backed test changed shape.
+PIN_PLAIN_PASSED=553
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=630
+PIN_IGNORED_PASSED=646
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
