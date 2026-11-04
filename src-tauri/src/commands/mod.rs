@@ -425,6 +425,17 @@ pub fn export_xfdf(db: State<'_, Db>, document_id: String) -> Result<XfdfExport,
     })
 }
 
+/// Writes an XFDF export to a path the user chose.
+///
+/// The path comes from the frontend's save dialog rather than from the command, so the command
+/// cannot invent a destination; and it is written here rather than through a webview download
+/// because a blob download in a desktop webview has no destination the user picked.
+#[tauri::command]
+pub fn save_xfdf(contents: String, path: String) -> Result<(), AppError> {
+    std::fs::write(&path, contents)
+        .map_err(|error| AppError::Other(format!("could not write {path}: {error}")))
+}
+
 /// What an XFDF export produced.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

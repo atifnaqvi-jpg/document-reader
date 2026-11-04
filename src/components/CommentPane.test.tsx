@@ -60,7 +60,15 @@ function mountPane(initial: Annotation[], page = 0) {
   });
   backend.on("get_app_state", () => null);
   backend.on("set_app_state", () => null);
-  backend.on("export_xfdf", () => ({ contents: "<xfdf/>", exported: table.length, unsupported: 0 }));
+  backend.on("export_xfdf", () => ({
+    contents: "<xfdf/>",
+    exported: table.length,
+    unsupported: 0,
+  }));
+  // The dialog plugin goes through the same IPC bridge, so it is stubbed the same way rather
+  // than by mocking the module: the import of it stays real.
+  backend.on("plugin:dialog|save", () => "/tmp/annotations.xfdf");
+  backend.on("save_xfdf", () => null);
   backend.on("import_xfdf", (args) => {
     // Mirrors the backend's D-A10 behaviour: an existing name is skipped, not overwritten.
     const names = new Set(table.map((row) => row.id));
@@ -308,7 +316,7 @@ describe("threadAnnotations", () => {
 
 describe("CommentPane: XFDF exchange (D-A9/D-A10)", () => {
   it("exports the document's annotations and reports the count", async () => {
-    mountPane([
+    const { backend } = mountPane([
       makeAnnotation({ id: "a", page: 0, kind: "highlight", text: "first mark" }),
       makeAnnotation({ id: "b", page: 1, kind: "highlight", text: "second mark" }),
     ]);
@@ -319,6 +327,26 @@ describe("CommentPane: XFDF exchange (D-A9/D-A10)", () => {
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toContain("Exported 2 annotations"),
     );
+    // The file goes where the dialog said, not to a webview download.
+    const [write] = backend.callsTo("save_xfdf");
+    expect(write.path).toBe("/tmp/annotations.xfdf");
+    expect(write.contents).toBe("<xfdf/>");
+  });
+
+  it("writes nothing and claims nothing when the save dialog is cancelled", async () => {
+    // A cancelled save must not report "Exported 2": the user would go looking for a file
+    // that was never written.
+    const { backend } = mountPane([
+      makeAnnotation({ id: "c", page: 0, kind: "highlight", text: "a mark" }),
+    ]);
+    await waitForRows("a mark");
+    backend.on("plugin:dialog|save", () => null);
+
+    await userEvent.click(screen.getByRole("button", { name: /Export XFDF/ }));
+
+    await waitFor(() => expect(backend.callsTo("export_xfdf").length).toBe(1));
+    expect(backend.callsTo("save_xfdf").length).toBe(0);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("reports a skipped-existing count instead of silently importing nothing", async () => {

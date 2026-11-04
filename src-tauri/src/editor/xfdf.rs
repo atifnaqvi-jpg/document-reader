@@ -405,7 +405,6 @@ impl Geometry {
             status,
         }
     }
-
 }
 
 /// The `subject` attribute XFDF viewers show as the annotation's type.
@@ -504,9 +503,7 @@ fn quads_of(value: &serde_json::Value) -> Option<Vec<f32>> {
     let [x1, y1, x2, y2] = parse_rect_value(value)?;
     let (left, right) = (x1.min(x2), x1.max(x2));
     let (bottom, top) = (y1.min(y2), y1.max(y2));
-    Some(vec![
-        left, bottom, right, bottom, left, top, right, top,
-    ])
+    Some(vec![left, bottom, right, bottom, left, top, right, top])
 }
 
 /// Parses an XFDF document into importable annotations.
@@ -651,8 +648,12 @@ fn reference_char(reference: &str) -> Option<char> {
         "quot" => Some('"'),
         "apos" => Some('\''),
         _ => {
-            let digits = reference.strip_prefix("#x").or_else(|| reference.strip_prefix("#X"))?;
-            u32::from_str_radix(digits, 16).ok().and_then(char::from_u32)
+            let digits = reference
+                .strip_prefix("#x")
+                .or_else(|| reference.strip_prefix("#X"))?;
+            u32::from_str_radix(digits, 16)
+                .ok()
+                .and_then(char::from_u32)
         }
     }
 }
@@ -707,7 +708,8 @@ fn handle_start(
         }
         "quadPoints" => {
             if let Some(annotation) = current.as_mut() {
-                if let Some(coords) = attribute(event, "coords").and_then(|value| parse_coords(&value))
+                if let Some(coords) =
+                    attribute(event, "coords").and_then(|value| parse_coords(&value))
                 {
                     // A viewer that wrote a count that is not a multiple of eight produced a
                     // shape this build cannot represent. The row is kept and the quads are
@@ -729,18 +731,20 @@ fn handle_start(
                     attribute(event, "coords").and_then(|value| parse_coords(&value))
                 {
                     if coords.len() >= 4 {
-                        annotation.line_points =
-                            Some([coords[0], coords[1], coords[2], coords[3]]);
+                        annotation.line_points = Some([coords[0], coords[1], coords[2], coords[3]]);
                     }
                 }
             }
         }
         "gesture" => {
             if let Some(annotation) = current.as_mut() {
-                if let Some(coords) = attribute(event, "coords").and_then(|value| parse_coords(&value))
+                if let Some(coords) =
+                    attribute(event, "coords").and_then(|value| parse_coords(&value))
                 {
-                    let points: Vec<[f32; 2]> =
-                        coords.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect();
+                    let points: Vec<[f32; 2]> = coords
+                        .chunks_exact(2)
+                        .map(|pair| [pair[0], pair[1]])
+                        .collect();
                     if !points.is_empty() {
                         annotation.ink_paths.push(points);
                     }
@@ -874,7 +878,6 @@ fn finish(partial: Option<Partial>, parsed: &mut Vec<XfdfAnnotation>, report: &m
     });
 }
 
-
 /// Imports parsed annotations into a document, skipping names that already exist (D-A10).
 ///
 /// The skip is keyed on the name, which for our own exports is the row's id, so exporting and
@@ -990,13 +993,28 @@ mod tests {
     #[test]
     fn export_writes_the_xfdf_namespace_and_every_name() {
         let (xml, unsupported) = export(&[
-            row("a", 0, AnnotationKind::Highlight, highlight_blob(&[[1.0, 2.0, 3.0, 4.0]]), Some("first")),
-            row("b", 1, AnnotationKind::Note, serde_json::json!({"v":2,"point":[5.0,6.0]}), Some("second")),
+            row(
+                "a",
+                0,
+                AnnotationKind::Highlight,
+                highlight_blob(&[[1.0, 2.0, 3.0, 4.0]]),
+                Some("first"),
+            ),
+            row(
+                "b",
+                1,
+                AnnotationKind::Note,
+                serde_json::json!({"v":2,"point":[5.0,6.0]}),
+                Some("second"),
+            ),
         ])
         .unwrap();
 
         assert_eq!(unsupported, 0);
-        assert!(xml.contains(r#"xmlns="http://ns.adobe.com/xfdf/""#), "no namespace: {xml}");
+        assert!(
+            xml.contains(r#"xmlns="http://ns.adobe.com/xfdf/""#),
+            "no namespace: {xml}"
+        );
         assert!(xml.contains("<highlight"));
         assert!(xml.contains("<text"));
         // The name is what D-A10 matches on, so it has to be in the file.
@@ -1016,8 +1034,14 @@ mod tests {
             None,
         )])
         .unwrap();
-        assert!(xml.contains("<squiggly"), "squiggly lost its element: {xml}");
-        assert!(!xml.contains("<underline"), "squiggly written as underline: {xml}");
+        assert!(
+            xml.contains("<squiggly"),
+            "squiggly lost its element: {xml}"
+        );
+        assert!(
+            !xml.contains("<underline"),
+            "squiggly written as underline: {xml}"
+        );
     }
 
     #[test]
@@ -1032,9 +1056,18 @@ mod tests {
         )])
         .unwrap();
 
-        assert!(xml.contains(r#"rect="10,10,40,16""#), "union rect wrong: {xml}");
+        assert!(
+            xml.contains(r#"rect="10,10,40,16""#),
+            "union rect wrong: {xml}"
+        );
         let quads = xml.split("<quadPoints").nth(1).expect("no quadPoints");
-        let coords = quads.split("coords=\"").nth(1).unwrap().split('"').next().unwrap();
+        let coords = quads
+            .split("coords=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
         assert_eq!(coords.split(',').count(), 16, "quads: {coords}");
     }
 
@@ -1081,7 +1114,10 @@ mod tests {
             None,
         )])
         .unwrap();
-        assert!(!xml.contains("endHead"), "a plain line carried a head: {xml}");
+        assert!(
+            !xml.contains("endHead"),
+            "a plain line carried a head: {xml}"
+        );
     }
 
     #[test]
@@ -1115,7 +1151,13 @@ mod tests {
     fn an_unrepresentable_blob_exports_a_zero_rect_rather_than_vanishing() {
         // The row exists and the user asked for their annotations, so it is written with no
         // geometry instead of being dropped.
-        let mut broken = row("a", 0, AnnotationKind::Highlight, serde_json::json!({}), None);
+        let mut broken = row(
+            "a",
+            0,
+            AnnotationKind::Highlight,
+            serde_json::json!({}),
+            None,
+        );
         broken.data = "not json".to_string();
         let (xml, unsupported) = export(&[broken]).unwrap();
         assert_eq!(unsupported, 0);
@@ -1133,10 +1175,14 @@ mod tests {
             Some("a claim to check"),
         );
 
-        let (xml, _) = export(&[original.clone()]).unwrap();
+        let (xml, _) = export(std::slice::from_ref(&original)).unwrap();
         let (parsed, report) = parse(&xml).unwrap();
 
-        assert_eq!(report.total_skipped(), 0, "a clean round trip skipped rows: {report:?}");
+        assert_eq!(
+            report.total_skipped(),
+            0,
+            "a clean round trip skipped rows: {report:?}"
+        );
         assert_eq!(parsed.len(), 1);
         let back = &parsed[0];
         assert_eq!(back.name, original.id);
@@ -1152,8 +1198,20 @@ mod tests {
     fn re_importing_the_same_file_yields_the_same_names() {
         // DoD 4's second half: identity is the name, so the names must survive the trip.
         let rows = vec![
-            row("x", 0, AnnotationKind::Highlight, highlight_blob(&[[1.0, 1.0, 2.0, 2.0]]), None),
-            row("y", 1, AnnotationKind::Note, serde_json::json!({"v":2,"point":[1.0,1.0]}), Some("hi")),
+            row(
+                "x",
+                0,
+                AnnotationKind::Highlight,
+                highlight_blob(&[[1.0, 1.0, 2.0, 2.0]]),
+                None,
+            ),
+            row(
+                "y",
+                1,
+                AnnotationKind::Note,
+                serde_json::json!({"v":2,"point":[1.0,1.0]}),
+                Some("hi"),
+            ),
         ];
 
         let (xml, _) = export(&rows).unwrap();
@@ -1163,7 +1221,11 @@ mod tests {
         let names = |rows: &[XfdfAnnotation]| -> Vec<String> {
             rows.iter().map(|row| row.name.clone()).collect()
         };
-        assert_eq!(names(&first), names(&second), "a repeat import changed the names");
+        assert_eq!(
+            names(&first),
+            names(&second),
+            "a repeat import changed the names"
+        );
         assert_eq!(names(&first), vec!["x".to_string(), "y".to_string()]);
     }
 
@@ -1173,7 +1235,10 @@ mod tests {
             <freetext name="c" page="0" rect="1,2,3,4" intent="FreeTextCallout"/>
         </annots></xfdf>"#;
         let (parsed, _) = parse(xml).unwrap();
-        assert_eq!(parsed[0].kind, AnnotationKind::FreeText(FreeTextMode::Callout));
+        assert_eq!(
+            parsed[0].kind,
+            AnnotationKind::FreeText(FreeTextMode::Callout)
+        );
     }
 
     #[test]
@@ -1182,7 +1247,10 @@ mod tests {
         // reading of a file that says nothing.
         let xml = r#"<xfdf><annots><freetext name="t" page="0" rect="1,2,3,4"/></annots></xfdf>"#;
         let (parsed, _) = parse(xml).unwrap();
-        assert_eq!(parsed[0].kind, AnnotationKind::FreeText(FreeTextMode::Textbox));
+        assert_eq!(
+            parsed[0].kind,
+            AnnotationKind::FreeText(FreeTextMode::Textbox)
+        );
     }
 
     #[test]
@@ -1211,7 +1279,10 @@ mod tests {
     fn a_truncated_file_is_an_error_not_an_empty_import() {
         // A cut-off download would otherwise report "imported 0" as a success.
         let xml = r#"<xfdf><annots><circle name="a" page="0" rect="1,2,3,4">"#;
-        assert!(parse(xml).is_err(), "a truncated file was accepted as empty");
+        assert!(
+            parse(xml).is_err(),
+            "a truncated file was accepted as empty"
+        );
     }
 
     #[test]
@@ -1312,8 +1383,20 @@ mod tests {
     fn merge_of_an_exported_file_imports_nothing_the_second_time() {
         // The risk table's promise: a repeat import is a no-op that reports its count.
         let rows = vec![
-            row("p", 0, AnnotationKind::Highlight, highlight_blob(&[[1.0, 1.0, 2.0, 2.0]]), None),
-            row("q", 1, AnnotationKind::Note, serde_json::json!({"v":2,"point":[1.0,1.0]}), Some("x")),
+            row(
+                "p",
+                0,
+                AnnotationKind::Highlight,
+                highlight_blob(&[[1.0, 1.0, 2.0, 2.0]]),
+                None,
+            ),
+            row(
+                "q",
+                1,
+                AnnotationKind::Note,
+                serde_json::json!({"v":2,"point":[1.0,1.0]}),
+                Some("x"),
+            ),
         ];
         let (xml, _) = export(&rows).unwrap();
         let (parsed, report) = parse(&xml).unwrap();

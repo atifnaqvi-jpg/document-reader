@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import type { Annotation, AnnotationStatus } from "../api/types";
 import { ANNOTATION_STATUSES, commonOf } from "../api/types";
-import { exportXfdf, importXfdf } from "../api/invoke";
+import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { exportXfdf, importXfdf, saveXfdf } from "../api/invoke";
 import { useEditor } from "../state/EditorProvider";
 
 /**
@@ -307,20 +308,19 @@ export function CommentPane({ onJumpToPage, documentId }: CommentPaneProps) {
     setBusy(true);
     try {
       const result = await exportXfdf(documentId);
+      // The dialog is asked *before* anything is written, so a cancelled save leaves no file
+      // and no notice claiming a file was written.
+      const path = await saveFileDialog({
+        defaultPath: "annotations.xfdf",
+        filters: [{ name: "XFDF", extensions: ["xfdf"] }],
+      });
+      if (typeof path !== "string") return;
+      await saveXfdf(result.contents, path);
       setNotice({
         kind: "exported",
         exported: result.exported,
         unsupported: result.unsupported,
       });
-      // A download rather than a backend file dialog: export is a read, and the pane is a
-      // view. Writing the file from here keeps the command free of a path parameter.
-      const blob = new Blob([result.contents], { type: "application/vnd.adobe.xfdf" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "annotations.xfdf";
-      link.click();
-      URL.revokeObjectURL(url);
     } catch (error) {
       setNotice({ kind: "failed", message: `Export failed: ${String(error)}` });
     } finally {

@@ -76,6 +76,7 @@ pub fn run() {
             commands::set_annotation_status,
             commands::export_xfdf,
             commands::import_xfdf,
+            commands::save_xfdf,
             commands::list_annotations,
             commands::list_page_annotations,
             commands::remove_annotation,

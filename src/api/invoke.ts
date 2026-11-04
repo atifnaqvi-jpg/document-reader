@@ -212,6 +212,10 @@ export const exportXfdf = (documentId: string) =>
 export const importXfdf = (documentId: string, contents: string) =>
   invoke<XfdfImportReport>("import_xfdf", { documentId, contents });
 
+/** Writes an export to the path the user chose in the save dialog. */
+export const saveXfdf = (contents: string, path: string) =>
+  invoke<null>("save_xfdf", { contents, path });
+
 /** Only the annotations on one page, which is what the overlay renders. */
 export const listPageAnnotations = (documentId: string, page: number) =>
   invoke<Annotation[]>("list_page_annotations", { documentId, page });
