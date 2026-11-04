@@ -1548,3 +1548,55 @@ schedule holds at 1.1.0 the number is simply skipped.
 Carried forward from A-3: A-4 should expect the same `/DR` requirement if its appearance names a
 font, and the palette tests pin `Line`/`Arrow`/`Oval` as *absent*, so A-5 will turn one red by
 design.
+
+## P3.1 A-4 → A-6 (drawing rows), 2026-11-04
+
+### Landed
+- `3a36f34` **A-4 ink `/AP`** — CI `41833314510` green, no skipped steps.
+- `89e1a1f` **A-5 line + arrow** — CI `41836449605` green.
+- `3105e8f` **A-6 oval** — CI `41842746779` green, no skipped steps.
+- `4d13e77` A-5 follow-up (`/LE` = `OpenArrow`) + plan rows ticked — CI `41843950200` green.
+- `90c128e` test hygiene (panic-safe temp cleanup) — CI `41846674278` green.
+
+### The two defects this pulse found that no test was going to find
+1. **`/LE` was `Arrow`.** Not a member of Table 179's closed value set, so every viewer would
+   have ignored it and drawn a plain line — the exact failure the key exists to prevent, in the
+   row whose whole point is the arrowhead. The test asserted whatever the writer wrote, which
+   cannot catch a wrong constant; it was found by re-reading the table against the plan row.
+   The test now asserts the spec's spelling.
+2. **Oval was reachable in the palette before it was drawable.** It was added to
+   `EditorPane`'s list without a `DRAG_TOOLS` entry or a blob branch, so the gesture was never
+   captured and, once captured, would have written a `rects` blob the shape writer rejects.
+
+### Mutation record (honest, including the survivors)
+- A-4: 4 mutants, all caught *after* re-aiming. Two survived initially because `S`→`f` and a
+  widened `/BBox` hit **free text's** builders — the strings are shared, so the mutation landed
+  in the wrong function. A third survived for a real reason: the test asserted the substring
+  `"40"`, which page-space `640` also contains, so it passed on the bug it existed to catch.
+- A-5: M8 (structural flatten skip removed) **SURVIVED and is left surviving** — `appearance_for`
+  returns `None` for line, so the drawn-guard excludes it anyway. The skip is kept as defence in
+  depth and the plan row says it is not claimed as protection. M6/M7/M9/M10/M11 caught.
+- A-6: M13 (kappa → 1.0) **survived the first test** — quadrant points and curve count do not
+  distinguish an ellipse from a bulged quadrilateral. Test now pins the operator line; re-run
+  caught. M12 caught.
+- Temp guard: the `Drop`-deletes-nothing mutant **survived** against the real test (cleanup is
+  invisible to it), which is why `the_temp_workspace_removes_itself_when_it_goes_out_of_scope`
+  exists. Re-run caught.
+
+### Known, not fixed
+- Five other temp-dir sites (`src/library.rs`, `src/provider/text.rs`, `tests/export.rs`,
+  `tests/support/mod.rs`, `tests/type0_row6.rs`) leak one pid-named directory per run. Bounded,
+  unlike the per-failure leak just fixed, so left for their own change.
+- An intermittent `STATUS_ACCESS_VIOLATION` in the Windows PDFium suite remains undiagnosed
+  (same-SHA re-runs pass).
+
+### One red gate, unexplained
+A single gate run reported `gate red` with no failing step in its log; six subsequent full runs
+and five direct suite runs were green. I could not reproduce it and did not find a cause, so it
+is recorded as unexplained rather than attributed to a flake. My first read of that run was
+wrong in a way worth noting: `... | tail -3; echo $?` reports *tail's* status, so `EXIT=0` said
+nothing about the gate.
+
+### Next
+**A-7 comment pane** (statuses, `/State`, one undo entry per status change) per
+`IMPLEMENTATION_PLAN.md` H5.
