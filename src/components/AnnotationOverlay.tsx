@@ -8,6 +8,7 @@ import type {
   InkData,
   NoteData,
   ShapeData,
+  LineData,
 } from "../api/types";
 import { parseAnnotationData } from "../api/types";
 import { useEditor } from "../state/EditorProvider";
@@ -60,7 +61,12 @@ const DRAG_TOOLS: AnnotationKind[] = [
   "squiggly",
   "rect",
   "ink",
+  "line",
+  "arrow",
 ];
+
+/** Shortest line worth writing, in PDF points. Below this a drag is a click. */
+const MIN_LINE_POINTS = 2;
 
 /** The tools whose value is typed text: they sweep a box and then ask for content. */
 const FREE_TEXT_TOOLS: AnnotationKind[] = ["textbox", "callout", "typewriter"];
@@ -166,6 +172,21 @@ export function AnnotationOverlay({
         ];
         const data: InkData = { v: 1, strokes, color: style.color };
         await create(metrics.pageNumber, "ink", data, null);
+        return;
+      }
+
+      // A line's mark IS its two endpoints, so it is not built from a rect: the drag's start
+      // and release are the line, and a diagonal's bounding box would be a different mark.
+      // The minimum length is measured in UI pixels against the same scale the rect guard
+      // uses, so a stray click cannot write a zero-length annotation.
+      if (activeTool === "line" || activeTool === "arrow") {
+        setDraft(null);
+        const from = pointToPdf(origin.x, origin.y, metrics.scale, metrics.pageHeightPoints);
+        const to = pointToPdf(point.x, point.y, metrics.scale, metrics.pageHeightPoints);
+        const length = Math.hypot(to[0] - from[0], to[1] - from[1]);
+        if (length < MIN_LINE_POINTS) return;
+        const lineData: LineData = { v: 1, from, to, color: style.color };
+        await create(metrics.pageNumber, activeTool, lineData, null);
         return;
       }
 
@@ -530,6 +551,62 @@ function AnnotationMark({
               strokeWidth={2}
             />
           ))}
+        </svg>
+      </button>
+    );
+  }
+
+  if (annotation.kind === "line" || annotation.kind === "arrow") {
+    const line = data as LineData;
+    if (!line.from || !line.to) return null;
+    // The endpoint is converted the same way a single point is, so the line lands where the
+    // drag happened rather than where a rect's corners would have been.
+    const start = pdfToPage(
+      { x0: line.from[0], y0: line.from[1], x1: line.from[0], y1: line.from[1] },
+      metrics.scale,
+      metrics.pageHeightPoints,
+    );
+    const end = pdfToPage(
+      { x0: line.to[0], y0: line.to[1], x1: line.to[0], y1: line.to[1] },
+      metrics.scale,
+      metrics.pageHeightPoints,
+    );
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={onSelect}
+        aria-label={`${annotation.kind} annotation`}
+      >
+        <svg width={metrics.width} height={metrics.height}>
+          <line
+            x1={start.x}
+            y1={start.y}
+            x2={end.x}
+            y2={end.y}
+            stroke={colour}
+            strokeWidth={2}
+            strokeLinecap="round"
+            markerEnd={
+              annotation.kind === "arrow" ? "url(#annotation-arrowhead)" : undefined
+            }
+          />
+          {annotation.kind === "arrow" && (
+            <defs>
+              {/* The same head the writer draws into /AP, so the preview and the saved
+                  file do not disagree about which end the arrow points at. */}
+              <marker
+                id="annotation-arrowhead"
+                markerWidth="8"
+                markerHeight="8"
+                refX="7"
+                refY="4"
+                orient="auto"
+              >
+                <path d="M0,0 L8,4 L0,8 z" fill={colour} />
+              </marker>
+            </defs>
+          )}
         </svg>
       </button>
     );

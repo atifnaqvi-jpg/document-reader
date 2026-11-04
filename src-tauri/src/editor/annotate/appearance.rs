@@ -246,6 +246,101 @@ pub fn ink_appearance(
     stream
 }
 
+/// Line width for a line/arrow stroke, in points.
+pub const LINE_STROKE_WIDTH: f32 = 2.0;
+
+/// Length of each barb of an arrowhead, and the half-angle it opens to.
+///
+/// Fixed lengths rather than a fraction of the stroke: an arrowhead scales with the line it
+/// terminates in Acrobat, but a head that grows with the line on a long leader ends up larger
+/// than the text it points at.
+const ARROW_HEAD_LENGTH: f32 = 10.0;
+const ARROW_HEAD_HALF_WIDTH: f32 = 4.0;
+
+/// Builds the `/AP /N` stream for a line or arrow (D-A8).
+///
+/// The stream is in the annotation's box space: the box's lower-left goes to the origin, so
+/// the endpoints are written relative to it. Like ink, a line has no `/AP`-exempt synthesis
+/// path -- `/L` gives a viewer the endpoints but not the stroke's appearance -- so without
+/// this the mark is Adobe-only.
+///
+/// The arrowhead is drawn here *as well as* declared in `/LE`. `/LE` is the semantic record,
+/// which a viewer that renders lines itself uses to draw its own head; the appearance is what
+/// a viewer that only blits `/AP` shows. Writing only `/LE` leaves those viewers a plain line.
+pub fn line_appearance(
+    from: (f32, f32),
+    to: (f32, f32),
+    width: f32,
+    height: f32,
+    color: (f32, f32, f32),
+    arrow: bool,
+) -> Stream {
+    let origin_x = from.0.min(to.0);
+    let origin_y = from.1.min(to.1);
+    let start = (from.0 - origin_x, from.1 - origin_y);
+    let end = (to.0 - origin_x, to.1 - origin_y);
+
+    let mut operations = vec![
+        Operation::new("q", vec![]),
+        Operation::new("RG", vec![color.0.into(), color.1.into(), color.2.into()]),
+        Operation::new("w", vec![Object::Real(LINE_STROKE_WIDTH)]),
+        Operation::new("J", vec![Object::Integer(1)]),
+        Operation::new("m", vec![Object::Real(start.0), Object::Real(start.1)]),
+        Operation::new("l", vec![Object::Real(end.0), Object::Real(end.1)]),
+        Operation::new("S", vec![]),
+    ];
+
+    if arrow {
+        // The head points along the line, so the barbs are the two ends of a segment centred
+        // on the tip and perpendicular to the line's direction.
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let length = (dx * dx + dy * dy).sqrt().max(f32::EPSILON);
+        let (ux, uy) = (dx / length, dy / length);
+
+        let base_x = end.0 - ux * ARROW_HEAD_LENGTH;
+        let base_y = end.1 - uy * ARROW_HEAD_LENGTH;
+        // Perpendicular to the direction, scaled to the head's half-width.
+        let (px, py) = (-uy * ARROW_HEAD_HALF_WIDTH, ux * ARROW_HEAD_HALF_WIDTH);
+
+        operations.push(Operation::new(
+            "rg",
+            vec![color.0.into(), color.1.into(), color.2.into()],
+        ));
+        operations.push(Operation::new(
+            "m",
+            vec![Object::Real(end.0), Object::Real(end.1)],
+        ));
+        operations.push(Operation::new(
+            "l",
+            vec![Object::Real(base_x + px), Object::Real(base_y + py)],
+        ));
+        operations.push(Operation::new(
+            "l",
+            vec![Object::Real(base_x - px), Object::Real(base_y - py)],
+        ));
+        operations.push(Operation::new("f", vec![]));
+    }
+
+    operations.push(Operation::new("Q", vec![]));
+
+    let content = Content { operations };
+    let mut stream = Stream::new(Dictionary::new(), content.encode().unwrap_or_default());
+    stream.dict.set("Type", Object::Name(b"XObject".to_vec()));
+    stream.dict.set("Subtype", Object::Name(b"Form".to_vec()));
+    stream.dict.set(
+        "BBox",
+        Object::Array(vec![
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(width),
+            Object::Real(height),
+        ]),
+    );
+    stream.dict.set("Resources", Dictionary::new());
+    stream
+}
+
 /// The `/Font` object a free-text appearance's `/Resources` names.
 ///
 /// Helvetica rather than a bundled font: an appearance stream naming a font the reader does

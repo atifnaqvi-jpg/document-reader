@@ -45,6 +45,16 @@ struct InkBlob {
     color: Option<String>,
 }
 
+/// A line or arrow: two endpoints in PDF points. `/L` and the appearance are both derived from
+/// these, so the endpoints cannot disagree between the semantic record and the drawn stroke.
+#[derive(serde::Deserialize)]
+struct LineBlob {
+    from: [f32; 2],
+    to: [f32; 2],
+    #[serde(default)]
+    color: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 struct ShapeBlob {
     rect: [f32; 4],
@@ -272,8 +282,9 @@ fn dictionary_for(
             )?))
         }
         // A kind with no dictionary builder yet is not written at all, rather than written as
-        // something it is not. Free text has a builder now, so it is not in this arm.
-        AnnotationKind::Line { .. } | AnnotationKind::Oval => Ok(None),
+        // something it is not. Free text and line have builders now, so they are not in this
+        // arm; oval (A-6) is.
+        AnnotationKind::Oval => Ok(None),
         AnnotationKind::Note => {
             // A note's anchor is its /Rect; the blob for a note stores a point.
             let parsed: serde_json::Value = blob;
@@ -364,6 +375,37 @@ fn dictionary_for(
             ) {
                 Ok(dictionary) => Ok(Some(dictionary)),
                 Err(error) if error.to_string().contains("no drawable strokes") => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+        // A line is lopdf-only (D-A3) and carries its geometry in `/L` rather than a rect, so
+        // it needs its own builder the way ink does. `/Rect` is derived from the endpoints:
+        // writing a rect that does not enclose them clips the stroke and misplaces hit-testing.
+        AnnotationKind::Line { arrow } => {
+            let parsed: LineBlob = serde_json::from_value(blob).map_err(|error| {
+                AppError::Other(format!("annotation {}: {error}", annotation.id))
+            })?;
+            let from = (parsed.from[0], parsed.from[1]);
+            let to = (parsed.to[0], parsed.to[1]);
+            let rect = PdfRect {
+                x0: from.0.min(to.0),
+                y0: from.1.min(to.1),
+                x1: from.0.max(to.0),
+                y1: from.1.max(to.1),
+            };
+            match lopdf_write::line_annotation_dictionary(
+                document,
+                rect,
+                from,
+                to,
+                parse_color(parsed.color.as_deref()),
+                arrow,
+                contents,
+            ) {
+                Ok(dictionary) => Ok(Some(dictionary)),
+                // Coincident endpoints or a zero-area box: nothing to draw, so the row is
+                // skipped rather than written as an invisible annotation.
+                Err(error) if error.to_string().contains("distinct endpoints") => Err(error),
                 Err(error) => Err(error),
             }
         }
@@ -1085,6 +1127,171 @@ mod tests {
                 other => panic!("expected a number, got {other:?}"),
             })
             .collect()
+    }
+
+    /// A-5: a line is lopdf-only (D-A3), and unlike markup it cannot lean on `/QuadPoints`
+    /// synthesis -- a viewer has no way to know a line's two endpoints from a rect, so the
+    /// endpoints must be written as `/L` *and* drawn in an appearance (D-A8).
+    #[test]
+    fn a_line_writes_its_two_endpoints_and_an_appearance() {
+        let annotations = vec![line_row(
+            false,
+            r##"{"v":1,"color":"#000000","from":[72,600],"to":[300,640]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        assert_eq!(
+            dictionary
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"Line"
+        );
+        let line = numbers(dictionary.get(b"L").expect("/L carries the endpoints"));
+        assert_eq!(line, vec![72.0, 600.0, 300.0, 640.0]);
+        assert_appearance_is_a_non_empty_form(dictionary);
+    }
+
+    /// An arrow is a line with a head, and the head is recorded as `/LE`, not as geometry.
+    /// The distinction has to live in the dictionary: a viewer that draws `/L` alone would
+    /// render an arrow as a plain line, which is a different mark.
+    #[test]
+    fn an_arrow_writes_an_arrowhead_in_le_and_a_plain_line_writes_none() {
+        for (arrow, expected) in [(false, None::<&str>), (true, Some("Arrow"))] {
+            let annotations = vec![line_row(
+                arrow,
+                r##"{"v":1,"color":"#000000","from":[72,600],"to":[300,640]}"##,
+            )];
+            let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+            let document = Document::load_mem(&saved).unwrap();
+            let dictionary = only_annotation(&document);
+
+            let le = dictionary
+                .get(b"LE")
+                .ok()
+                .and_then(|object| object.as_array().ok())
+                .map(|array| {
+                    array
+                        .iter()
+                        .map(|item| String::from_utf8_lossy(item.as_name().unwrap()).to_string())
+                        .collect::<Vec<_>>()
+                });
+            match expected {
+                None => assert!(le.is_none(), "a plain line must write no /LE, got {le:?}"),
+                Some(head) => {
+                    let le = le.expect("an arrow must write /LE");
+                    assert_eq!(le, vec!["None".to_string(), head.to_string()]);
+                }
+            }
+            assert_appearance_is_a_non_empty_form(dictionary);
+        }
+    }
+
+    /// A line whose endpoints coincide is a click, not a mark. It must be refused rather than
+    /// written as a zero-length annotation with an empty appearance, because a viewer then has
+    /// a selectable object on the page that draws nothing.
+    #[test]
+    fn a_line_with_coincident_endpoints_is_refused() {
+        let annotations = vec![line_row(
+            false,
+            r##"{"v":1,"color":"#000000","from":[72,600],"to":[72,600]}"##,
+        )];
+        let error = apply_annotations(&sample_pdf(), &annotations).unwrap_err();
+        assert!(
+            error.to_string().contains("too small") || error.to_string().contains("endpoint"),
+            "got {error}"
+        );
+    }
+
+    /// The appearance must draw a stroked path between the endpoints, not a filled box: a
+    /// filled rect over a diagonal line is a different mark, and would satisfy any structural
+    /// check on `/AP` alone.
+    #[test]
+    fn the_line_appearance_strokes_the_diagonal_not_a_box() {
+        let annotations = vec![line_row(
+            false,
+            r##"{"v":1,"color":"#000000","from":[72,600],"to":[300,640]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        let stream = appearance_stream_of(&document, dictionary);
+        let content = String::from_utf8_lossy(&stream.content).to_string();
+        let operators: Vec<&str> = content.lines().map(str::trim).collect();
+
+        assert!(
+            operators.contains(&"S"),
+            "the line must be stroked, got {content:?}"
+        );
+        assert!(
+            !operators.iter().any(|line| line.ends_with(" re")),
+            "a line appearance must not draw a rectangle, got {content:?}"
+        );
+        // In box space the endpoints are opposite corners of the 228x40 box.
+        assert!(
+            operators.contains(&"0 0 m"),
+            "the start point must be the box origin, got {content:?}"
+        );
+        assert!(
+            operators.contains(&"228 40 l"),
+            "the end point must be the far corner, got {content:?}"
+        );
+    }
+
+    /// The arrowhead has to be drawn, not just declared in `/LE`. A viewer that honours `/LE`
+    /// draws its own; one that only draws `/AP` gets whatever the appearance contains, and
+    /// `/LE` alone would leave it a plain line.
+    #[test]
+    fn the_arrow_appearance_draws_a_head_the_plain_line_does_not() {
+        let plain = {
+            let annotations = vec![line_row(
+                false,
+                r##"{"v":1,"color":"#000000","from":[72,600],"to":[300,640]}"##,
+            )];
+            let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+            let document = Document::load_mem(&saved).unwrap();
+            let dictionary = only_annotation(&document);
+            let stream = appearance_stream_of(&document, dictionary);
+            String::from_utf8_lossy(&stream.content).to_string()
+        };
+        let arrow = {
+            let annotations = vec![line_row(
+                true,
+                r##"{"v":1,"color":"#000000","from":[72,600],"to":[300,640]}"##,
+            )];
+            let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+            let document = Document::load_mem(&saved).unwrap();
+            let dictionary = only_annotation(&document);
+            let stream = appearance_stream_of(&document, dictionary);
+            String::from_utf8_lossy(&stream.content).to_string()
+        };
+
+        // The head adds a filled triangle, so the arrow's stream is longer and carries a
+        // fill the plain line has no reason to.
+        assert!(
+            arrow.matches(" l").count() > plain.matches(" l").count(),
+            "the arrow must draw head segments, plain={plain:?} arrow={arrow:?}"
+        );
+        assert!(
+            !plain.contains(" f\n") && !plain.contains("\nf "),
+            "a plain line must not fill anything, got {plain:?}"
+        );
+    }
+
+    fn line_row(arrow: bool, data: &str) -> Annotation {
+        Annotation {
+            id: if arrow { "arrow-1" } else { "line-1" }.to_string(),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::Line { arrow },
+            data: data.to_string(),
+            text: None,
+            created_at: 0,
+            modified_at: 0,
+        }
     }
 
     /// Resolves `/AP /N` to the stream it references.

@@ -55,7 +55,17 @@ pub fn flatten_annotations(
             // Ink needs its stroke paths and a different drawing primitive; it is left as an
             // annotation rather than approximated as a filled box, which would be a
             // different mark.
-            if row.kind == AnnotationKind::Ink {
+            // Ink and line have no flattening primitive: neither a stroke path nor a
+            // two-endpoint line can be baked by this pass, and drawing either as a filled box
+            // would be a different mark. Both are skipped *here*, before the drawn-guard.
+            //
+            // This is defence in depth, and today it is redundant: `appearance_for` returns
+            // None for both kinds, so the drawn-guard below would exclude them anyway. The
+            // skip is kept because that coincidence is not a rule -- the day either kind gains
+            // an appearance the guard thinks drawable, this line is what stops the flattening
+            // pass deleting it. A mutation that removes Line from this match changes no test
+            // result, which is the honest measure of how much it is doing right now.
+            if matches!(row.kind, AnnotationKind::Ink | AnnotationKind::Line { .. }) {
                 continue;
             }
             // Only a row this pass can actually emit operations for may be counted as drawn:
@@ -647,6 +657,52 @@ mod tests {
                 .unwrap(),
             b"Ink"
         );
+    }
+
+    /// A-5's line is the same trap as ink: it has an appearance stream now, so it looks
+    /// drawable to the flattening guard, but no arm of the flattening match draws a stroked
+    /// path between two endpoints. It is skipped before the guard, and this pins that.
+    #[test]
+    fn flattening_keeps_a_line_as_an_annotation_rather_than_deleting_it() {
+        let mut document = blank_page_pdf();
+        let page_id = document.get_pages().values().next().copied().unwrap();
+        let row = Annotation {
+            id: "line-1".to_string(),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::Line { arrow: true },
+            data: r##"{"v":1,"color":"#111418","from":[72,600],"to":[300,640]}"##.to_string(),
+            text: None,
+            created_at: 0,
+            modified_at: 0,
+        };
+
+        let dictionary = crate::editor::lopdf_write::line_annotation_dictionary(
+            &mut document,
+            PdfRect {
+                x0: 72.0,
+                y0: 600.0,
+                x1: 300.0,
+                y1: 640.0,
+            },
+            (72.0, 600.0),
+            (300.0, 640.0),
+            (0.07, 0.08, 0.09),
+            true,
+            None,
+        )
+        .unwrap();
+        crate::editor::lopdf_write::attach_annotation(&mut document, page_id, dictionary).unwrap();
+
+        let flattened = flatten_annotations(&mut document, std::slice::from_ref(&row)).unwrap();
+        assert_eq!(flattened, 0, "a line must not be counted as flattened");
+
+        let reloaded =
+            Document::load_mem(&crate::editor::lopdf_write::save_to_bytes(&mut document).unwrap())
+                .unwrap();
+        let page = reloaded.get_pages().values().next().copied().unwrap();
+        let annotations = reloaded.get_page_annotations(page).unwrap();
+        assert_eq!(annotations.len(), 1, "flattening deleted the line");
     }
 
     /// This is not a cosmetic rule. `flatten_annotations` decides what was drawn and then

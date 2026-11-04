@@ -33,6 +33,8 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
   { kind: "callout", label: "Callout", hint: "Drag a box, then drag from it to point" },
   { kind: "typewriter", label: "Typewriter", hint: "Drag a box, then type" },
   { kind: "ink", label: "Ink", hint: "Drag to draw" },
+  { kind: "line", label: "Line", hint: "Drag from one end to the other" },
+  { kind: "arrow", label: "Arrow", hint: "Drag from tail to tip" },
   { kind: "rect", label: "Box", hint: "Drag to draw a box" },
 ];
 

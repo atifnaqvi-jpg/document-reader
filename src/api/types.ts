@@ -110,7 +110,25 @@ export interface FreeTextData {
   callout?: [number, number];
 }
 
-export type AnnotationData = HighlightData | NoteData | InkData | ShapeData | FreeTextData;
+/**
+ * A line or arrow. The endpoints are the mark, so they are stored rather than a rect: a rect
+ * cannot say which two corners the line runs between, and a diagonal and its bounding box are
+ * different marks.
+ */
+export interface LineData {
+  v: 1;
+  from: [number, number];
+  to: [number, number];
+  color?: string;
+}
+
+export type AnnotationData =
+  | HighlightData
+  | NoteData
+  | InkData
+  | ShapeData
+  | FreeTextData
+  | LineData;
 
 /** Mirrors `model::Annotation` (P2-D4). `text` is denormalised for the FTS index (D5). */
 export interface Annotation {

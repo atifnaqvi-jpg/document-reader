@@ -175,9 +175,16 @@ pub fn annotation_dictionary(
                 },
             }
         }
-        // Still refusing. Each is its own row (A-5, A-6): a wrong subtype would put a mark on
-        // the page that is not what the user drew, and the save would report success.
-        AnnotationKind::Line { .. } | AnnotationKind::Oval => {
+        // Line carries its geometry in `/L`, not a rect, and needs an appearance built from
+        // its endpoints: it goes through `line_annotation_dictionary` instead.
+        AnnotationKind::Line { .. } => {
+            return Err(AppError::Other(
+                "line annotations are written from their endpoints".to_string(),
+            ))
+        }
+        // Still refusing. A-6 is its own row: a wrong subtype would put a mark on the page
+        // that is not what the user drew, and the save would report success.
+        AnnotationKind::Oval => {
             return Err(AppError::Other(format!(
                 "`{}` annotations are not written yet (P3.1)",
                 kind.as_str()
@@ -269,6 +276,87 @@ pub fn ink_annotation_dictionary(
     };
 
     dictionary.set("CA", Object::Real(opacity.clamp(0.05, 1.0)));
+
+    if let Some(text) = contents {
+        if !text.trim().is_empty() {
+            dictionary.set("Contents", Object::string_literal(text));
+        }
+    }
+
+    Ok(dictionary)
+}
+
+/// Line/arrow annotation from its two endpoints (ISO 32000-1 12.5.6.7).
+///
+/// `/L` is the semantic record of the endpoints and `/LE` the line endings. Both matter: a
+/// viewer that renders lines itself reads them, and the appearance stream is what a viewer
+/// that only draws `/AP` shows. `/Rect` is derived from the endpoints -- the spec requires it
+/// to enclose the line, and a rect that merely approximates the endpoints clips the stroke.
+pub fn line_annotation_dictionary(
+    document: &mut lopdf::Document,
+    rect: PdfRect,
+    from: (f32, f32),
+    to: (f32, f32),
+    color: (f32, f32, f32),
+    arrow: bool,
+    contents: Option<&str>,
+) -> Result<Dictionary, AppError> {
+    let rect = rect.normalised();
+    if !rect.is_drawable() {
+        return Err(AppError::Other(
+            "annotation area is too small to draw".to_string(),
+        ));
+    }
+    if (from.0 - to.0).abs() < f32::EPSILON && (from.1 - to.1).abs() < f32::EPSILON {
+        return Err(AppError::Other(
+            "a line needs two distinct endpoints".to_string(),
+        ));
+    }
+
+    let appearance_stream =
+        appearance::line_appearance(from, to, rect.width(), rect.height(), color, arrow);
+    let appearance_id = document.add_object(appearance_stream);
+
+    let mut dictionary = dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Line",
+        "Rect" => Object::Array(vec![
+            Object::Real(rect.x0),
+            Object::Real(rect.y0),
+            Object::Real(rect.x1),
+            Object::Real(rect.y1),
+        ]),
+        "L" => Object::Array(vec![
+            Object::Real(from.0),
+            Object::Real(from.1),
+            Object::Real(to.0),
+            Object::Real(to.1),
+        ]),
+        "C" => Object::Array(vec![
+            Object::Real(color.0),
+            Object::Real(color.1),
+            Object::Real(color.2),
+        ]),
+        "F" => Object::Integer(4),
+        "AP" => dictionary! {
+            "N" => Object::Reference(appearance_id),
+        },
+    };
+
+    // `/LE` is written only for an arrow. A plain line's endings are the spec default
+    // (`None`/`None`), and writing a default is the same mistake as writing no distinction at
+    // all -- it looks like a decision the writer made.
+    if arrow {
+        dictionary.set(
+            "LE",
+            Object::Array(vec![
+                Object::Name(b"None".to_vec()),
+                Object::Name(b"Arrow".to_vec()),
+            ]),
+        );
+    }
+
+    dictionary.set("CA", Object::Real(1.0));
 
     if let Some(text) = contents {
         if !text.trim().is_empty() {
