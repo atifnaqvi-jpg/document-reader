@@ -1600,3 +1600,98 @@ nothing about the gate.
 ### Next
 **A-7 comment pane** (statuses, `/State`, one undo entry per status change) per
 `IMPLEMENTATION_PLAN.md` H5.
+
+---
+
+## P3.1 A-7 → A-9 (XFDF parity), 2026-11-04 — green, four commits pushed
+
+Rows landed: A-7 (`1ef587a`), A-8 (`1ef587a`), A-9 (`1ef78d3`) and the A-9 save-dialog
+follow-up (`d5404b8`). All four ticked in `IMPLEMENTATION_PLAN.md` with their evidence.
+A-10 checked and **left unticked** — see below.
+
+### The one that mattered: D-A10 was never implemented
+
+`skipped_existing` was on the import report struct and was never incremented. A second import
+wrote duplicate rows and reported a clean run. That is the exact defect D-A10 exists to
+forbid, sitting behind a field name that reads as if it were wired.
+
+It was found by writing the row's NEW ASSERTION, not by reading the code. The lesson is not
+"review harder"; it is that a struct field with the right name is not evidence that anything
+writes to it, and an assertion phrased as *a second import adds zero rows* finds that in one
+run where a code read did not.
+
+Three more bugs fell out of the same assertions, all invisible to a compile check: quick-xml
+delivers an entity as its own event, so treating text nodes as the whole value silently
+dropped `&amp;`-style content from every note; trimming text nodes then ate the spaces either
+side of an entity; and XFDF `State` values were compared against the blob's lowercase spelling,
+so any status from a real file was dropped. A fourth: `line` geometry was read from a file but
+never written to one.
+
+### Mutation record (honest, including the non-appliers)
+
+Fifteen mutants, M26–M40, all caught. But three of them *initially reported a verdict against
+unchanged code* — a blank-line mismatch and two Python `SyntaxError`s meant the substitution
+never landed, and the harness dutifully reported SURVIVED (or "caught" by a test that happened
+to already fail). Each was re-run until the edit was confirmed present in the file before the
+verdict was believed.
+
+This is the A-4/A-6 lesson in a new dress. There, the mutant applied but landed in the *wrong
+shared function*; here it did not apply at all. Both produce a number that looks like a
+measurement and is not. The habit that catches both: assert the substitution landed
+(`assert old in s`, then read the file back) and re-run.
+
+The save-dialog row's mutant — the cancellation check removed — was caught, and that row's
+test (`writes nothing and claims nothing when the save dialog is cancelled`) exists because the
+old shape reported "Exported 2" whether or not a file was written.
+
+### A-10 left unticked, on purpose
+
+`index_text` has no kind filter, so a `FreeText` row is indexed exactly as a `Note` row is, and
+`annotation_hits_are_tagged_and_carry_their_id` proves the hit carries page and id. The
+*behaviour* therefore looks right.
+
+The assertion as written names textbox, callout and typewriter, and no test indexes any of
+them — the only hit test inserts `AnnotationKind::Note`. Ticking on "the path is shared so it
+must work" is precisely the reasoning that produced the D-A10 defect one row earlier. Recorded
+in the plan row instead, with what is proven and what is not.
+
+### Process failure this iteration: the work was not pushed
+
+Four commits sat local after the row work, with no CI run against any of them, because I halted
+for review without pushing. The per-row rule is push-then-watch, and a halt is not an exception
+to it — a halt with unpushed work means the next person inherits untested commits and no
+verdicts.
+
+Corrected: pushed `3c4c8a4..d5404b8`, run `41931156511`, all three jobs green —
+Frontend `success`, Rust (fmt, clippy, test) `success`, Windows compile check + render smoke
+`success`. The Windows job's own guard reports `PDFium tests ran: 701 passed, 0 ignored`.
+
+**701 vs the local 702 is expected and is not a silent skip.** The difference is exactly one
+test, `row1_the_embedded_subset_renders_through_poppler`, gated `#[cfg(unix)]` because poppler's
+CLI is a Unix install here. It is absent from the Windows binary by static `cfg`, which is why
+`--include-ignored` cannot turn it into a failure there — a static platform gate, not a skip
+arm that a green suite could hide behind. Checked by counting the `cfg` attributes (there is
+exactly one) rather than by assuming.
+
+### Brief handling — the lesson to carry forward
+
+The conversation's INITIAL message is a **2026-10-29 state header**, not the current brief. It
+was stale by roughly four days and forty commits: it named `3942c8c` as HEAD and `f9c75d5` as
+unpushed (both already ancestors of origin), claimed the newest tag was `v0.8.1` when `v1.0.1`
+existed, described the shipped 0.9.0 notes as a draft, listed a T1 deletion whose symbol no
+longer exists in the tree, and named P2.7.7 as next when it had already landed.
+
+**The current brief is always the NEWEST user pulse.** When context compaction re-surfaces
+the initial message, it arrives looking authoritative and will drive task selection toward
+work that is already done. The discipline that worked: verify every claim against git reality
+before acting on any of it — `git log`, `git status`, `git rev-parse origin/<branch>`,
+`git merge-base --is-ancestor <sha> origin/<branch>` (a SHA existing does not mean it is
+unpushed), `git for-each-ref --sort=-creatordate refs/tags` (not `--sort=-v:refname`), and the
+GitHub runs API for CI. Treat the newest pulse as authoritative; treat the header as a
+historical document.
+
+### Next
+
+A-10 (one test per text-bearing type, or reword its assertion), then P3.1's remaining rows.
+**Version ruling is PENDING at the user level**: 1.0.2 is reserved, the plan table says 1.1.0
+for P3.1. No bump and no tag until the user answers — the release-prep pulse follows that answer.

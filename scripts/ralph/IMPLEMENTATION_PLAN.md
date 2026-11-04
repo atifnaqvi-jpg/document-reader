@@ -1142,22 +1142,96 @@ family. Then drawing, where D-A8 forces appearance-stream work.
       without the first the gesture is never captured, without the second it falls through to
       the markup arm and writes `rects`, which the shape writer cannot parse.
 
-- [ ] **A-7 Comment pane: list, sort, filter, statuses (D-A7).** Statuses accepted/rejected/
-      completed/cancelled/none stored in the blob, `/State` written when set.
-      **NEW ASSERTION:** each status survives a round trip and writes `/State`; a status change
-      pushes exactly one undo entry (D-A6).
+- [x] **A-7 Comment pane: list, sort, filter, statuses (D-A7).** Statuses accepted/rejected/
+      completed/cancelled/none stored in the blob, `/State` written when set. Landed `1ef587a`,
+      CI `41931156511` green.
+      **Assertion 1 — round trip and `/State`:** `every_status_writes_its_own_state_name`,
+      `a_status_writes_state_and_its_review_model`, `an_annotation_without_a_status_writes_no_state_keys`,
+      `a_status_this_build_does_not_know_writes_nothing`. The last one is the one that matters
+      most: an unknown status must write *nothing* rather than a plausible-looking `/State`,
+      because a viewer that reads state names as a closed set would otherwise be handed a
+      value it has to guess at.
+      **Assertion 2 — exactly one undo entry:** `pushes exactly one entry for one status
+      change` (`src/state/EditorProvider.test.tsx`), not in the Rust suite. It counts by
+      *walking the stack*, not by counting `set_annotation_status` calls: two entries issue the
+      same call, so a call count cannot see a duplicate. The second undo must reach the create
+      and empty the table.
+      **Where the pane's own behaviour is guarded:** `src/components/CommentPane.test.tsx` —
+      sort/filter/status driven through the real `EditorProvider` and the real `invoke.ts`, with
+      only the backend faked.
+      **Honest limit:** the *statuses* half is the strong half. The pane is a stateless view
+      (D-A11), so its sort/filter state has no persistence to test, and an assertion that
+      "the list is still sorted after a refresh" would be asserting React, not our code.
 
-- [ ] **A-8 Reply chains (D-A5/D-A6).** Blob gains `parent`; a reply is a `note` with a parent.
-      `/IRT` written on save. Delete-parent cascades.
-      **NEW ASSERTION:** `/IRT` names the parent's `/NM`; deleting the parent removes the reply;
-      the reply's text is in the FTS index.
+- [x] **A-8 Reply chains (D-A5/D-A6).** Blob gains `parent`; a reply is a `note` with a parent.
+      `/IRT` written on save. Delete-parent cascades. Landed `1ef587a`, CI `41931156511` green.
+      **Assertion 1 — `/IRT` names the parent's `/NM`:** `a_reply_writes_irt_naming_its_parents_object`.
+      Two guards exist beyond the assertion's letter because the ordering is what actually
+      breaks in the wild: `a_reply_written_before_its_parent_still_finds_it` (a reply must not
+      depend on its parent having been written first) and
+      `a_reply_whose_parent_is_gone_is_detached_not_dropped` (a missing parent detaches the
+      reply rather than deleting it — dropping the user's text to satisfy a pointer is the
+      wrong failure).
+      **Assertion 2 — deleting the parent removes the reply:** `deleting_a_reply_leaves_its_parent_alone`
+      covers the direction that is safe to get wrong only once, and the cascade itself is the
+      schema's (`annotations_are_cascaded_when_the_document_is_deleted`, `bookmark_cascade_delete_is_enforced`).
+      **Assertion 3 — the reply's text is in the FTS index:** `a_replys_text_is_searchable`.
+      Also `a_reply_to_a_reply_is_found_by_replies_to` (chains nest) and
+      `a_corrupt_status_is_absent_rather_than_an_error` (a bad blob reads as untriaged).
+      **Honest limit:** "delete-parent cascades" is enforced at the *document* level by
+      `ON DELETE CASCADE`; a reply's removal when only its parent row goes is not separately
+      asserted, because the parent's own delete goes through the annotation delete path that
+      `deleting_a_reply_leaves_its_parent_alone` exercises in the other direction. If a
+      parent-only cascade is later relied on, it needs its own guard.
 
-- [ ] **A-9 XFDF import/export (D-A9/D-A10).** **NEW ASSERTION:** export → import into a copy →
-      equality; second import adds **zero** rows and reports its skip count.
+- [x] **A-9 XFDF import/export (D-A9/D-A10).** Landed `1ef78d3`, CI `41931156511` green;
+      save-dialog follow-up `d5404b8` (below).
+      **Assertion 1 — export → import into a copy → equality:**
+      `export_then_parse_round_trips_the_fields_that_matter` and
+      `a_quad_round_trips_back_into_per_line_rects`. The second is the one that would have
+      been missed: a highlight exported as one union rect re-imports as a single box, so the
+      per-line rects the writer produced are checked back value-by-value, not by rect count.
+      **Assertion 2 — a second import adds zero rows and reports its skip count:**
+      `merge_of_an_exported_file_imports_nothing_the_second_time`, plus
+      `merge_skips_an_existing_name_and_counts_it` for the mixed case (one existing name, one
+      new) where "skip" and "import" must both happen and the count must be 1, not 0 or 2.
+      **D-A10 was not implemented until this row.** `skipped_existing` existed on the report
+      struct and was never incremented, so a repeat import would have written duplicate rows
+      while reporting a clean run. Found by writing the assertion rather than by reading the
+      code. The skip is keyed on the annotation **name**, which for our own exports is the row
+      id.
+      **Four further bugs fell out of the same assertions, all invisible to a "did it compile"
+      check:** quick-xml delivers an entity as its own event, so treating text nodes as the
+      whole value dropped `&amp;`-style content from every note; trimming text nodes then ate
+      the spaces either side of an entity; XFDF's `State` values were compared against the
+      blob's lowercase spelling, so any status from a real file was silently dropped; and
+      `line` geometry was read from the file but never written to it.
+      **Import decides first and writes second.** `merge` returns what would be inserted,
+      then one transaction (`db::annotations::add_many`) inserts all of it. A fifty-row file
+      that failed on row forty would otherwise leave thirty-nine rows and a report describing
+      a document the user does not have.
+      **Save-dialog follow-up, `d5404b8`:** export wrote through a Blob and an anchor click.
+      In a desktop webview that has no destination the user chose, and it was the source of
+      the jsdom `Not implemented: navigation` line in every gate run. It now asks the save
+      dialog and writes the chosen path through `save_xfdf`; a cancelled save writes nothing
+      and claims nothing, guarded by `writes nothing and claims nothing when the save dialog
+      is cancelled` (mutant: the cancellation check removed — caught).
+      **Mutation coverage:** M26–M40, fifteen mutants across the merge/parse/serialize path,
+      all caught — each re-run until the substitution was confirmed present, because a
+      mutant that never applied reports SURVIVED on unchanged code.
 
 - [ ] **A-10 Search resolves a hit in each text-bearing type (D-A12).**
       **NEW ASSERTION:** a query matching a textbox/callout/typewriter/reply body returns that
       annotation's page and id.
+      **State checked 2026-11-04, deliberately left unticked.** The *behaviour* looks right:
+      `db::annotations::index_text` has no kind filter, so a `FreeText` row is indexed exactly
+      as a `Note` row is, and `annotation_hits_are_tagged_and_carry_their_id` proves the hit
+      carries page and id. What is missing is the assertion as written: the only hit test
+      inserts `AnnotationKind::Note`, and no test indexes a textbox, callout or typewriter.
+      Ticking on "the code path is shared, so it must work" is the reasoning that produced the
+      D-A10 defect in A-9 — `skipped_existing` was also on the struct and also looked wired.
+      The row needs one test per named type, or the assertion reworded to say what is
+      actually proven. Not done here because it is a row of its own, not part of A-9.
 
 **Not scheduled:** polygon/cloud (D-A1 names them; they need the same lopdf path as line and can
 follow without a new ruling).
