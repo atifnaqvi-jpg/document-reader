@@ -13,6 +13,7 @@
 
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId};
 
+use crate::editor::annotate::appearance;
 use crate::editor::geometry::PdfRect;
 use crate::model::{AnnotationKind, AppError};
 
@@ -201,6 +202,7 @@ pub fn annotation_dictionary(
 /// Ink annotation from one or more stroke paths (ISO 32000-1 12.5.6.13).
 /// `/InkList` is an array of arrays of x,y pairs in PDF points.
 pub fn ink_annotation_dictionary(
+    document: &mut Document,
     rect: PdfRect,
     strokes: &[Vec<(f32, f32)>],
     color: (f32, f32, f32),
@@ -233,9 +235,24 @@ pub fn ink_annotation_dictionary(
         ));
     }
 
+    // D-A8: ink needs an appearance stream. `/InkList` alone is drawn only by Adobe, so a
+    // stroke without `/AP` saves, reopens, and is invisible in every other viewer -- the same
+    // save-and-vanish failure that A-2 found in flattening, arrived at from the other side.
+    let drawable: Vec<Vec<(f32, f32)>> = strokes
+        .iter()
+        .filter(|stroke| stroke.len() >= 2)
+        .cloned()
+        .collect();
+    let appearance_stream =
+        appearance::ink_appearance(&drawable, rect.width(), rect.height(), color);
+    let appearance_id = document.add_object(appearance_stream);
+
     let mut dictionary = dictionary! {
         "Type" => "Annot",
         "Subtype" => "Ink",
+        "AP" => dictionary! {
+            "N" => Object::Reference(appearance_id),
+        },
         "Rect" => Object::Array(vec![
             Object::Real(rect.x0),
             Object::Real(rect.y0),
@@ -592,6 +609,7 @@ mod tests {
             vec![(200.0, 700.0), (240.0, 730.0)],
         ];
         let annotation = ink_annotation_dictionary(
+            &mut document,
             sample_rect(),
             &strokes,
             (0.0, 0.0, 1.0),
@@ -628,7 +646,9 @@ mod tests {
     fn rejects_an_ink_annotation_with_no_drawable_strokes() {
         // A single-point stroke cannot be drawn; silently writing it would create
         // an invisible annotation the user cannot find or delete.
+        let mut document = one_page_pdf();
         let error = ink_annotation_dictionary(
+            &mut document,
             sample_rect(),
             &[vec![(10.0, 10.0)], vec![]],
             (0.0, 0.0, 1.0),

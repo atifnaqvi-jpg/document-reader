@@ -163,6 +163,89 @@ pub fn free_text_appearance(
     stream
 }
 
+/// Line width for an ink stroke, in points.
+///
+/// A stroke with no width operator takes the viewer's default, which varies; a fixed width is
+/// what makes the saved mark look like the one that was drawn.
+pub const INK_STROKE_WIDTH: f32 = 2.0;
+
+/// Builds the `/AP /N` stream for an ink annotation (D-A8).
+///
+/// `/InkList` records where the pen went but not what the stroke looks like: no width, no
+/// caps, no joins. Adobe reads `/InkList` directly, so ink survives there without an
+/// appearance; every other viewer draws only `/AP`, so without this the stroke is invisible.
+///
+/// The stream is built in the annotation's own box space, with the box's lower-left at the
+/// origin. That is why the points are translated by the box's corner rather than written in
+/// page coordinates: a `/BBox` starting at the origin and content in page space would put the
+/// stroke off the appearance, and the viewer -- which positions the appearance at `/Rect` --
+/// would draw it twice-displaced.
+pub fn ink_appearance(
+    strokes: &[Vec<(f32, f32)>],
+    width: f32,
+    height: f32,
+    color: (f32, f32, f32),
+) -> Stream {
+    let mut operations = vec![
+        Operation::new("q", vec![]),
+        Operation::new("RG", vec![color.0.into(), color.1.into(), color.2.into()]),
+        Operation::new("w", vec![Object::Real(INK_STROKE_WIDTH)]),
+        // Round caps and joins: a freehand stroke is a pen, and a butt cap makes a turning
+        // point look notched. The graphics state needs the caps set after `w` to apply.
+        Operation::new("J", vec![Object::Integer(1)]),
+        Operation::new("j", vec![Object::Integer(1)]),
+    ];
+
+    // The appearance box's lower-left, so page-space points become box-space points.
+    let origin_x = strokes
+        .iter()
+        .flat_map(|stroke| stroke.iter())
+        .map(|(x, _)| *x)
+        .fold(f32::INFINITY, f32::min);
+    let origin_y = strokes
+        .iter()
+        .flat_map(|stroke| stroke.iter())
+        .map(|(_, y)| *y)
+        .fold(f32::INFINITY, f32::min);
+
+    for stroke in strokes.iter().filter(|stroke| stroke.len() >= 2) {
+        let mut points = stroke.iter();
+        if let Some((x, y)) = points.next() {
+            operations.push(Operation::new(
+                "m",
+                vec![Object::Real(x - origin_x), Object::Real(y - origin_y)],
+            ));
+        }
+        for (x, y) in points {
+            operations.push(Operation::new(
+                "l",
+                vec![Object::Real(x - origin_x), Object::Real(y - origin_y)],
+            ));
+        }
+        operations.push(Operation::new("S", vec![]));
+    }
+
+    operations.push(Operation::new("Q", vec![]));
+
+    let content = Content { operations };
+    let mut stream = Stream::new(Dictionary::new(), content.encode().unwrap_or_default());
+    stream.dict.set("Type", Object::Name(b"XObject".to_vec()));
+    stream.dict.set("Subtype", Object::Name(b"Form".to_vec()));
+    stream.dict.set(
+        "BBox",
+        Object::Array(vec![
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(width),
+            Object::Real(height),
+        ]),
+    );
+    // No `/Resources` entry: ink draws no text and names no font. An empty resources dict is
+    // correct here, and it is also why ink does not have free text's `/DR` obligation.
+    stream.dict.set("Resources", Dictionary::new());
+    stream
+}
+
 /// The `/Font` object a free-text appearance's `/Resources` names.
 ///
 /// Helvetica rather than a bundled font: an appearance stream naming a font the reader does

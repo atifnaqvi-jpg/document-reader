@@ -593,6 +593,62 @@ mod tests {
         );
     }
 
+    /// A-4 writes an appearance stream for ink, which makes ink look like a kind this pass
+    /// could bake. It still cannot: the flattening match has no stroke-path primitive and
+    /// drawing ink as a filled box would be a different mark. Ink is therefore skipped in the
+    /// first loop, before the drawn-guard, so it is never deleted -- and this test pins that
+    /// ordering, because moving ink past the guard would silently destroy every stroke on
+    /// flatten while the appearance stream made the row look drawable.
+    #[test]
+    fn flattening_keeps_ink_as_an_annotation_rather_than_deleting_it() {
+        let mut document = blank_page_pdf();
+        let page_id = document.get_pages().values().next().copied().unwrap();
+        let row = Annotation {
+            id: "ink-1".to_string(),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::Ink,
+            data: r##"{"v":1,"color":"#111418","strokes":[[[72,600],[140,640],[200,600]]]}"##
+                .to_string(),
+            text: None,
+            created_at: 0,
+            modified_at: 0,
+        };
+
+        let dictionary = crate::editor::lopdf_write::ink_annotation_dictionary(
+            &mut document,
+            PdfRect {
+                x0: 72.0,
+                y0: 600.0,
+                x1: 200.0,
+                y1: 640.0,
+            },
+            &[vec![(72.0, 600.0), (140.0, 640.0), (200.0, 600.0)]],
+            (0.07, 0.08, 0.09),
+            1.0,
+            None,
+        )
+        .unwrap();
+        crate::editor::lopdf_write::attach_annotation(&mut document, page_id, dictionary).unwrap();
+
+        let flattened = flatten_annotations(&mut document, std::slice::from_ref(&row)).unwrap();
+        assert_eq!(flattened, 0, "ink must not be counted as flattened");
+
+        let reloaded =
+            Document::load_mem(&crate::editor::lopdf_write::save_to_bytes(&mut document).unwrap())
+                .unwrap();
+        let page = reloaded.get_pages().values().next().copied().unwrap();
+        let annotations = reloaded.get_page_annotations(page).unwrap();
+        assert_eq!(annotations.len(), 1, "flattening deleted the ink stroke");
+        assert_eq!(
+            annotations[0]
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"Ink"
+        );
+    }
+
     /// This is not a cosmetic rule. `flatten_annotations` decides what was drawn and then
     /// deletes exactly those annotations, because a baked mark plus a live annotation would
     /// draw twice. A kind that is counted as drawn but emits no content-stream operations

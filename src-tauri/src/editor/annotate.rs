@@ -355,6 +355,7 @@ fn dictionary_for(
             }
             let rect = strokes_bounds(&strokes);
             match lopdf_write::ink_annotation_dictionary(
+                document,
                 rect,
                 &strokes,
                 parse_color(parsed.color.as_deref()),
@@ -918,6 +919,190 @@ mod tests {
             normal.as_reference().is_ok(),
             "/AP /N must be a stream reference, not an inline dictionary"
         );
+    }
+
+    /// A-4: D-A8 says ink gets an `/AP` stream. Nothing synthesises one -- `/InkList` is a
+    /// list of point paths with no line thickness, no joins and no way to say what a stroke
+    /// looks like without re-deriving it at render time -- so without `/AP` an ink stroke is
+    /// visible in Adobe (which reads `/InkList`) and invisible in every viewer that draws only
+    /// appearances. This is the whole point of the row: the mark must not save-and-vanish.
+    #[test]
+    fn an_ink_annotation_writes_an_appearance_stream() {
+        let annotations = vec![ink_row(
+            r##"{"v":1,"color":"#ff0000","strokes":[[[72,600],[140,640],[200,600]]]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        assert_eq!(
+            dictionary
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"Ink"
+        );
+        assert_appearance_is_a_non_empty_form(dictionary);
+    }
+
+    /// The appearance must draw the strokes, not a box around them. A filled `/Rect` would
+    /// satisfy every structural assertion above while being a different mark on the page, so
+    /// this reads the stream's own content and requires the path operators and the point
+    /// coordinates the blob holds.
+    #[test]
+    fn the_ink_appearance_draws_the_stroke_path_not_a_bounding_box() {
+        let annotations = vec![ink_row(
+            r##"{"v":1,"color":"#ff0000","strokes":[[[72,600],[140,640],[200,600]]]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        let stream = appearance_stream_of(&document, dictionary);
+        assert_eq!(
+            stream
+                .dict
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"Form",
+            "the appearance must be a form XObject"
+        );
+        let content = String::from_utf8_lossy(&stream.content).to_string();
+
+        // The three points of the stroke, translated into the appearance's own box space.
+        // The box is the stroke's bounds, so the first point is the origin corner.
+        // Operators are checked as whole tokens on their own lines: `contains(" S")` would
+        // miss a bare `S` operator line and pass on any word containing "S".
+        let operators: Vec<&str> = content.lines().map(str::trim).collect();
+        assert!(
+            operators
+                .iter()
+                .any(|line| line.ends_with(" m") || *line == "m"),
+            "a stroke needs a moveto, got {content:?}"
+        );
+        assert!(
+            operators.iter().any(|line| line.ends_with(" l")),
+            "a stroke needs a lineto, got {content:?}"
+        );
+        assert!(
+            operators.contains(&"S"),
+            "the stroke must be stroked, not filled, got {content:?}"
+        );
+        assert!(
+            !operators.iter().any(|line| line.ends_with(" re")),
+            "an ink appearance must not draw a rectangle, got {content:?}"
+        );
+        // The path must be in the appearance's own box space, not the page's. The box is
+        // the stroke's bounds, so the first point lands exactly on the origin and the apex is
+        // the box's height. Asserting on the parsed numbers rather than a substring matters:
+        // a substring check for 40 also matches a page-space y of 640, so it would pass on a
+        // stream that draws the stroke off its own appearance.
+        let moveto = operators
+            .iter()
+            .find(|line| line.ends_with(" m"))
+            .expect("a moveto");
+        assert_eq!(
+            *moveto, "0 0 m",
+            "the first point must be the box origin, got {content:?}"
+        );
+        let apex = operators
+            .iter()
+            .find(|line| line.ends_with(" l"))
+            .expect("a lineto");
+        assert_eq!(
+            *apex, "68 40 l",
+            "the interior vertex must be in box space (68, 40), got {content:?}"
+        );
+    }
+
+    /// The `/Rect` and the `/AP /BBox` must describe the same box. If they disagree the
+    /// viewer positions the appearance against one and hit-tests against the other, so the
+    /// user clicks where the stroke is not.
+    #[test]
+    fn the_ink_appearance_box_matches_the_annotation_rect() {
+        let annotations = vec![ink_row(
+            r##"{"v":1,"color":"#000000","strokes":[[[72,600],[140,640],[200,600]]]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        let rect: Vec<f32> = numbers(dictionary.get(b"Rect").unwrap());
+        let stream = appearance_stream_of(&document, dictionary);
+        let bbox: Vec<f32> = numbers(stream.dict.get(b"BBox").unwrap());
+
+        // The BBox is in the appearance's own space, so it starts at the origin and is the
+        // rect's *size*; the rect carries the position. Equal size is the invariant.
+        let rect_width = rect[2] - rect[0];
+        let rect_height = rect[3] - rect[1];
+        let (bbox_width, bbox_height) = (bbox[2] - bbox[0], bbox[3] - bbox[1]);
+        assert!(
+            (rect_width - bbox_width).abs() < 0.01 && (rect_height - bbox_height).abs() < 0.01,
+            "appearance box {bbox:?} does not match rect {rect:?}"
+        );
+    }
+
+    /// An ink row with nothing drawable must still be skipped rather than written with an
+    /// empty appearance: a form XObject drawing nothing is a mark the user cannot see or
+    /// delete, which is worse than the row not being written at all.
+    #[test]
+    fn an_ink_row_with_no_drawable_strokes_writes_no_appearance() {
+        let annotations = vec![ink_row(r##"{"v":1,"strokes":[[[72,600]]]}"##)];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let page_id = *document.get_pages().values().next().unwrap();
+        assert_eq!(
+            document.get_page_annotations(page_id).unwrap().len(),
+            0,
+            "a dead ink row must not be written"
+        );
+    }
+
+    fn ink_row(data: &str) -> Annotation {
+        Annotation {
+            id: "ink-1".to_string(),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::Ink,
+            data: data.to_string(),
+            text: None,
+            created_at: 0,
+            modified_at: 0,
+        }
+    }
+
+    /// Reads an array of reals as floats. lopdf preserves the written numeric type, so a
+    /// value may come back as either `Real` or `Integer`.
+    fn numbers(object: &Object) -> Vec<f32> {
+        object
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| match item {
+                Object::Real(value) => *value,
+                Object::Integer(value) => *value as f32,
+                other => panic!("expected a number, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Resolves `/AP /N` to the stream it references.
+    fn appearance_stream_of<'a>(
+        document: &'a Document,
+        dictionary: &lopdf::Dictionary,
+    ) -> &'a lopdf::Stream {
+        let id = dictionary
+            .get(b"AP")
+            .and_then(Object::as_dict)
+            .and_then(|ap| ap.get(b"N"))
+            .and_then(Object::as_reference)
+            .expect("/AP /N must be a stream reference");
+        document
+            .get_object(id)
+            .unwrap()
+            .as_stream()
+            .expect("/AP /N must resolve to a stream")
     }
 
     #[test]
