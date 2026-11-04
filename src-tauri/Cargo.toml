@@ -44,6 +44,9 @@ hex = "0.4"
 pdfium-render = { version = "0.8", features = ["sync"] }
 image = "0.25"
 lru = "0.12"
+# XFDF import/export (P3.1 D-A9). Already in the graph transitively via `plist`, so making it
+# direct adds no new crate to the build -- only a name we are allowed to depend on.
+quick-xml = "0.42"
 base64 = "0.22"
 lopdf = { version = "0.45", default-features = false, features = ["serde"] }
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

@@ -191,6 +191,27 @@ export const setAnnotationStatus = (
 export const listAnnotations = (documentId: string) =>
   invoke<Annotation[]>("list_annotations", { documentId });
 
+/** What an XFDF export produced. `unsupported` counts rows that had no XFDF spelling. */
+export type XfdfExport = {
+  contents: string;
+  exported: number;
+  unsupported: number;
+};
+
+/** What an XFDF import did. `skippedExisting` is D-A10's never-overwrite count. */
+export type XfdfImportReport = {
+  imported: number;
+  skippedExisting: number;
+  skippedUnsupported: number;
+  skippedMalformed: number;
+};
+
+export const exportXfdf = (documentId: string) =>
+  invoke<XfdfExport>("export_xfdf", { documentId });
+
+export const importXfdf = (documentId: string, contents: string) =>
+  invoke<XfdfImportReport>("import_xfdf", { documentId, contents });
+
 /** Only the annotations on one page, which is what the overlay renders. */
 export const listPageAnnotations = (documentId: string, page: number) =>
   invoke<Annotation[]>("list_page_annotations", { documentId, page });

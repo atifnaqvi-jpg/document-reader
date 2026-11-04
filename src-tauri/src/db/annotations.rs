@@ -61,6 +61,64 @@ pub fn add(
     Ok(annotation)
 }
 
+/// Inserts many annotations in one transaction, for an XFDF import (P3.1 D-A9).
+///
+/// One transaction rather than one per row: a file of fifty annotations that failed on the
+/// fortieth would otherwise leave thirty-nine behind, and the import report would describe a
+/// document state the user does not have.
+pub fn add_many(
+    connection: &mut Connection,
+    document_id: &str,
+    rows: Vec<(u32, AnnotationKind, String, Option<String>)>,
+    now: i64,
+) -> Result<Vec<Annotation>, AppError> {
+    let exists: Option<String> = connection
+        .query_row(
+            "SELECT id FROM Document WHERE id = ?1",
+            params![document_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Err(AppError::Other("document not found".to_string()));
+    }
+
+    let transaction = connection.transaction()?;
+    let mut inserted = Vec::with_capacity(rows.len());
+    for (page, kind, data, text) in rows {
+        let annotation = Annotation {
+            id: uuid::Uuid::new_v4().to_string(),
+            document_id: document_id.to_string(),
+            page,
+            kind,
+            data,
+            text,
+            created_at: now,
+            modified_at: now,
+        };
+        transaction.execute(
+            "INSERT INTO Annotation (id, document_id, page, atype, data, text, created_at, modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                annotation.id,
+                annotation.document_id,
+                annotation.page,
+                annotation.kind.as_str(),
+                annotation.data,
+                annotation.text,
+                annotation.created_at,
+                annotation.modified_at
+            ],
+        )?;
+        if let Some(text) = annotation.text.as_deref() {
+            index_text(&transaction, &annotation, text)?;
+        }
+        inserted.push(annotation);
+    }
+    transaction.commit()?;
+    Ok(inserted)
+}
+
 /// Re-inserts a previously deleted annotation **under its original id** (P2-D7).
 ///
 /// Undo must be able to put an annotation back exactly as it was: a fresh id would
@@ -394,6 +452,81 @@ mod tests {
                 .all(|hit| hit.annotation_id.as_deref() != Some(reply.id.as_str())),
             "the deleted reply is still in the search index"
         );
+    }
+
+    #[test]
+    fn add_many_writes_every_row_and_indexes_its_text() {
+        // The import path (P3.1 D-A9) relies on this being one transaction that also pushes
+        // FTS rows: an import that wrote annotations but not their index entries would make
+        // the document searchable only for the annotations that already existed.
+        let mut connection = setup();
+        let rows = vec![
+            (0u32, AnnotationKind::Highlight, highlight().1, None),
+            (
+                1,
+                AnnotationKind::Note,
+                note_blob(None),
+                Some("an imported remark".to_string()),
+            ),
+        ];
+
+        let inserted = add_many(&mut connection, "d1", rows, 5).unwrap();
+        assert_eq!(inserted.len(), 2);
+        assert_eq!(inserted[0].page, 0);
+        assert_eq!(inserted[1].page, 1);
+
+        let on_page = list_for_page(&connection, "d1", 1).unwrap();
+        assert_eq!(on_page.len(), 1, "the second row did not land on its page");
+
+        let hits = crate::db::search::query(&connection, "imported", 10).unwrap();
+        assert_eq!(hits.len(), 1, "the imported text never reached the index");
+    }
+
+    #[test]
+    fn add_many_refuses_an_unknown_document_and_writes_nothing() {
+        // A silent insert into a document that does not exist would leave orphan rows no query
+        // returns, so the check has to fail before the transaction opens.
+        let mut connection = setup();
+        let result = add_many(
+            &mut connection,
+            "no-such-document",
+            vec![(0, AnnotationKind::Note, note_blob(None), None)],
+            5,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_replys_text_is_searchable() {
+        // DoD 3 of P3.1: the reply's text reaches FTS. It is a `note` row like any other, so
+        // this passes only because replies are not special-cased on the write path -- which is
+        // the thing worth pinning, since a separate reply table would have needed its own
+        // index write and could have been forgotten.
+        let mut connection = setup();
+        let parent = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Highlight,
+            highlight().1,
+            None,
+            1,
+        )
+        .unwrap();
+        add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Note,
+            note_blob(Some(&parent.id)),
+            Some("a distinctive reply".to_string()),
+            2,
+        )
+        .unwrap();
+
+        let hits = crate::db::search::query(&connection, "distinctive", 10).unwrap();
+        assert_eq!(hits.len(), 1, "the reply's text never reached the index");
+        assert_eq!(hits[0].page, 0);
     }
 
     #[test]

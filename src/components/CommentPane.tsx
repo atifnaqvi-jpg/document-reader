@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { Annotation, AnnotationStatus } from "../api/types";
 import { ANNOTATION_STATUSES, commonOf } from "../api/types";
+import { exportXfdf, importXfdf } from "../api/invoke";
 import { useEditor } from "../state/EditorProvider";
 
 /**
@@ -20,6 +21,68 @@ type SortKey = "page" | "author" | "date" | "type" | "status";
 
 export interface CommentPaneProps {
   onJumpToPage: (page: number) => void;
+  /** The open document, for XFDF export and import (D-A9). */
+  documentId: string | null;
+}
+
+/** How an XFDF exchange is reported back to the user. */
+type ExchangeNotice =
+  | { kind: "exported"; exported: number; unsupported: number }
+  | {
+      kind: "imported";
+      imported: number;
+      skippedExisting: number;
+      skippedUnsupported: number;
+      skippedMalformed: number;
+    }
+  | { kind: "failed"; message: string };
+
+/**
+ * Reads a chosen file as text.
+ *
+ * `FileReader` rather than `File.text()`: the latter is absent from jsdom, so a test for the
+ * import path would fail on the harness rather than on the code. Both are standard in the
+ * webview, but only one is testable here.
+ */
+function readFileText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("the file could not be read"));
+    reader.readAsText(file);
+  });
+}
+
+/**
+ * The sentence shown after an exchange.
+ *
+ * Every count is named rather than summed: D-A10 requires the skipped-existing count to reach
+ * the user, and "imported 3" alone would hide that four rows were refused.
+ */
+export function describeNotice(notice: ExchangeNotice): string {
+  switch (notice.kind) {
+    case "exported": {
+      const base = `Exported ${notice.exported} annotation${notice.exported === 1 ? "" : "s"}.`;
+      return notice.unsupported === 0
+        ? base
+        : `${base} ${notice.unsupported} could not be written as XFDF.`;
+    }
+    case "imported": {
+      const parts = [`Imported ${notice.imported}.`];
+      if (notice.skippedExisting > 0) {
+        parts.push(`${notice.skippedExisting} already present, left untouched.`);
+      }
+      if (notice.skippedUnsupported > 0) {
+        parts.push(`${notice.skippedUnsupported} of a type this build cannot read.`);
+      }
+      if (notice.skippedMalformed > 0) {
+        parts.push(`${notice.skippedMalformed} malformed.`);
+      }
+      return parts.join(" ");
+    }
+    case "failed":
+      return notice.message;
+  }
 }
 
 /** How a reply is indented, in em, so a deep chain stays readable. */
@@ -77,7 +140,7 @@ export function threadAnnotations(rows: Annotation[]): Thread[] {
   return roots.map((root) => ({ root, nested: byParent }));
 }
 
-export function CommentPane({ onJumpToPage }: CommentPaneProps) {
+export function CommentPane({ onJumpToPage, documentId }: CommentPaneProps) {
   // The provider exposes only the current page's annotations, which is what the overlay
   // draws. The pane is document-wide (D-A11), so it asks the DB through the same provider.
   const { allAnnotations, setStatus, reply, selectedId, setSelectedId } = useEditor();
@@ -88,6 +151,8 @@ export function CommentPane({ onJumpToPage }: CommentPaneProps) {
   const [text, setText] = useState("");
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [notice, setNotice] = useState<ExchangeNotice | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const filtered = useMemo(() => {
     const needle = text.trim().toLowerCase();
@@ -236,6 +301,48 @@ export function CommentPane({ onJumpToPage }: CommentPaneProps) {
     return rendered;
   };
 
+  /** Exports the document's annotations and hands the user the file contents. */
+  const handleExport = async () => {
+    if (!documentId) return;
+    setBusy(true);
+    try {
+      const result = await exportXfdf(documentId);
+      setNotice({
+        kind: "exported",
+        exported: result.exported,
+        unsupported: result.unsupported,
+      });
+      // A download rather than a backend file dialog: export is a read, and the pane is a
+      // view. Writing the file from here keeps the command free of a path parameter.
+      const blob = new Blob([result.contents], { type: "application/vnd.adobe.xfdf" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "annotations.xfdf";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setNotice({ kind: "failed", message: `Export failed: ${String(error)}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Imports a chosen XFDF file, then reports what was and was not taken. */
+  const handleImport = async (file: File) => {
+    if (!documentId) return;
+    setBusy(true);
+    try {
+      const contents = await readFileText(file);
+      const report = await importXfdf(documentId, contents);
+      setNotice({ kind: "imported", ...report });
+    } catch (error) {
+      setNotice({ kind: "failed", message: `Import failed: ${String(error)}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="comment-pane" aria-label="Comments">
       <h2>Comments</h2>
@@ -290,7 +397,32 @@ export function CommentPane({ onJumpToPage }: CommentPaneProps) {
           Search
           <input value={text} onChange={(event) => setText(event.target.value)} />
         </label>
+        <div className="comment-xfdf">
+          <button type="button" onClick={handleExport} disabled={!documentId || busy}>
+            Export XFDF
+          </button>
+          <label className="comment-import">
+            Import XFDF
+            <input
+              type="file"
+              accept=".xfdf,application/xml,text/xml"
+              disabled={!documentId || busy}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                // Reset first: choosing the same file twice fires no change event otherwise,
+                // and a repeat import is exactly the case D-A10 exists for.
+                event.target.value = "";
+                if (file) void handleImport(file);
+              }}
+            />
+          </label>
+        </div>
       </div>
+      {notice ? (
+        <p className="comment-notice" role="status">
+          {describeNotice(notice)}
+        </p>
+      ) : null}
       {allAnnotations.length === 0 ? (
         <p className="muted">No comments in this document yet.</p>
       ) : filtered.length === 0 ? (

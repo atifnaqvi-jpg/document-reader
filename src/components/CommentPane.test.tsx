@@ -60,10 +60,22 @@ function mountPane(initial: Annotation[], page = 0) {
   });
   backend.on("get_app_state", () => null);
   backend.on("set_app_state", () => null);
+  backend.on("export_xfdf", () => ({ contents: "<xfdf/>", exported: table.length, unsupported: 0 }));
+  backend.on("import_xfdf", (args) => {
+    // Mirrors the backend's D-A10 behaviour: an existing name is skipped, not overwritten.
+    const names = new Set(table.map((row) => row.id));
+    const imported = args.contents === "<xfdf/>" ? 0 : 1;
+    return {
+      imported: names.has("already") ? 0 : imported,
+      skippedExisting: names.has("already") ? 1 : 0,
+      skippedUnsupported: 0,
+      skippedMalformed: 0,
+    };
+  });
 
   render(
     <EditorProvider documentId="doc-1" page={page}>
-      <CommentPane onJumpToPage={(page) => jumps.push(page)} />
+      <CommentPane onJumpToPage={(page) => jumps.push(page)} documentId="doc-1" />
     </EditorProvider>,
   );
 
@@ -291,5 +303,68 @@ describe("threadAnnotations", () => {
     expect(threads).toHaveLength(1);
     expect(threads[0]!.root.id).toBe(parent.id);
     expect(threads[0]!.nested.get(parent.id)?.map((row) => row.id)).toEqual([child.id]);
+  });
+});
+
+describe("CommentPane: XFDF exchange (D-A9/D-A10)", () => {
+  it("exports the document's annotations and reports the count", async () => {
+    mountPane([
+      makeAnnotation({ id: "a", page: 0, kind: "highlight", text: "first mark" }),
+      makeAnnotation({ id: "b", page: 1, kind: "highlight", text: "second mark" }),
+    ]);
+    await waitForRows("first mark");
+
+    await userEvent.click(screen.getByRole("button", { name: /Export XFDF/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain("Exported 2 annotations"),
+    );
+  });
+
+  it("reports a skipped-existing count instead of silently importing nothing", async () => {
+    // D-A10: the count has to reach the user. A file that imports nothing because everything
+    // is already present must say so, or the user concludes the import is broken.
+    mountPane([
+      makeAnnotation({ id: "already", page: 0, kind: "highlight", text: "already here" }),
+      makeAnnotation({ id: "other", page: 0, kind: "underline", text: "another mark" }),
+    ]);
+    await waitForRows("already here");
+
+    // The fake backend skips when "already" is present in the table.
+    const input = screen.getByLabelText(/Import XFDF/) as HTMLInputElement;
+    const file = new File(["<xfdf><annots/></xfdf>"], "a.xfdf", { type: "text/xml" });
+    await userEvent.upload(input, file);
+
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "1 already present, left untouched",
+      ),
+    );
+  });
+
+  it("clears the file input so the same file can be chosen again", async () => {
+    // A browser fires no change event when the same file is picked twice, so without this
+    // reset a second import of the same file silently does nothing -- exactly the repeat
+    // import D-A10's count exists to explain.
+    mountPane([makeAnnotation({ id: "y", page: 0, kind: "highlight", text: "a mark" })]);
+    await waitForRows("a mark");
+
+    const input = screen.getByLabelText(/Import XFDF/) as HTMLInputElement;
+    await userEvent.upload(input, new File(["<xfdf/>"], "a.xfdf", { type: "text/xml" }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toBeTruthy());
+    // A non-empty value here means a repeat pick of the same file fires no change event.
+    expect(input.value).toBe("");
+  });
+
+  it("names a malformed count rather than folding it into the imported count", async () => {
+    // "Imported 3" with four rows refused hides the refusal; the numbers are reported apart.
+    mountPane([makeAnnotation({ id: "x", page: 0, kind: "highlight", text: "one mark" })]);
+    await waitForRows("one mark");
+
+    const input = screen.getByLabelText(/Import XFDF/) as HTMLInputElement;
+    await userEvent.upload(input, new File(["<xfdf/>"], "a.xfdf", { type: "text/xml" }));
+
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Imported 0"));
   });
 });

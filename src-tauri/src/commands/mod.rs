@@ -6,6 +6,7 @@ use tauri::{AppHandle, State};
 
 use crate::db::{annotations, app_state, bookmarks, documents, search, Db};
 use crate::editor::session::{PasswordStore, SessionPassword};
+use crate::editor::xfdf;
 use crate::index::{IndexService, IndexStatus, IndexSummary};
 use crate::library;
 use crate::model::{
@@ -406,6 +407,72 @@ pub fn set_annotation_status(
     })?;
     announce_change(app, document_id);
     Ok(annotation)
+}
+
+/// Exports a document's annotations as XFDF (P3.1 D-A9).
+///
+/// Returns the file contents plus the count of rows that had no XFDF spelling. The count is
+/// returned rather than logged because export is where a user would otherwise be surprised:
+/// they would save, re-import, and find one annotation missing with no explanation.
+#[tauri::command]
+pub fn export_xfdf(db: State<'_, Db>, document_id: String) -> Result<XfdfExport, AppError> {
+    let rows = db.with(|connection| annotations::list_for_document(connection, &document_id))?;
+    let (contents, unsupported) = xfdf::export(&rows)?;
+    Ok(XfdfExport {
+        contents,
+        exported: rows.len() - unsupported,
+        unsupported,
+    })
+}
+
+/// What an XFDF export produced.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XfdfExport {
+    pub contents: String,
+    pub exported: usize,
+    pub unsupported: usize,
+}
+
+/// Imports an XFDF document into a document's annotations (P3.1 D-A9/D-A10).
+///
+/// Nothing is overwritten: a parsed annotation whose name already exists is skipped and
+/// counted (D-A10), and the report goes back to the caller so the user is told what happened.
+#[tauri::command]
+pub fn import_xfdf(
+    app: AppHandle,
+    db: State<'_, Db>,
+    document_id: String,
+    contents: String,
+) -> Result<xfdf::ImportReport, AppError> {
+    let (parsed, report) = xfdf::parse(&contents)?;
+
+    let existing: std::collections::HashSet<String> = db.with(|connection| {
+        Ok(annotations::list_for_document(connection, &document_id)?
+            .into_iter()
+            .map(|annotation| annotation.id)
+            .collect())
+    })?;
+
+    // Decide first, write second: `merge` answers "which of these are already here", and the
+    // surviving rows go in through one transaction.
+    let stamp = now();
+    let mut to_insert = Vec::new();
+    let report = xfdf::merge(parsed, &existing, report, |annotation| {
+        to_insert.push((
+            annotation.page,
+            annotation.kind,
+            xfdf::blob_for(annotation).to_string(),
+            annotation.contents.clone(),
+        ));
+        Ok(())
+    })?;
+    db.with_mut(|connection| annotations::add_many(connection, &document_id, to_insert, stamp))?;
+
+    if report.imported > 0 {
+        announce_change(app, document_id);
+    }
+    Ok(report)
 }
 
 #[tauri::command]

@@ -91,9 +91,20 @@ fi
 # `a_reply_to_a_reply_is_found_by_replies_to`, `set_status_rewrites_only_the_status_key`,
 # `clearing_a_status_removes_the_key_rather_than_storing_null`. 8 + 5 = 13. The ignored count is
 # unchanged at 93, which is the check that matters: no PDFium-backed test changed shape.
-PIN_PLAIN_PASSED=581
+# 2026-11-04 (A-9/A-10): +28 in both shapes, 581/93 -> 609/93 and 674/0 -> 702/0. Two rows
+# again. Twenty-five are XFDF in `editor/xfdf.rs`: export spelling per kind (squiggly keeps its
+# own element, arrow keeps its head, a plain line writes none), the union rect and per-line
+# quads for a multi-line highlight, ink one gesture per stroke, date formatting in UTC, the
+# round trip, the repeat import's stable names, D-A10's skip-and-count in `merge`, the quad
+# rebuild into `rects`, and the three failure classes (unsupported, malformed, truncated)
+# counted apart rather than folded into one number. Three are the import path in
+# `db/annotations.rs`: `add_many` writes every row and indexes its text,
+# `add_many_refuses_an_unknown_document_and_writes_nothing`, and `a_replys_text_is_searchable`,
+# which closes DoD 3's requirement that a reply's text reach FTS. 25 + 3 = 28. Ignored stays
+# at 93: no PDFium-backed test changed shape.
+PIN_PLAIN_PASSED=609
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=674
+PIN_IGNORED_PASSED=702
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

@@ -161,7 +161,10 @@ function Workspace() {
             {/* Inside the provider because the pane reads and edits annotations through it:
                 the same `refresh()` that feeds the overlay feeds this list, so the two
                 cannot disagree about which rows exist (D-A11). */}
-            <CommentPane onJumpToPage={(page) => handleOpenHitPage(page)} />
+            <CommentPane
+              onJumpToPage={(page) => handleOpenHitPage(page)}
+              documentId={selected?.id ?? null}
+            />
           </EditorProvider>
         </section>
       </main>
