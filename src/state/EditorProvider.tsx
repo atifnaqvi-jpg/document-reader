@@ -19,6 +19,7 @@ import {
   removeAnnotation,
   restoreAnnotation,
   revertPageText,
+  setAnnotationStatus,
   setAppState,
   updateAnnotation,
 } from "../api/invoke";
@@ -26,14 +27,17 @@ import type {
   Annotation,
   AnnotationData,
   AnnotationKind,
+  AnnotationStatus,
   AppError,
+  CommonData,
+  NoteData,
   DecryptOutcome,
   PageTextRun,
   TextRunFragmentRef,
   TextRunId,
   ToolStyle,
 } from "../api/types";
-import { ANNOTATION_KINDS, sameTextRunId } from "../api/types";
+import { ANNOTATION_KINDS, commonOf, sameTextRunId } from "../api/types";
 
 /**
  * Editing state (docs/P2-DESIGN.md D7/D10).
@@ -60,9 +64,27 @@ interface StackEntry {
  */
 const MAX_STACK = 100;
 
+/**
+ * Where a reply's note icon sits on the page (D-A5).
+ *
+ * A reply is a note, so it needs a point in PDF space even though the comment pane is where
+ * it is read. The top-left corner of the page is inside the media box for every page size and
+ * is out of the way of the text a reply is usually about; the icon is deliberately not meant
+ * to be found by eye, and the pane is the surface that lists it.
+ */
+const REPLY_POINT: [number, number] = [8, 8];
+
 interface EditorContextValue {
   /** Annotations for the open page, in draw order. */
   annotations: Annotation[];
+  /**
+   * Every annotation in the document, in page order.
+   *
+   * The comment manager is document-wide (D-A11) while the overlay draws one page. Both read
+   * the same `refresh()` result; the pane filters, the overlay scopes. A second query would
+   * let the two disagree about the same rows.
+   */
+  allAnnotations: Annotation[];
   selectedId: string | null;
   activeTool: AnnotationKind | null;
   style: ToolStyle;
@@ -83,6 +105,21 @@ interface EditorContextValue {
   remove: (annotation: Annotation) => Promise<void>;
   /** Replaces one annotation's text, recording it for undo. */
   updateText: (annotation: Annotation, text: string) => Promise<void>;
+  /**
+   * Sets or clears one annotation's review status (D-A7), recording it for undo.
+   *
+   * A status change is an annotation *update*, so it pushes exactly one entry (D-A6):
+   * triage decisions must be reversible like any other edit, or a misclick silently loses
+   * one.
+   */
+  setStatus: (annotation: Annotation, status: AnnotationStatus | null) => Promise<void>;
+  /**
+   * Adds a reply to `parent` (D-A5).
+   *
+   * A reply is a `note` whose blob names its parent -- the file format's own mechanism
+   * (`/IRT`), rather than a separate table with its own index and undo machinery.
+   */
+  reply: (parent: Annotation, text: string) => Promise<void>;
   /**
    * Applies an in-place content-stream text edit (P2.4/T2) and records the inverse for
    * undo (T5). Returns the path of the new file the edit was written to, or `null` when
@@ -498,6 +535,78 @@ export function EditorProvider({
     [docKey, refresh, push],
   );
 
+  const setStatus = useCallback(
+    async (annotation: Annotation, status: AnnotationStatus | null) => {
+      try {
+        const previous = commonOf(annotation).status ?? null;
+        await setAnnotationStatus(annotation.id, status);
+        await refresh();
+        // One entry per gesture (D-A6). Undo restores the *previous* status, including
+        // "none": clearing back to untriaged has to be reachable too.
+        push(docKey, {
+          label: `Status ${annotation.kind}`,
+          undo: async () => {
+            await setAnnotationStatus(annotation.id, previous);
+            await refresh();
+          },
+          redo: async () => {
+            await setAnnotationStatus(annotation.id, status);
+            await refresh();
+          },
+        });
+      } catch (e) {
+        setError(e as AppError);
+      }
+    },
+    [docKey, refresh, push],
+  );
+
+  const reply = useCallback(
+    async (parent: Annotation, text: string) => {
+      if (!documentId) return;
+      try {
+        // A reply is anchored on its parent's page: a reply that landed on page 0 because
+        // nobody passed the page would appear in the pane and nowhere near what it answers.
+        const page = parent.page;
+        const data: NoteData & CommonData = {
+          v: 1,
+          point: REPLY_POINT,
+          parent: parent.id,
+        };
+        const created = await addAnnotation(
+          documentId,
+          page,
+          "note",
+          JSON.stringify(data),
+          text,
+        );
+        await refresh();
+        let currentId = created.id;
+        push(docKey, {
+          label: `Reply to ${parent.kind}`,
+          undo: async () => {
+            await removeAnnotation(currentId);
+            await refresh();
+          },
+          redo: async () => {
+            const again = await addAnnotation(
+              documentId,
+              page,
+              "note",
+              created.data,
+              created.text,
+            );
+            currentId = again.id;
+            await refresh();
+          },
+        });
+      } catch (e) {
+        setError(e as AppError);
+      }
+    },
+    [documentId, docKey, refresh, push],
+  );
+
   const editText = useCallback(
     async (
       targetPage: number,
@@ -687,6 +796,7 @@ export function EditorProvider({
       // Only the open page's annotations are drawn; the DB row for another page is not
       // the overlay's business.
       annotations: annotations.filter((row) => row.page === page),
+      allAnnotations: annotations,
       selectedId,
       activeTool,
       style,
@@ -699,6 +809,8 @@ export function EditorProvider({
       create,
       remove,
       updateText,
+      setStatus,
+      reply,
       editText,
       substitution,
       clearSubstitution,

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { listLibrary, openDocument, toAppError } from "./api/invoke";
 import type { AppError, LibraryEntry } from "./api/types";
+import { CommentPane } from "./components/CommentPane";
 import { EditorPane } from "./components/EditorPane";
 import { ErrorBanner, LibraryPane } from "./components/LibraryPane";
 import { IndexingIndicator, SearchPane } from "./components/SearchPane";
@@ -105,6 +106,16 @@ function Workspace() {
 
   const getCurrentPage = useCallback(() => viewerRef.current?.getCurrentPage() ?? 0, []);
 
+  // A comment's page number is already in view-space terms (0-based), so it reuses the
+  // bookmark path, which clamps and bumps the nonce in one place.
+  const handleOpenHitPage = useCallback(
+    (page: number) => {
+      if (!selected) return;
+      setJump((previous) => ({ page, nonce: (previous?.nonce ?? 0) + 1 }));
+    },
+    [selected],
+  );
+
   return (
     <div className="app">
       <Toolbar
@@ -147,6 +158,10 @@ function Workspace() {
               annotationsVisible={annotationsVisible}
               onPageChange={setVisiblePage}
             />
+            {/* Inside the provider because the pane reads and edits annotations through it:
+                the same `refresh()` that feeds the overlay feeds this list, so the two
+                cannot disagree about which rows exist (D-A11). */}
+            <CommentPane onJumpToPage={(page) => handleOpenHitPage(page)} />
           </EditorProvider>
         </section>
       </main>

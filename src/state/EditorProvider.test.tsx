@@ -57,6 +57,19 @@ function mountEditor(initial: Annotation[] = [], page = 0) {
     );
     return table.find((row) => row.id === args.annotationId)!;
   });
+  // Mirrors the backend's single-key write: only `status` in the blob changes, which is the
+  // property the status tests rely on.
+  backend.on("set_annotation_status", (args) => {
+    const status = args.status as string | null;
+    table = table.map((row) => {
+      if (row.id !== args.annotationId) return row;
+      const blob = JSON.parse(row.data) as Record<string, unknown>;
+      if (status === null) delete blob.status;
+      else blob.status = status;
+      return { ...row, data: JSON.stringify(blob) };
+    });
+    return table.find((row) => row.id === args.annotationId)!;
+  });
   backend.on("remove_annotation", (args) => {
     table = table.filter((candidate) => candidate.id !== args.annotationId);
     return null;
@@ -620,5 +633,132 @@ describe("EditorProvider: selection is a range of runs", () => {
       const asked = backend.callsTo("get_app_state").map((a) => a.key);
       expect(asked).not.toContain("annotation.style.shape");
     });
+  });
+});
+
+describe("EditorProvider: status changes are one undo entry each (D-A6/D-A7)", () => {
+  it("pushes exactly one entry for one status change", async () => {
+    // D-A6: a triage decision is an annotation update, so it must be as reversible as any
+    // other edit. The count is the assertion: two entries for one gesture would make undo
+    // take two presses to move one step, which reads to the user as a broken undo.
+    const { backend, view, rows } = mountEditor();
+    open = backend;
+    await waitForLoad(view.result);
+
+    await act(async () => {
+      await view.result.current.create(0, "note", { v: 1, point: [1, 1] }, "x");
+    });
+    const target = rows()[0]!;
+    const before = view.result.current.canUndo;
+
+    await act(async () => {
+      await view.result.current.setStatus(target, "accepted");
+    });
+
+    expect(before).toBe(true);
+    expect(backend.callsTo("set_annotation_status")).toHaveLength(1);
+    expect(JSON.parse(rows()[0]!.data).status).toBe("accepted");
+
+    // One undo returns the status to where it was, without deleting the annotation.
+    await act(async () => {
+      await view.result.current.undo();
+    });
+    expect(JSON.parse(rows()[0]!.data).status).toBeUndefined();
+    expect(rows()).toHaveLength(1);
+
+    // And the *next* undo must reach the create, not a second status entry. Counting
+    // backend calls cannot see a stack that holds the same gesture twice -- both entries
+    // issue the same call -- so the stack depth is measured by walking it: if the status
+    // change had pushed two entries, this undo would be the duplicate no-op and the row
+    // would still be here.
+    await act(async () => {
+      await view.result.current.undo();
+    });
+    expect(rows()).toHaveLength(0);
+    expect(view.result.current.canUndo).toBe(false);
+  });
+
+  it("restores the previous status rather than clearing it", async () => {
+    // Undo of `accepted -> completed` must return `accepted`, not "none": a user stepping
+    // back one decision has not asked to erase the decision before it.
+    const row = makeAnnotation({
+      data: JSON.stringify({ v: 2, point: [1, 1], status: "accepted" }),
+    });
+    const { backend, view, rows } = mountEditor([row]);
+    open = backend;
+    await waitForLoad(view.result);
+
+    await act(async () => {
+      await view.result.current.setStatus(rows()[0]!, "completed");
+    });
+    expect(JSON.parse(rows()[0]!.data).status).toBe("completed");
+
+    await act(async () => {
+      await view.result.current.undo();
+    });
+    expect(JSON.parse(rows()[0]!.data).status).toBe("accepted");
+  });
+
+  it("can clear a status, and undo brings it back", async () => {
+    const row = makeAnnotation({
+      data: JSON.stringify({ v: 2, point: [1, 1], status: "rejected" }),
+    });
+    const { backend, view, rows } = mountEditor([row]);
+    open = backend;
+    await waitForLoad(view.result);
+
+    await act(async () => {
+      await view.result.current.setStatus(rows()[0]!, null);
+    });
+    expect(JSON.parse(rows()[0]!.data).status).toBeUndefined();
+
+    await act(async () => {
+      await view.result.current.undo();
+    });
+    expect(JSON.parse(rows()[0]!.data).status).toBe("rejected");
+  });
+});
+
+describe("EditorProvider: replies are notes with a parent (D-A5)", () => {
+  it("stores the parent id in the reply's blob and anchors it on the parent's page", async () => {
+    const parent = makeAnnotation({
+      page: 3,
+      data: JSON.stringify({ v: 2, rects: [[1, 1, 2, 2]] }),
+      kind: "highlight",
+    });
+    const { backend, view, rows } = mountEditor([parent]);
+    open = backend;
+    await waitForLoad(view.result);
+
+    await act(async () => {
+      await view.result.current.reply(rows()[0]!, "an answer");
+    });
+
+    const call = backend.callsTo("add_annotation")[0]!;
+    expect(call.page).toBe(3);
+    expect(call.kind).toBe("note");
+    expect(call.text).toBe("an answer");
+    expect(JSON.parse(call.data as string).parent).toBe(parent.id);
+    // The reply is a note, so it also needs a point: a note blob without one is not
+    // drawable and the backend would skip it.
+    expect(Array.isArray(JSON.parse(call.data as string).point)).toBe(true);
+  });
+
+  it("records one undo entry that removes the reply", async () => {
+    const parent = makeAnnotation({ data: JSON.stringify({ v: 2, point: [1, 1] }) });
+    const { backend, view, rows } = mountEditor([parent]);
+    open = backend;
+    await waitForLoad(view.result);
+
+    await act(async () => {
+      await view.result.current.reply(rows()[0]!, "answer");
+    });
+    expect(rows()).toHaveLength(2);
+
+    await act(async () => {
+      await view.result.current.undo();
+    });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]!.id).toBe(parent.id);
   });
 });

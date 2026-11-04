@@ -109,6 +109,60 @@ pub enum FreeTextMode {
     Typewriter,
 }
 
+/// A review status, from the report's four plus "no status" (D-A7).
+///
+/// Stored in the JSON blob rather than in a column (D-A2/D-A7): a status belongs to the
+/// annotation's payload, and a column would need a migration and a second write path.
+/// `as_str` is what lands in the blob, so these names are a storage format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnotationStatus {
+    /// Triaged as correct: the mark stays and the reviewer agreed with it.
+    Accepted,
+    /// Triaged as wrong.
+    Rejected,
+    /// The work the mark asked for is done.
+    Completed,
+    /// Superseded, or withdrawn by the author.
+    Cancelled,
+}
+
+impl AnnotationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AnnotationStatus::Accepted => "accepted",
+            AnnotationStatus::Rejected => "rejected",
+            AnnotationStatus::Completed => "completed",
+            AnnotationStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(AnnotationStatus::Accepted),
+            "rejected" => Some(AnnotationStatus::Rejected),
+            "completed" => Some(AnnotationStatus::Completed),
+            "cancelled" => Some(AnnotationStatus::Cancelled),
+            _ => None,
+        }
+    }
+
+    /// The `/State` name for this status (ISO 32000-1 Table 171).
+    ///
+    /// These four are the **Review** state model's values. `Marked`/`Unmarked` are the
+    /// default model's, and a viewer reading `Accepted` under a `Marked` model has a value
+    /// it cannot interpret -- so `state_model` is written alongside, and the pair moves
+    /// together.
+    pub fn state_name(self) -> &'static str {
+        match self {
+            AnnotationStatus::Accepted => "Accepted",
+            AnnotationStatus::Rejected => "Rejected",
+            AnnotationStatus::Completed => "Completed",
+            AnnotationStatus::Cancelled => "Cancelled",
+        }
+    }
+}
+
 /// Tools a user can place on a page (P2-D4). `atype` in the database is the
 /// serialised form of this enum, so adding a tool never needs a migration --
 /// only the JSON blob's `v` may need to grow (see [`Annotation::data`]).

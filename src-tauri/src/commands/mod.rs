@@ -9,8 +9,8 @@ use crate::editor::session::{PasswordStore, SessionPassword};
 use crate::index::{IndexService, IndexStatus, IndexSummary};
 use crate::library;
 use crate::model::{
-    Annotation, AnnotationKind, AppError, Bookmark, DocumentMeta, Format, LibraryEntry,
-    RenderedPage, SearchHit,
+    Annotation, AnnotationKind, AnnotationStatus, AppError, Bookmark, DocumentMeta, Format,
+    LibraryEntry, RenderedPage, SearchHit,
 };
 use crate::provider::ReaderProvider;
 use crate::render::RenderService;
@@ -373,6 +373,37 @@ pub fn update_annotation(
         annotations::update(connection, &annotation_id, data, text, now())
     })?;
 
+    announce_change(app, document_id);
+    Ok(annotation)
+}
+
+/// Sets an annotation's review status (D-A7), rewriting only the common `status` key.
+///
+/// A dedicated command rather than an `update_annotation` call, because that one replaces
+/// the whole blob: the comment pane holds one key of it, and letting a status click send a
+/// blob assembled from a stale render is how a concurrent edit gets overwritten. The blob is
+/// read, one key is replaced, and the result goes back through the same update path so the
+/// FTS index and `modified_at` stay correct.
+#[tauri::command]
+pub fn set_annotation_status(
+    app: AppHandle,
+    db: State<'_, Db>,
+    annotation_id: String,
+    status: Option<String>,
+) -> Result<Annotation, AppError> {
+    let status = match status.as_deref() {
+        None => None,
+        Some(value) => Some(
+            AnnotationStatus::parse(value)
+                .ok_or_else(|| AppError::Other(format!("unknown annotation status: {value}")))?,
+        ),
+    };
+
+    let document_id =
+        db.with(|connection| annotations::document_id_for(connection, &annotation_id))?;
+    let annotation = db.with_mut(|connection| {
+        annotations::set_status(connection, &annotation_id, status, now())
+    })?;
     announce_change(app, document_id);
     Ok(annotation)
 }

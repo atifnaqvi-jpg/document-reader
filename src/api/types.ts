@@ -122,6 +122,37 @@ export interface LineData {
   color?: string;
 }
 
+/**
+ * A review status (D-A7). The four the report lists, plus `null` for "no status" -- which is
+ * a real answer, not a fifth value: an annotation nobody has triaged is not `accepted`.
+ */
+export type AnnotationStatus =
+  | "accepted"
+  | "rejected"
+  | "completed"
+  | "cancelled";
+
+/** The statuses in report order, for rendering the picker without repeating the list. */
+export const ANNOTATION_STATUSES: AnnotationStatus[] = [
+  "accepted",
+  "rejected",
+  "completed",
+  "cancelled",
+];
+
+/**
+ * Keys every annotation blob can carry, independent of its geometry (D-A13).
+ *
+ * Read with {@link commonOf} rather than cast: a blob is `unknown` until parsed, and a pane
+ * that assumed these keys were there would show `undefined` as a status.
+ */
+export interface CommonData {
+  /** Absent means untriaged. */
+  status?: AnnotationStatus;
+  /** The annotation this one replies to (D-A5). Absent means it is a root. */
+  parent?: string;
+}
+
 export type AnnotationData =
   | HighlightData
   | NoteData
@@ -174,6 +205,13 @@ export const ANNOTATION_KINDS: AnnotationKind[] = [
  * place instead of simply not drawing it.
  */
 export function parseAnnotationData(annotation: Annotation): AnnotationData | null {
+  const parsed = parseBlob(annotation);
+  if (parsed === null) return null;
+  return parsed as unknown as AnnotationData;
+}
+
+/** The parsed blob at any version this build accepts, or `null`. */
+function parseBlob(annotation: Annotation): Record<string, unknown> | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(annotation.data);
@@ -182,8 +220,30 @@ export function parseAnnotationData(annotation: Annotation): AnnotationData | nu
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const version = (parsed as { v?: unknown }).v;
-  if (version !== 1) return null;
-  return parsed as AnnotationData;
+  // v2 adds `status` and `parent` (D-A13) and is otherwise v1's shapes, so both versions
+  // parse. A v3 from a newer build is refused, because its geometry may have moved.
+  if (version !== 1 && version !== 2) return null;
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * The review keys of an annotation, whatever its geometry (D-A7/D-A5).
+ *
+ * A malformed or future blob yields no status and no parent rather than throwing: the
+ * comment pane's job is to list what is there, and one unreadable row must not blank it.
+ */
+export function commonOf(annotation: Annotation): CommonData {
+  const parsed = parseBlob(annotation);
+  if (parsed === null) return {};
+  const status = parsed.status;
+  const parent = parsed.parent;
+  return {
+    status:
+      typeof status === "string" && (ANNOTATION_STATUSES as string[]).includes(status)
+        ? (status as AnnotationStatus)
+        : undefined,
+    parent: typeof parent === "string" && parent.length > 0 ? parent : undefined,
+  };
 }
 
 /**

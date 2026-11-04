@@ -73,6 +73,7 @@ pub fn run() {
             commands::get_document_page_count,
             commands::add_annotation,
             commands::update_annotation,
+            commands::set_annotation_status,
             commands::list_annotations,
             commands::list_page_annotations,
             commands::remove_annotation,

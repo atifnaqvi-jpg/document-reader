@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::model::{Annotation, AnnotationKind, AppError};
+use crate::model::{Annotation, AnnotationKind, AnnotationStatus, AppError};
 
 /// Creates an annotation and its search index entry (P2-D5).
 ///
@@ -152,20 +152,102 @@ pub fn list_for_document(
 }
 
 pub fn remove(connection: &mut Connection, annotation_id: &str) -> Result<(), AppError> {
+    // D-A5: deleting a parent deletes its replies. Done here rather than in the caller so
+    // there is one delete path -- an undo that restores the parent must not find orphaned
+    // replies behind it, and a caller that forgot the cascade would leave text in the DB
+    // that is no longer reachable from the page.
+    let replies = replies_to(connection, annotation_id)?;
+
     let transaction = connection.transaction()?;
+    let deleted = transaction.execute(
+        "DELETE FROM Annotation WHERE id = ?1",
+        params![annotation_id],
+    )?;
+    if deleted == 0 {
+        return Err(AppError::Other("annotation not found".to_string()));
+    }
     transaction.execute(
         "DELETE FROM AnnotationSearch WHERE annotation_id = ?1",
         params![annotation_id],
     )?;
-    let affected = transaction.execute(
-        "DELETE FROM Annotation WHERE id = ?1",
-        params![annotation_id],
-    )?;
-    if affected == 0 {
-        return Err(AppError::Other("annotation not found".to_string()));
+    for id in replies {
+        transaction.execute("DELETE FROM Annotation WHERE id = ?1", params![id])?;
+        transaction.execute(
+            "DELETE FROM AnnotationSearch WHERE annotation_id = ?1",
+            params![id],
+        )?;
     }
     transaction.commit()?;
     Ok(())
+}
+
+/// Rewrites only the blob's `status` key (D-A7).
+///
+/// Read-modify-write of one key rather than a whole-blob replace, so a status click cannot
+/// undo a geometry edit made since the pane rendered. `None` removes the key, which is
+/// "no status" rather than a fifth value.
+pub fn set_status(
+    connection: &mut Connection,
+    annotation_id: &str,
+    status: Option<AnnotationStatus>,
+    now: i64,
+) -> Result<Annotation, AppError> {
+    let existing = load(connection, annotation_id)?;
+    let mut blob: serde_json::Value = serde_json::from_str(&existing.data).map_err(|error| {
+        AppError::Other(format!(
+            "annotation {annotation_id} has malformed data: {error}"
+        ))
+    })?;
+    let object = blob.as_object_mut().ok_or_else(|| {
+        AppError::Other(format!("annotation {annotation_id} data is not an object"))
+    })?;
+    match status {
+        Some(status) => {
+            object.insert(
+                "status".to_string(),
+                serde_json::Value::String(status.as_str().to_string()),
+            );
+        }
+        None => {
+            object.remove("status");
+        }
+    }
+    update(
+        connection,
+        annotation_id,
+        blob.to_string(),
+        existing.text,
+        now,
+    )
+}
+
+/// The replies whose `parent` is `parent_id` (D-A5).
+///
+/// Read from the blob rather than from a column: the parent link lives in the JSON (D-A2),
+/// and a column would be a second copy that could disagree with the file. SQLite can filter
+/// on a json field, but the parse here is the same one the writer uses, so the cascade and
+/// the save agree about what a reply is by construction.
+pub fn replies_to(connection: &Connection, parent_id: &str) -> Result<Vec<String>, AppError> {
+    let mut statement =
+        connection.prepare("SELECT id, data FROM Annotation WHERE document_id = (SELECT document_id FROM Annotation WHERE id = ?1)")?;
+    let rows = statement.query_map(params![parent_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut replies = Vec::new();
+    for row in rows {
+        let (id, data) = row?;
+        let parent = serde_json::from_str::<serde_json::Value>(&data)
+            .ok()
+            .and_then(|blob| {
+                blob.get("parent")
+                    .and_then(|p| p.as_str())
+                    .map(str::to_string)
+            });
+        if parent.as_deref() == Some(parent_id) {
+            replies.push(id);
+        }
+    }
+    Ok(replies)
 }
 
 /// The document an annotation belongs to.
@@ -262,6 +344,188 @@ mod tests {
                 .to_string(),
             None,
         )
+    }
+
+    /// A note blob at `v: 2`, optionally replying to `parent`.
+    fn note_blob(parent: Option<&str>) -> String {
+        match parent {
+            Some(parent) => format!(r#"{{"v":2,"point":[10.0,10.0],"parent":"{parent}"}}"#),
+            None => r#"{"v":2,"point":[10.0,10.0]}"#.to_string(),
+        }
+    }
+
+    #[test]
+    fn deleting_a_parent_deletes_its_replies() {
+        // D-A5: the reply's text would otherwise stay in the DB and in the FTS index, so a
+        // search would keep returning a hit the user cannot reach on the page.
+        let mut connection = setup();
+        let parent = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Highlight,
+            highlight().1,
+            None,
+            1,
+        )
+        .unwrap();
+        let reply = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Note,
+            note_blob(Some(&parent.id)),
+            Some("a reply".to_string()),
+            2,
+        )
+        .unwrap();
+
+        remove(&mut connection, &parent.id).unwrap();
+
+        assert_eq!(list_for_document(&connection, "d1").unwrap().len(), 0);
+        assert_eq!(
+            replies_to(&connection, &parent.id).unwrap(),
+            Vec::<String>::new(),
+            "the reply row outlived its parent"
+        );
+        let hits = crate::db::search::query(&connection, "reply", 10).unwrap();
+        assert!(
+            hits.iter()
+                .all(|hit| hit.annotation_id.as_deref() != Some(reply.id.as_str())),
+            "the deleted reply is still in the search index"
+        );
+    }
+
+    #[test]
+    fn deleting_a_reply_leaves_its_parent_alone() {
+        // The cascade must not run upwards: removing a reply is not removing the thread.
+        let mut connection = setup();
+        let parent = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Highlight,
+            highlight().1,
+            None,
+            1,
+        )
+        .unwrap();
+        let reply = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Note,
+            note_blob(Some(&parent.id)),
+            Some("a reply".to_string()),
+            2,
+        )
+        .unwrap();
+
+        remove(&mut connection, &reply.id).unwrap();
+
+        let remaining = list_for_document(&connection, "d1").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, parent.id);
+    }
+
+    #[test]
+    fn a_reply_to_a_reply_is_found_by_replies_to() {
+        // The link is per-blob, so a chain is a chain: nothing here flattens replies onto
+        // the root.
+        let mut connection = setup();
+        let parent = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Highlight,
+            highlight().1,
+            None,
+            1,
+        )
+        .unwrap();
+        let first = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Note,
+            note_blob(Some(&parent.id)),
+            Some("first".to_string()),
+            2,
+        )
+        .unwrap();
+        let second = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Note,
+            note_blob(Some(&first.id)),
+            Some("second".to_string()),
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(
+            replies_to(&connection, &parent.id).unwrap(),
+            vec![first.id.clone()]
+        );
+        assert_eq!(replies_to(&connection, &first.id).unwrap(), vec![second.id]);
+    }
+
+    #[test]
+    fn set_status_rewrites_only_the_status_key() {
+        // The geometry must survive a status click: this is the property that makes the
+        // single-key write worth having instead of a whole-blob replace.
+        let mut connection = setup();
+        let row = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Highlight,
+            r##"{"v":2,"rects":[[5.0,6.0,7.0,8.0]],"color":"#fff3b0","opacity":0.4}"##.to_string(),
+            None,
+            1,
+        )
+        .unwrap();
+
+        let updated = set_status(
+            &mut connection,
+            &row.id,
+            Some(AnnotationStatus::Completed),
+            2,
+        )
+        .unwrap();
+
+        let blob: serde_json::Value = serde_json::from_str(&updated.data).unwrap();
+        assert_eq!(blob["status"], serde_json::json!("completed"));
+        assert_eq!(blob["rects"], serde_json::json!([[5.0, 6.0, 7.0, 8.0]]));
+        assert_eq!(blob["opacity"], serde_json::json!(0.4));
+        assert_eq!(updated.modified_at, 2);
+        assert_eq!(updated.created_at, 1);
+    }
+
+    #[test]
+    fn clearing_a_status_removes_the_key_rather_than_storing_null() {
+        // "none" is the absence of a status. A stored JSON null would parse as absent in Rust
+        // but would read as a present-and-null field to anything looking at the raw blob.
+        let mut connection = setup();
+        let row = add(
+            &mut connection,
+            "d1",
+            0,
+            AnnotationKind::Highlight,
+            r##"{"v":2,"rects":[[5.0,6.0,7.0,8.0]],"status":"accepted"}"##.to_string(),
+            None,
+            1,
+        )
+        .unwrap();
+
+        let updated = set_status(&mut connection, &row.id, None, 2).unwrap();
+
+        let blob: serde_json::Value = serde_json::from_str(&updated.data).unwrap();
+        assert!(
+            blob.get("status").is_none(),
+            "clearing a status left a value in the blob: {blob}"
+        );
     }
 
     #[test]

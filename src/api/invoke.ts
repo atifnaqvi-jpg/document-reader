@@ -5,6 +5,7 @@ import type {
   Annotation,
   AnnotationChanged,
   AnnotationKind,
+  AnnotationStatus,
   AppError,
   Bookmark,
   ContentOperation,
@@ -174,6 +175,18 @@ export const updateAnnotation = (
   data: string,
   text: string | null,
 ) => invoke<Annotation>("update_annotation", { annotationId, data, text });
+
+/**
+ * Sets or clears one annotation's review status (D-A7).
+ *
+ * Its own command rather than `updateAnnotation` so the status travels alone: the backend
+ * rewrites only the blob's `status` key, and a stale geometry held by the pane cannot ride
+ * along and overwrite a newer one.
+ */
+export const setAnnotationStatus = (
+  annotationId: string,
+  status: AnnotationStatus | null,
+) => invoke<Annotation>("set_annotation_status", { annotationId, status });
 
 export const listAnnotations = (documentId: string) =>
   invoke<Annotation[]>("list_annotations", { documentId });

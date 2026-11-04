@@ -10,17 +10,24 @@
 //! Annotations the user made in *another* PDF application are left alone: they are
 //! not in our DB, and P2 has no business deleting someone else's work.
 
+use std::collections::HashMap;
+
 use lopdf::{Document, Object};
 
 pub mod appearance;
 
 use crate::editor::geometry::PdfRect;
 use crate::editor::lopdf_write;
-use crate::model::{Annotation, AnnotationKind, AppError, FreeTextMode};
+use crate::model::{Annotation, AnnotationKind, AnnotationStatus, AppError, FreeTextMode};
 
 /// The `data` blob shape this module understands. `v` is explicit so a future
 /// tool can change the geometry without guessing at older rows.
-const SUPPORTED_BLOB_VERSION: u32 = 1;
+///
+/// D-A13: version 2 adds the common `status` and `parent` keys. A v1 blob is read by this
+/// reader unchanged -- the v1 shapes are all still valid -- and a v2 blob is skipped by a
+/// 1.0.x build rather than misread, which is what lets a hand-test install share a database
+/// with a 1.1.0 one during the transition.
+const SUPPORTED_BLOB_VERSION: u32 = 2;
 
 /// A highlight with no stored opacity: matches the UI's default so a blob missing
 /// the field renders the same as one that has it.
@@ -75,6 +82,13 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
         .map_err(|error| AppError::Other(format!("could not read pdf: {error}")))?;
 
     let page_ids = document.get_pages();
+    // Which object a row was written as, so a reply can point at its parent (D-A5). Filled
+    // during the first pass and read during the second: `/IRT` needs the parent's *object
+    // id*, which does not exist until the parent has been written, and the rows are not
+    // ordered parent-first.
+    let mut written: HashMap<String, lopdf::ObjectId> = HashMap::new();
+    let mut replies: Vec<(lopdf::ObjectId, String)> = Vec::new();
+
     for annotation in annotations {
         // `get_pages()` is keyed by lopdf's **1-based** page number, while the DB and the
         // UI both use 0-based indices (the renderer's `page` is a 0-based index). Without
@@ -95,7 +109,31 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
         // would silently export a blank file. It also gives the file itself an identity to
         // match against the DB row.
         dictionary.set("NM", Object::string_literal(annotation.id.clone()));
-        lopdf_write::attach_annotation(&mut document, page_id, dictionary)?;
+
+        let blob: serde_json::Value = serde_json::from_str(&annotation.data).unwrap_or_default();
+        apply_review_state(&mut dictionary, &blob);
+        let parent = common_blob(&blob).parent;
+        let object_id = lopdf_write::attach_annotation(&mut document, page_id, dictionary)?;
+        written.insert(annotation.id.clone(), object_id);
+        if let Some(parent) = parent {
+            replies.push((object_id, parent));
+        }
+    }
+
+    // Second pass: a reply whose parent was written gets `/IRT`; one whose parent is gone
+    // stays detached at the root rather than being dropped (D-A5 §5). Written by mutating
+    // the stored object, because the dictionary was already attached in pass one.
+    for (reply_id, parent) in replies {
+        let Some(parent_id) = written.get(&parent).copied() else {
+            continue;
+        };
+        let object = document
+            .get_object_mut(reply_id)
+            .map_err(|error| AppError::Other(format!("reply object unreadable: {error}")))?;
+        let dictionary = object
+            .as_dict_mut()
+            .map_err(|error| AppError::Other(format!("reply is not a dictionary: {error}")))?;
+        dictionary.set("IRT", Object::Reference(parent_id));
     }
 
     lopdf_write::save_to_bytes(&mut document)
@@ -222,6 +260,56 @@ pub fn appearance_for(annotation: &Annotation) -> Result<Option<Appearance>, App
         AnnotationKind::FreeText(_) | AnnotationKind::Line { .. } | AnnotationKind::Oval => {
             Ok(None)
         }
+    }
+}
+
+/// The review keys common to every annotation: `status` and `parent` (D-A5/D-A7).
+///
+/// Read in one place because they belong to *every* kind rather than to a geometry, and a
+/// per-arm copy would let one arm ship without them. Absent or unparseable values are
+/// `None`: a status this build does not know is not a status it should write, and an
+/// unknown key must not fail a whole save.
+#[derive(Default)]
+struct CommonBlob {
+    status: Option<AnnotationStatus>,
+    parent: Option<String>,
+}
+
+fn common_blob(blob: &serde_json::Value) -> CommonBlob {
+    CommonBlob {
+        status: blob
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .and_then(AnnotationStatus::parse),
+        // An empty string is not a parent. JSON null and an absent key both mean "root",
+        // and so does "" -- a reply whose parent was cleared should detach, not point at
+        // an annotation with no id.
+        parent: blob
+            .get("parent")
+            .and_then(serde_json::Value::as_str)
+            .filter(|parent| !parent.trim().is_empty())
+            .map(str::to_string),
+    }
+}
+
+/// Writes the review and reply keys onto a finished dictionary (D-A5/D-A7).
+///
+/// `/State` and `/StateModel` move together: `Accepted`/`Rejected`/`Completed`/`Cancelled`
+/// are the Review model's values, and writing one without the model leaves a viewer to
+/// interpret it under whatever default it has.
+///
+/// `/IRT` is an indirect reference to the parent annotation's **object**, so it needs the
+/// parent's object id, which only exists once the parent has been written. `parent_ids`
+/// carries that mapping; a parent that is not in it (deleted, or on a page that did not
+/// draw) leaves the reply detached rather than pointing at nothing.
+fn apply_review_state(dictionary: &mut lopdf::Dictionary, blob: &serde_json::Value) {
+    if let Some(status) = common_blob(blob).status {
+        // `/State` is a text **string** and `/StateModel` a **name** (ISO 32000-1 Table 171).
+        // The two types are not interchangeable: a viewer looking for a name finds nothing in
+        // a string, falls back to the default model, and reads `Accepted` as a value that
+        // model does not define.
+        dictionary.set("State", Object::string_literal(status.state_name()));
+        dictionary.set("StateModel", Object::Name(b"Review".to_vec()));
     }
 }
 
@@ -628,6 +716,248 @@ mod tests {
             .values()
             .map(|page_id| lopdf_write::page_annotation_count(&document, *page_id))
             .sum()
+    }
+
+    /// The annotation dictionary written for `row`, after a save and reload.
+    fn written_dictionary(bytes: &[u8], name: &str) -> lopdf::Dictionary {
+        let document = Document::load_mem(bytes).unwrap();
+        for page_id in document.get_pages().values() {
+            let Ok(annotations) = document.get_page_annotations(*page_id) else {
+                continue;
+            };
+            for dictionary in annotations {
+                let named = dictionary
+                    .get(b"NM")
+                    .ok()
+                    .and_then(|nm| nm.as_str().ok())
+                    .map(String::from_utf8_lossy)
+                    .map(|nm| nm.to_string());
+                if named.as_deref() == Some(name) {
+                    return dictionary.clone();
+                }
+            }
+        }
+        panic!("no annotation named {name} in the saved file");
+    }
+
+    /// A name entry, which is what `/StateModel` is (Table 171).
+    fn name_of(dictionary: &lopdf::Dictionary, key: &str) -> Option<String> {
+        dictionary
+            .get(key.as_bytes())
+            .ok()?
+            .as_name()
+            .ok()
+            .map(|name| String::from_utf8_lossy(name).to_string())
+    }
+
+    /// A text-string entry, which is what `/State` is (Table 171).
+    fn text_of(dictionary: &lopdf::Dictionary, key: &str) -> Option<String> {
+        dictionary
+            .get(key.as_bytes())
+            .ok()?
+            .as_str()
+            .ok()
+            .map(|text| String::from_utf8_lossy(text).to_string())
+    }
+
+    /// A highlight blob at `v: 2` carrying `status` and `parent`, which is what the
+    /// comment pane writes (D-A13).
+    fn highlight_blob_v2(status: Option<&str>, parent: Option<&str>) -> String {
+        let mut blob = serde_json::json!({
+            "v": 2,
+            "rects": [[10.0, 10.0, 100.0, 20.0]],
+            "color": "#fff3b0",
+            "opacity": 0.4,
+        });
+        if let Some(status) = status {
+            blob["status"] = serde_json::Value::String(status.to_string());
+        }
+        if let Some(parent) = parent {
+            blob["parent"] = serde_json::Value::String(parent.to_string());
+        }
+        blob.to_string()
+    }
+
+    #[test]
+    fn a_status_writes_state_and_its_review_model() {
+        // D-A7: the status lives in the blob, and `/State` is what makes it visible outside
+        // this app. `/StateModel` is asserted in the same test because `Accepted` under the
+        // default model is a value a viewer cannot interpret -- writing one without the
+        // other is the defect this guards.
+        let row = annotation(
+            0,
+            AnnotationKind::Highlight,
+            &highlight_blob_v2(Some("accepted"), None),
+            None,
+        );
+        let bytes = apply_annotations(&sample_pdf(), std::slice::from_ref(&row)).unwrap();
+
+        let written = written_dictionary(&bytes, &row.id);
+        assert_eq!(text_of(&written, "State").as_deref(), Some("Accepted"));
+        assert_eq!(name_of(&written, "StateModel").as_deref(), Some("Review"));
+    }
+
+    #[test]
+    fn every_status_writes_its_own_state_name() {
+        // Each of the four, because a `match` that collapses two arms into one name would
+        // pass a single-status test.
+        for (status, expected) in [
+            ("accepted", "Accepted"),
+            ("rejected", "Rejected"),
+            ("completed", "Completed"),
+            ("cancelled", "Cancelled"),
+        ] {
+            let row = annotation(
+                0,
+                AnnotationKind::Highlight,
+                &highlight_blob_v2(Some(status), None),
+                None,
+            );
+            let bytes = apply_annotations(&sample_pdf(), std::slice::from_ref(&row)).unwrap();
+            let written = written_dictionary(&bytes, &row.id);
+            assert_eq!(
+                text_of(&written, "State").as_deref(),
+                Some(expected),
+                "status {status} wrote the wrong /State"
+            );
+        }
+    }
+
+    #[test]
+    fn an_annotation_without_a_status_writes_no_state_keys() {
+        // "none/marked" is the absence of a status, not a fifth value: writing
+        // `/State (None)` would claim a triage decision nobody made.
+        let row = annotation(
+            0,
+            AnnotationKind::Highlight,
+            &highlight_blob_v2(None, None),
+            None,
+        );
+        let bytes = apply_annotations(&sample_pdf(), std::slice::from_ref(&row)).unwrap();
+        let written = written_dictionary(&bytes, &row.id);
+        assert!(
+            written.get(b"State").is_err(),
+            "wrote /State with no status"
+        );
+        assert!(
+            written.get(b"StateModel").is_err(),
+            "wrote /StateModel with no status"
+        );
+    }
+
+    #[test]
+    fn a_status_this_build_does_not_know_writes_nothing() {
+        // A blob from a newer build may carry a status outside the report's four. Skipping
+        // it keeps the save working and keeps the file honest; inventing a `/State` for it
+        // would put a guess in someone else's document.
+        let row = annotation(
+            0,
+            AnnotationKind::Highlight,
+            &highlight_blob_v2(Some("escalated"), None),
+            None,
+        );
+        let bytes = apply_annotations(&sample_pdf(), std::slice::from_ref(&row)).unwrap();
+        let written = written_dictionary(&bytes, &row.id);
+        assert!(written.get(b"State").is_err());
+    }
+
+    #[test]
+    fn a_v1_blob_still_writes_its_geometry() {
+        // D-A13's forward-compatible promise, read in the direction that matters during a
+        // hand-test install: a 1.0.x row (no `status`, no `parent`, `v: 1`) must still save.
+        let row = annotation(
+            0,
+            AnnotationKind::Highlight,
+            r##"{"v":1,"rects":[[10.0,10.0,100.0,20.0]],"color":"#fff3b0","opacity":0.4}"##,
+            None,
+        );
+        let bytes = apply_annotations(&sample_pdf(), std::slice::from_ref(&row)).unwrap();
+        assert_eq!(annotation_count(&bytes), 1);
+        let written = written_dictionary(&bytes, &row.id);
+        assert_eq!(name_of(&written, "Subtype").as_deref(), Some("Highlight"));
+    }
+
+    #[test]
+    fn a_reply_writes_irt_naming_its_parents_object() {
+        // D-A5: the file format's own "in reply to". `/IRT` is a reference to the parent
+        // annotation's *object*, so this asserts the reference resolves to the object whose
+        // `/NM` is the parent row's id -- not merely that some reference was written.
+        let parent = annotation(
+            0,
+            AnnotationKind::Highlight,
+            &highlight_blob_v2(None, None),
+            None,
+        );
+        let reply = annotation(
+            0,
+            AnnotationKind::Note,
+            &format!(r#"{{"v":2,"point":[50.0,50.0],"parent":"{}"}}"#, parent.id),
+            Some("a reply"),
+        );
+        let bytes = apply_annotations(&sample_pdf(), &[reply.clone(), parent.clone()]).unwrap();
+
+        let written = written_dictionary(&bytes, &reply.id);
+        let target = written
+            .get(b"IRT")
+            .expect("/IRT missing on a reply")
+            .as_reference()
+            .expect("/IRT is not an indirect reference");
+        let document = Document::load_mem(&bytes).unwrap();
+        let parent_object = document.get_object(target).unwrap().as_dict().unwrap();
+        assert_eq!(
+            text_of(parent_object, "NM").as_deref(),
+            Some(parent.id.as_str())
+        );
+    }
+
+    #[test]
+    fn a_reply_written_before_its_parent_still_finds_it() {
+        // The rows arrive page-ordered, not parent-first, so `/IRT` cannot be written during
+        // the pass that creates the dictionaries. This is the ordering that would fail if the
+        // two-pass resolution regressed to one pass.
+        let parent = annotation(
+            0,
+            AnnotationKind::Highlight,
+            &highlight_blob_v2(None, None),
+            None,
+        );
+        let reply = annotation(
+            0,
+            AnnotationKind::Note,
+            &format!(r#"{{"v":2,"point":[50.0,50.0],"parent":"{}"}}"#, parent.id),
+            Some("a reply"),
+        );
+        let bytes = apply_annotations(&sample_pdf(), &[reply.clone(), parent]).unwrap();
+        let written = written_dictionary(&bytes, &reply.id);
+        assert!(
+            written.get(b"IRT").is_ok(),
+            "a reply listed before its parent lost its /IRT"
+        );
+    }
+
+    #[test]
+    fn a_reply_whose_parent_is_gone_is_detached_not_dropped() {
+        // D-A5 §5: the cascade deletes replies when the parent goes, but a row can still
+        // outlive its parent (a save of a stale list, an import). Writing a dangling
+        // reference would make the file unopenable in a strict viewer; dropping the reply
+        // would lose the user's text. Detached is the only answer that keeps both.
+        let reply = annotation(
+            0,
+            AnnotationKind::Note,
+            r#"{"v":2,"point":[50.0,50.0],"parent":"00000000-0000-0000-0000-000000000000"}"#,
+            Some("orphan"),
+        );
+        let bytes = apply_annotations(&sample_pdf(), std::slice::from_ref(&reply)).unwrap();
+        assert_eq!(
+            annotation_count(&bytes),
+            1,
+            "an orphaned reply was dropped from the file"
+        );
+        let written = written_dictionary(&bytes, &reply.id);
+        assert!(
+            written.get(b"IRT").is_err(),
+            "an orphaned reply kept a dangling /IRT"
+        );
     }
 
     #[test]

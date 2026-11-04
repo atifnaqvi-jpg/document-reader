@@ -80,9 +80,20 @@ fi
 # `/CL` for callout only, plus the two refusals) and one in `export.rs` for the flattening
 # data-loss guard. 10 + 6 = 16. The ignored count is unchanged at 93, which is the check that
 # matters: no PDFium-backed test changed shape.
-PIN_PLAIN_PASSED=568
+# 2026-11-04 (A-7/A-8): +13 in both shapes, 568/93 -> 581/93 and 661/0 -> 674/0. The 13 is
+# accounted for, and it is two rows. Eight are A-8's reply/status wire format in `annotate.rs`:
+# `a_status_writes_state_and_its_review_model`, `every_status_writes_its_own_state_name`,
+# `an_annotation_without_a_status_writes_no_state_keys`, `a_status_this_build_does_not_know_writes_nothing`,
+# `a_v1_blob_still_writes_its_geometry`, `a_reply_writes_irt_naming_its_parents_object`,
+# `a_reply_written_before_its_parent_still_finds_it`, `a_reply_whose_parent_is_gone_is_detached_not_dropped`.
+# Five are A-7's storage and cascade in `db/annotations.rs`:
+# `deleting_a_parent_deletes_its_replies`, `deleting_a_reply_leaves_its_parent_alone`,
+# `a_reply_to_a_reply_is_found_by_replies_to`, `set_status_rewrites_only_the_status_key`,
+# `clearing_a_status_removes_the_key_rather_than_storing_null`. 8 + 5 = 13. The ignored count is
+# unchanged at 93, which is the check that matters: no PDFium-backed test changed shape.
+PIN_PLAIN_PASSED=581
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=661
+PIN_IGNORED_PASSED=674
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
