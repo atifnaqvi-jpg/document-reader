@@ -8,7 +8,7 @@
  * is exactly the disagreement with the page that D-A11 exists to prevent.
  */
 
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { CommentPane, threadAnnotations } from "./CommentPane";
