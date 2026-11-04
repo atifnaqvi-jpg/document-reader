@@ -1071,18 +1071,76 @@ family. Then drawing, where D-A8 forces appearance-stream work.
       **NEW ASSERTION:** saved file's dictionary carries `/Subtype /FreeText`, `/IT` for the
       typewriter, `/CL` only for callout, and a non-empty `/AP /N` stream.
 
-- [ ] **A-4 Ink `/AP` (D-A8).** Ink exists (P2) but writes `/InkList` only. D-A8 requires an
-      appearance stream so non-Adobe viewers draw it.
-      **NEW ASSERTION:** `/AP /N` present and its content stream contains one path per stroke.
+- [x] **A-4 Ink `/AP` (D-A8).** Landed `3a36f34`, pins in the same commit, CI `41833314510`
+      green. `appearance::ink_appearance` writes `/AP /N`: one `m`/`l` path per stroke with `S`
+      (stroke, not fill), width `INK_STROKE_WIDTH = 2.0`, round caps and joins, `/BBox` from the
+      stroke bounds with every point translated from page space into the box's own space.
+      `/InkList` records where the pen went, not what the stroke looks like -- width, caps and
+      joins live only in an appearance -- so before this row an ink mark saved, reopened and was
+      invisible everywhere except Acrobat. `ink_annotation_dictionary` gained `&mut Document`
+      for the same reason `annotation_dictionary` did in A-3.
+      **Flattening still refuses ink, structurally:** it is skipped *before* the drawn-guard,
+      because the pass has no stroke-path primitive and moving it past the guard would delete
+      every stroke while the row looked drawable -- A-2's bug in a new kind.
+      **Guards:** `an_ink_annotation_writes_an_appearance_stream` (mutant: `/AP` dropped
+      FAILED), `the_ink_appearance_draws_the_stroke_path_not_a_bounding_box` (mutant: `S`→`f`
+      FAILED), `the_ink_appearance_box_matches_the_annotation_rect` (mutant: `/BBox` widened
+      FAILED), `flattening_keeps_ink_as_an_annotation_rather_than_deleting_it` (mutant: count as
+      drawn FAILED).
+      **Mutation notes worth keeping:** two mutants initially survived *mis-aimed* -- `S`→`f`
+      hit free text's frame and `/BBox` hit free text's box, because both builders share those
+      strings; both were re-aimed by line number. A third survived for a real reason: the test
+      asserted the substring `"40"`, which a page-space y of `640` also matches, so it passed on
+      exactly the bug it existed to catch. The assertion now parses operator lines.
 
-- [ ] **A-5 Line and arrow (D-A3: lopdf-only, pdfium cannot author these).** `/Subtype /Line`
-      with `/L` (two points); arrow adds `/LE [/None /OpenArrow]` (or the ruled head style).
-      **NEW ASSERTION:** `/L` matches the dragged endpoints; arrow sets `/LE`, plain line does
-      not; a plain line's `/LE` is absent rather than `[/None /None]`.
+- [x] **A-5 Line and arrow (D-A3: lopdf-only, pdfium cannot author these).** Landed `89e1a1f`,
+      pins in the same commit, CI `41836449605` green. `/Subtype /Line` with `/L` (the two
+      endpoints) and an `/AP /N` that strokes the diagonal in box space; arrow adds
+      `/LE [/None /OpenArrow]` and a filled head drawn into the appearance. `/Rect` is derived
+      from the endpoints rather than supplied, because the spec requires it to enclose the line
+      and a rect that merely approximates them clips the stroke and misplaces hit-testing.
+      `/LE` is written only for an arrow: a plain line's endings are the spec default, and
+      writing a default reads as a decision the writer made.
+      **`OpenArrow`, not `Arrow`:** `/LE`'s values are a closed set in Table 179 and `Arrow` is
+      not a member, so a viewer would silently fall back to a plain line.
+      **The head is drawn *and* declared.** `/LE` is what a viewer that renders lines itself
+      reads; `/AP` is what a viewer that only blits appearances shows. One alone leaves half the
+      viewers with the wrong mark.
+      **Guards:** `a_line_writes_its_two_endpoints_and_an_appearance` (mutant: `/L` dropped
+      FAILED), `an_arrow_writes_an_arrowhead_in_le_and_a_plain_line_writes_none` (mutant: `/LE`
+      never written FAILED), `the_line_appearance_strokes_the_diagonal_not_a_box`,
+      `the_arrow_appearance_draws_a_head_the_plain_line_does_not` (mutant: head branch disabled
+      FAILED), `a_line_with_coincident_endpoints_is_refused`, palette reachability (mutants:
+      Line removed FAILED, Oval offered early FAILED).
+      **Honest limit:** removing Line from flatten's structural skip changes no test, because
+      `appearance_for` returns `None` for line today and the drawn-guard would exclude it anyway.
+      The skip is kept as defence in depth with a comment saying so; it is *not* claimed as
+      verified protection.
+      Frontend: line/arrow take their endpoints from the drag's start and release, not from a
+      bounding box -- a diagonal and its bbox are different marks.
 
-- [ ] **A-6 Oval (D-A3 lopdf-only).** `/Subtype /Circle` with `/Rect`; the oval is inscribed in
-      the rect. **NEW ASSERTION:** subtype `Circle`, and the rect is preserved unmodified (an
-      inscribed oval must not rewrite the rect to its bounds).
+- [x] **A-6 Oval (D-A3 lopdf-only).** Landed `3105e8f`, pins in the same commit. `/Subtype
+      /Circle` with the curve inscribed in `/Rect`, which is preserved unmodified -- an inscribed
+      oval must not rewrite the rect to its bounds, and the non-square case renders as an ellipse
+      because that is what inscribing means (12.5.6.8). Appearance: four cubic Beziers at the
+      standard kappa offset, the construction every producer uses, so our ellipse matches a
+      viewer's own rendering of `/Circle`.
+      **Guards:** `an_oval_writes_a_circle_subtype_inscribed_in_its_rect` (mutant: subtype
+      `Circle`→`Oval` FAILED), `the_oval_appearance_draws_a_curve_not_the_bounding_box` (mutant:
+      kappa→1.0 FAILED, **only after the test was strengthened**), `an_oval_in_a_dead_box_is_refused`.
+      **The kappa mutant survived the first version of the test and that was a real gap:** the
+      test checked the four quadrant points and the curve count, and four curves through the
+      right quadrant points bulge differently while still landing on those points. The assertion
+      now pins the first curve's operator line exactly
+      (`200 77.61424 155.22849 100 100 100 c`). My first expected value was wrong -- I mixed the
+      two radii -- and the emitted geometry was right; the expectation was corrected, not the
+      code.
+      **Palette test rewritten, not deleted:** it used to assert Oval was *absent*, which passes
+      forever once Oval ships. It now checks the real invariant -- no offered tool lacks a
+      writer.
+      Frontend: oval joins `DRAG_TOOLS` and the rect-anchored blob branch. Both were needed:
+      without the first the gesture is never captured, without the second it falls through to
+      the markup arm and writes `rects`, which the shape writer cannot parse.
 
 - [ ] **A-7 Comment pane: list, sort, filter, statuses (D-A7).** Statuses accepted/rejected/
       completed/cancelled/none stored in the blob, `/State` written when set.

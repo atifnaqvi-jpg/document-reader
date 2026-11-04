@@ -360,12 +360,17 @@ pub fn line_annotation_dictionary(
     // `/LE` is written only for an arrow. A plain line's endings are the spec default
     // (`None`/`None`), and writing a default is the same mistake as writing no distinction at
     // all -- it looks like a decision the writer made.
+    //
+    // `OpenArrow` and not `Arrow`: `/LE`'s values are a closed set in ISO 32000-1 Table 179
+    // (Square, Circle, Diamond, OpenArrow, ClosedArrow, Butt, ROpenArrow, RClosedArrow, Slash,
+    // None). `Arrow` is not one of them, so a viewer reading it would fall back to its default
+    // -- a plain line -- which is the failure this key exists to prevent.
     if arrow {
         dictionary.set(
             "LE",
             Object::Array(vec![
                 Object::Name(b"None".to_vec()),
-                Object::Name(b"Arrow".to_vec()),
+                Object::Name(b"OpenArrow".to_vec()),
             ]),
         );
     }

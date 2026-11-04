@@ -1170,7 +1170,9 @@ mod tests {
     /// render an arrow as a plain line, which is a different mark.
     #[test]
     fn an_arrow_writes_an_arrowhead_in_le_and_a_plain_line_writes_none() {
-        for (arrow, expected) in [(false, None::<&str>), (true, Some("Arrow"))] {
+        // `OpenArrow` is a member of /LE's closed value set (ISO 32000-1 Table 179); `Arrow`
+        // is not, and a viewer would silently ignore it.
+        for (arrow, expected) in [(false, None::<&str>), (true, Some("OpenArrow"))] {
             let annotations = vec![line_row(
                 arrow,
                 r##"{"v":1,"color":"#000000","from":[72,600],"to":[300,640]}"##,
