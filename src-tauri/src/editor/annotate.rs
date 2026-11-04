@@ -1601,9 +1601,12 @@ mod tests {
 
         let bytes = apply_annotations(&two_page_pdf(2), &rows).unwrap();
 
-        let dir = std::env::temp_dir().join(format!("docreader-edited-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("edited-round-trip.pdf");
+        // Held in a guard rather than removed at the end: this test asserts PDFium's reading of
+        // a real file, and the interesting failures are exactly the ones that panic. A trailing
+        // `remove_dir_all` is skipped on panic, which had leaked thousands of directories into
+        // /tmp -- and a leaked directory per failing run is a slow way to fill a CI disk.
+        let workspace = TempWorkspace::new("docreader-edited");
+        let path = workspace.0.join("edited-round-trip.pdf");
         crate::editor::save::write_atomically(&path, &bytes).unwrap();
 
         assert_eq!(
@@ -1641,5 +1644,47 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A temporary directory removed when it goes out of scope, including on panic.
+    ///
+    /// The rest of the suite removes its temp trees by hand at the end of each test, which is
+    /// fine for tests that cannot fail after creating the directory. This one can, so the
+    /// cleanup has to be tied to scope instead of to reaching the last line.
+    struct TempWorkspace(std::path::PathBuf);
+
+    impl TempWorkspace {
+        fn new(prefix: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("create the test workspace");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The guard is what keeps the suite from filling `/tmp`, and a guard nobody checks is how
+    /// that happened in the first place: the previous cleanup ran on the last line of a test
+    /// that can panic before reaching it. Deleting the `remove_dir_all` in `Drop` leaves every
+    /// test green, so this assertion is the only thing standing between a fixed leak and a
+    /// silently reintroduced one.
+    #[test]
+    fn the_temp_workspace_removes_itself_when_it_goes_out_of_scope() {
+        let path = {
+            let workspace = TempWorkspace::new("docreader-guard-probe");
+            let path = workspace.0.clone();
+            std::fs::write(path.join("probe.txt"), b"x").unwrap();
+            assert!(path.is_dir(), "the workspace must exist while held");
+            path
+        };
+        assert!(
+            !path.exists(),
+            "TempWorkspace left {} behind; the suite would leak a directory per run",
+            path.display()
+        );
     }
 }

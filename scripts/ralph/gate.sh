@@ -80,9 +80,9 @@ fi
 # `/CL` for callout only, plus the two refusals) and one in `export.rs` for the flattening
 # data-loss guard. 10 + 6 = 16. The ignored count is unchanged at 93, which is the check that
 # matters: no PDFium-backed test changed shape.
-PIN_PLAIN_PASSED=567
+PIN_PLAIN_PASSED=568
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=660
+PIN_IGNORED_PASSED=661
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
