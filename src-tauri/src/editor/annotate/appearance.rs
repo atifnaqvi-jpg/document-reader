@@ -341,6 +341,102 @@ pub fn line_appearance(
     stream
 }
 
+/// The Bezier constant for approximating a quarter circle.
+///
+/// `4/3 * (sqrt(2) - 1)`. A circle cannot be drawn with straight segments or a single curve,
+/// so a PDF ellipse is four cubic Beziers whose control points are offset from each quadrant
+/// point by this fraction of the radius. It is the standard construction and the value every
+/// PDF producer uses, so our ellipse matches what a viewer would compute for `/Circle`.
+const KAPPA: f32 = 0.552_284_8;
+
+/// Builds the `/AP /N` stream for an oval (D-A8).
+///
+/// The oval is `/Subtype /Circle` with the circle **inscribed in** `/Rect` (ISO 32000-1
+/// 12.5.6.8), so a non-square rect yields an ellipse. That is the spec's behaviour and not an
+/// approximation on our side: the rect is the bounding box the curve is drawn to fill.
+pub fn oval_appearance(width: f32, height: f32, color: (f32, f32, f32)) -> Stream {
+    // Radii, and the box's centre, which is where the four curves meet.
+    let (rx, ry) = (width / 2.0, height / 2.0);
+    let (cx, cy) = (rx, ry);
+    let (ox, oy) = (rx * KAPPA, ry * KAPPA);
+
+    let mut operations = vec![
+        Operation::new("q", vec![]),
+        Operation::new("RG", vec![color.0.into(), color.1.into(), color.2.into()]),
+        Operation::new("w", vec![Object::Real(1.0)]),
+        // Start at the right-hand quadrant point and go counter-clockwise. Each segment is
+        // one quadrant: two control points on the tangent, one on the next quadrant point.
+        Operation::new("m", vec![Object::Real(cx + rx), Object::Real(cy)]),
+        // Right -> top.
+        Operation::new(
+            "c",
+            vec![
+                Object::Real(cx + rx),
+                Object::Real(cy + oy),
+                Object::Real(cx + ox),
+                Object::Real(cy + ry),
+                Object::Real(cx),
+                Object::Real(cy + ry),
+            ],
+        ),
+        // Top -> left.
+        Operation::new(
+            "c",
+            vec![
+                Object::Real(cx - ox),
+                Object::Real(cy + ry),
+                Object::Real(cx - rx),
+                Object::Real(cy + oy),
+                Object::Real(cx - rx),
+                Object::Real(cy),
+            ],
+        ),
+        // Left -> bottom.
+        Operation::new(
+            "c",
+            vec![
+                Object::Real(cx - rx),
+                Object::Real(cy - oy),
+                Object::Real(cx - ox),
+                Object::Real(cy - ry),
+                Object::Real(cx),
+                Object::Real(cy - ry),
+            ],
+        ),
+        // Bottom -> right, closing the curve.
+        Operation::new(
+            "c",
+            vec![
+                Object::Real(cx + ox),
+                Object::Real(cy - ry),
+                Object::Real(cx + rx),
+                Object::Real(cy - oy),
+                Object::Real(cx + rx),
+                Object::Real(cy),
+            ],
+        ),
+        Operation::new("S", vec![]),
+        Operation::new("Q", vec![]),
+    ];
+    operations.shrink_to_fit();
+
+    let content = Content { operations };
+    let mut stream = Stream::new(Dictionary::new(), content.encode().unwrap_or_default());
+    stream.dict.set("Type", Object::Name(b"XObject".to_vec()));
+    stream.dict.set("Subtype", Object::Name(b"Form".to_vec()));
+    stream.dict.set(
+        "BBox",
+        Object::Array(vec![
+            Object::Real(0.0),
+            Object::Real(0.0),
+            Object::Real(width),
+            Object::Real(height),
+        ]),
+    );
+    stream.dict.set("Resources", Dictionary::new());
+    stream
+}
+
 /// The `/Font` object a free-text appearance's `/Resources` names.
 ///
 /// Helvetica rather than a bundled font: an appearance stream naming a font the reader does

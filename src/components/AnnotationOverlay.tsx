@@ -60,6 +60,7 @@ const DRAG_TOOLS: AnnotationKind[] = [
   "strikeout",
   "squiggly",
   "rect",
+  "oval",
   "ink",
   "line",
   "arrow",
@@ -207,7 +208,7 @@ export function AnnotationOverlay({
       // is explicit.
       const pdf = pageRectToPdf(rect, metrics);
       const data: AnnotationData =
-        activeTool === "rect"
+        activeTool === "rect" || activeTool === "oval"
           ? { v: 1, rect: pdf, color: style.color }
           : {
               v: 1,
@@ -688,7 +689,9 @@ function AnnotationMark({
     );
   }
 
-  // A shape anchors on a rect and draws as an empty frame.
+  // A shape anchors on a rect and draws as an empty frame. An oval's frame is the same rect,
+  // drawn as an inscribed ellipse -- the same construction the writer puts in /AP, so the
+  // preview and the saved page agree about how much of the box the curve fills.
   const rect = (data as ShapeData).rect;
   if (!rect) return null;
   const box = pdfToPage(
@@ -696,6 +699,36 @@ function AnnotationMark({
     metrics.scale,
     metrics.pageHeightPoints,
   );
+  const size = {
+    width: Math.max(box.width, 12),
+    height: Math.max(box.height, 12),
+  };
+
+  if (annotation.kind === "oval") {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={onSelect}
+        title={annotation.text ?? undefined}
+        aria-label="oval annotation"
+        style={{ left: box.x, top: box.y, ...size, pointerEvents: "auto" }}
+      >
+        <svg width={size.width} height={size.height}>
+          <ellipse
+            cx={size.width / 2}
+            cy={size.height / 2}
+            rx={Math.max(size.width / 2 - 1, 0)}
+            ry={Math.max(size.height / 2 - 1, 0)}
+            fill="none"
+            stroke={colour}
+            strokeWidth={2}
+          />
+        </svg>
+      </button>
+    );
+  }
+
   return (
     <button
       type="button"
@@ -706,8 +739,7 @@ function AnnotationMark({
       style={{
         left: box.x,
         top: box.y,
-        width: Math.max(box.width, 12),
-        height: Math.max(box.height, 12),
+        ...size,
         borderColor: colour,
         pointerEvents: "auto",
       }}

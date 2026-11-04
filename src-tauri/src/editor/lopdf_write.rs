@@ -182,13 +182,27 @@ pub fn annotation_dictionary(
                 "line annotations are written from their endpoints".to_string(),
             ))
         }
-        // Still refusing. A-6 is its own row: a wrong subtype would put a mark on the page
-        // that is not what the user drew, and the save would report success.
+        // An oval is `/Subtype /Circle` with the curve inscribed in `/Rect` (ISO 32000-1
+        // 12.5.6.8). Like ink and line it needs an appearance (D-A8): `/Circle` tells a viewer
+        // the shape but nothing about its stroke, so a viewer that draws only `/AP` would show
+        // an unstyled default.
         AnnotationKind::Oval => {
-            return Err(AppError::Other(format!(
-                "`{}` annotations are not written yet (P3.1)",
-                kind.as_str()
-            )))
+            let appearance_stream = appearance::oval_appearance(rect.width(), rect.height(), color);
+            let appearance_id = document.add_object(appearance_stream);
+            dictionary! {
+                "Type" => "Annot",
+                "Subtype" => "Circle",
+                "Rect" => Object::Array(rect_array),
+                "C" => Object::Array(vec![
+                    Object::Real(color.0),
+                    Object::Real(color.1),
+                    Object::Real(color.2),
+                ]),
+                "F" => Object::Integer(4),
+                "AP" => dictionary! {
+                    "N" => Object::Reference(appearance_id),
+                },
+            }
         }
     };
 

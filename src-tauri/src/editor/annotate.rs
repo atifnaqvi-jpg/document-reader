@@ -281,10 +281,21 @@ fn dictionary_for(
                 contents,
             )?))
         }
-        // A kind with no dictionary builder yet is not written at all, rather than written as
-        // something it is not. Free text and line have builders now, so they are not in this
-        // arm; oval (A-6) is.
-        AnnotationKind::Oval => Ok(None),
+        // An oval shares the rect-anchored path with `Rect`; the difference is the subtype and
+        // the curve the appearance draws, both of which `annotation_dictionary` decides.
+        AnnotationKind::Oval => {
+            let parsed: ShapeBlob = serde_json::from_value(blob).map_err(|error| {
+                AppError::Other(format!("annotation {}: {error}", annotation.id))
+            })?;
+            Ok(Some(lopdf_write::annotation_dictionary(
+                document,
+                AnnotationKind::Oval,
+                rect_from(&parsed.rect),
+                parse_color(parsed.color.as_deref()),
+                1.0,
+                contents,
+            )?))
+        }
         AnnotationKind::Note => {
             // A note's anchor is its /Rect; the blob for a note stores a point.
             let parsed: serde_json::Value = blob;
@@ -1287,6 +1298,109 @@ mod tests {
             document_id: "doc-1".to_string(),
             page: 0,
             kind: AnnotationKind::Line { arrow },
+            data: data.to_string(),
+            text: None,
+            created_at: 0,
+            modified_at: 0,
+        }
+    }
+
+    /// A-6: an oval is `/Subtype /Circle`, and the circle is *inscribed in* `/Rect`. That is
+    /// the spec's definition (ISO 32000-1 12.5.6.8), and it is why a non-square rect gives an
+    /// ellipse rather than a clipped circle: the rect is the bounding box, not a hint.
+    #[test]
+    fn an_oval_writes_a_circle_subtype_inscribed_in_its_rect() {
+        let annotations = vec![oval_row(
+            r##"{"v":1,"color":"#000000","rect":[72,600,272,700]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        // `/Circle`, not `/Oval` and not `/Square`: the spec's name for this subtype is
+        // Circle even though a non-square rect renders as an ellipse.
+        assert_eq!(
+            dictionary
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"Circle"
+        );
+        assert_eq!(
+            numbers(dictionary.get(b"Rect").unwrap()),
+            vec![72.0, 600.0, 272.0, 700.0]
+        );
+        assert_appearance_is_a_non_empty_form(dictionary);
+    }
+
+    /// The appearance must draw the ellipse, not the bounding rectangle. A rectangle would
+    /// satisfy every structural check on `/Subtype` and `/Rect` while being a visibly
+    /// different mark, and this is the assertion that separates them.
+    #[test]
+    fn the_oval_appearance_draws_a_curve_not_the_bounding_box() {
+        let annotations = vec![oval_row(
+            r##"{"v":1,"color":"#000000","rect":[72,600,272,700]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+        let stream = appearance_stream_of(&document, dictionary);
+        let content = String::from_utf8_lossy(&stream.content).to_string();
+        let operators: Vec<&str> = content.lines().map(str::trim).collect();
+
+        // Bezier curves are what a PDF ellipse is built from; four of them is the standard
+        // construction (one per quadrant).
+        assert_eq!(
+            operators.iter().filter(|line| line.ends_with(" c")).count(),
+            4,
+            "an ellipse needs four Bezier segments, got {content:?}"
+        );
+        assert!(
+            !operators.iter().any(|line| line.ends_with(" re")),
+            "an oval must not draw its bounding rectangle, got {content:?}"
+        );
+        // The four quadrant points of a 200x100 box, in box space.
+        for corner in ["200 50 m", "100 0", "0 50", "100 100"] {
+            assert!(
+                content.contains(corner),
+                "the ellipse's quadrant point {corner} is missing, got {content:?}"
+            );
+        }
+
+        // The quadrant points alone do not make an ellipse: four curves that meet at the same
+        // four points bulge differently depending on where their control points sit, and a
+        // wrong constant still lands exactly on those points. The first segment runs from the
+        // right quadrant point (200, 50) to the top one (100, 100). Its first control point sits
+        // straight above the start by KAPPA * ry = 0.5522848 * 50 = 27.61424, and its second
+        // left of the end by KAPPA * rx = 55.22848. Asserting those two numbers is what
+        // separates an ellipse from a bulged quadrilateral.
+        let first_curve = operators
+            .iter()
+            .find(|line| line.ends_with(" c"))
+            .expect("a curve");
+        assert_eq!(
+            *first_curve, "200 77.61424 155.22849 100 100 100 c",
+            "the first curve's control points are wrong, got {content:?}"
+        );
+    }
+
+    /// An oval in a zero-area box is a click, not a mark. Refused for the same reason a line
+    /// with coincident endpoints is: a viewer would hold a selectable object drawing nothing.
+    #[test]
+    fn an_oval_in_a_dead_box_is_refused() {
+        let annotations = vec![oval_row(
+            r##"{"v":1,"color":"#000000","rect":[72,600,72,600]}"##,
+        )];
+        let error = apply_annotations(&sample_pdf(), &annotations).unwrap_err();
+        assert!(error.to_string().contains("too small"), "got {error}");
+    }
+
+    fn oval_row(data: &str) -> Annotation {
+        Annotation {
+            id: "oval-1".to_string(),
+            document_id: "doc-1".to_string(),
+            page: 0,
+            kind: AnnotationKind::Oval,
             data: data.to_string(),
             text: None,
             created_at: 0,

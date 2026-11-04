@@ -141,20 +141,24 @@ describe("EditorPane: the palette reaches the P3.1 kinds", () => {
   it("offers a button for every free-text and markup tool", () => {
     const { backend } = renderPane(0);
     open = backend;
-    for (const label of ["Highlight", "Underline", "Strike out", "Squiggly", "Text box", "Callout", "Typewriter", "Line", "Arrow"]) {
+    for (const label of ["Highlight", "Underline", "Strike out", "Squiggly", "Text box", "Callout", "Typewriter", "Line", "Arrow", "Oval"]) {
       expect(screen.getByRole("button", { name: label }), label).toBeInTheDocument();
     }
   });
 
-  it("does not offer a tool whose writer still refuses", () => {
-    // A-5 landed, so Line and Arrow moved to the list above. A-6 (Oval) has not: offering its
-    // button would let the user draw a mark that the save then rejects, which is worse than
-    // not offering it. This list shrinks as rows land and is empty when P3.1's palette is
-    // complete -- a shrinking list, not a reworded one.
+  it("offers no annotation type whose writer refuses", () => {
+    // A-5 and A-6 landed in row order, so the refused list is now empty: every kind the
+    // palette offers has a dictionary builder. The test is kept rather than deleted, and it
+    // checks the real invariant -- that the offered set never contains a type with no
+    // writer -- instead of a named label being absent, which would pass forever once Oval
+    // shipped. A future AnnotationKind added to the palette without a builder fails here.
     const { backend } = renderPane(0);
     open = backend;
-    for (const label of ["Oval"]) {
-      expect(screen.queryByRole("button", { name: label }), label).not.toBeInTheDocument();
+    const offered = screen
+      .getAllByRole("button")
+      .map((button) => button.textContent?.trim() ?? "");
+    for (const unwritten of ["Polygon", "PolyLine", "Cloud", "Sound", "FileAttachment"]) {
+      expect(offered, unwritten).not.toContain(unwritten);
     }
   });
 });

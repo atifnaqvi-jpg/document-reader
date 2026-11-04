@@ -36,6 +36,7 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
   { kind: "line", label: "Line", hint: "Drag from one end to the other" },
   { kind: "arrow", label: "Arrow", hint: "Drag from tail to tip" },
   { kind: "rect", label: "Box", hint: "Drag to draw a box" },
+  { kind: "oval", label: "Oval", hint: "Drag a box" },
 ];
 
 /** Colours offered per tool; a full picker would be its own change, not a P2 need. */
