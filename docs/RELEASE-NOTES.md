@@ -7,6 +7,150 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 1.1.0
+
+**P3.1 — annotations breadth. Built, not yet released: no `v1.1.0` tag exists and nothing is
+published under this number.** The installer comes from a build-only `workflow_dispatch` run
+(the attach step is tag-gated, and a tag is what the hand-test withholds). Provenance is in
+"Hand-test provenance" below, and it says *pending* until a human has run the bytes.
+
+This is the first release a user can feel as an annotation product. Before it, the palette was
+five markup types and a note; the comment surface did not exist.
+
+### What it ships
+
+**Thirteen annotation types, in three families** (D-A1). Markup: highlight, underline,
+strikeout, squiggly. Text: note, textbox, callout, typewriter. Drawing: ink, line, arrow, rect,
+oval. All thirteen are **real PDF annotations** written by the lopdf path (P2-D3) — the same
+bytes a third-party viewer reads — with the database still the source of truth and the file a
+projection of it (D-A2). `polygon` and `cloud` are **named and not scheduled**: they need the
+same lopdf geometry path as line and arrow, and committing to them here would have meant a
+vertex-handle editor that nothing else in the palette requires.
+
+Two details worth stating because they are the difference between "looks right in our window"
+and "correct in someone else's":
+
+- **Appearance streams are written where there is nothing to synthesise** (D-A8): ink, free
+  text, callout and line/arrow carry an `/AP`. Markup does not — it keeps relying on
+  `/QuadPoints`, which viewers already synthesise, and writing `/AP` for it would add a second
+  description of the same geometry that can disagree with the first.
+- **Line, arrow and oval are lopdf-only** (D-A3). PDFium cannot author them, so it is used to
+  *measure and validate* geometry in every case and to write bytes in none.
+
+**A comment pane with the report's four statuses** (D-A7, D-A11). One table over every
+annotation in the document — replies nested under their parent rather than scattered through
+the sort order — with sort by page, author, date, type or status; filter by kind, by status
+(including "unmarked"), and by text; and status editing inline. It is a **stateless view**: it
+holds sort and filter and never a cached copy of the rows, which is what stops the pane and the
+page disagreeing. The four statuses are accepted, rejected, completed and cancelled, plus
+"none/marked". They live in the blob and the `/State` key is written when one is set, with
+`/StateModel /Review`, so a triage decision made here is visible in a viewer that has never
+heard of this application. A status change is **one undo entry** (D-A6), like any other
+annotation update: making it silent would let a user lose a triage decision with no way back.
+
+**Reply chains, in the file format's own mechanism** (D-A5). A reply is an annotation with a
+`parent`, not a row in a second table, and on write it carries **`/IRT`** — the standard
+"in reply to" reference — pointing at the parent's *object*. Replies are drawn in the pane, not
+as icons on the page. Making replies annotations is why they inherit search indexing, undo and
+deletion cascade rather than each needing its own copy of that machinery.
+
+**XFDF import and export** (D-A9, D-A10). Export covers the annotation list, page, geometry,
+colour, contents, author, dates and status. Import **never overwrites**: an incoming annotation
+whose `/NM` matches an existing row is skipped **and counted**, and the count is reported.
+Three skip classes are counted apart — already-present, unsupported, malformed — because one
+number would hide which of them happened. Import also **decides first and writes second**: the
+whole file is evaluated, then one transaction inserts all of it, so a file that fails on row
+forty cannot leave thirty-nine rows behind with a report describing a document the user does not
+have. Export writes through the **real save dialog** and the path the user chose; a cancelled
+save writes nothing and claims nothing.
+
+**Search now resolves an annotation, not just its page** (D-A12). A query matching a note,
+textbox, callout, typewriter or reply body returns a hit carrying the annotation's page *and*
+its id; clicking it selects the annotation and jumps to it. This was the row that looked like a
+formality — the DB layer was already kind-agnostic and every kind already delivered text — and
+was not: the snippet was reading the wrong column, so **every annotation hit was displaying its
+page number as its snippet**, and the pane was dropping the id, so a hit inside a note jumped to
+the right page and selected nothing. The page being right is what made both invisible.
+
+**The migration machinery, from 1.0.1, still runs on upgrade.** 1.1.0 inherits the 1.0.1 rename
+(`com.documentreader.app` → `com.docupro.app`): `editor/migrate.rs` copies the database into the
+new directory at startup, before the database is opened, as a copy and never a move. A 1.0.x
+install upgrading to this build keeps its library, and the About/notices surface says where it
+came from. That is a one-time notice, not a 1.1.0 feature — it is repeated here because the
+first upgrade *across* 1.0.1 is the one where a user finds out whether it worked.
+
+**Blob version 2, forward-safe in both directions** (D-A13). A v1 blob is read by this build;
+a v2 blob is **skipped** by an older reader rather than misread. That is the property that lets
+a 1.0.x install and a 1.1.0 install share a database during the transition without corrupting
+each other's rows.
+
+### Gates
+
+Facts about the tree this section describes, measured at `72c7ed2` (CI run `41941372935`, all
+three jobs green) and re-run as the gate of record after the bump:
+
+| Shape | Result |
+|---|---|
+| `cargo test` (Linux, PDFium present) | **611 passed, 93 ignored** |
+| `cargo test -- --include-ignored` (Linux, PDFium present) | **704 passed, 0 ignored** |
+| Windows CI, `-- --include-ignored` | **703 passed, 0 ignored** |
+| Frontend | vitest **113**, `tsc` and `vite build` clean |
+
+The Windows figure is one lower **by construction, not by a skip**: one test is gated
+`#[cfg(unix)]` because it drives poppler's CLI tools, which are a Unix install here, and Windows
+runs the PDFium equivalent instead. Both shapes are pinned in `scripts/ralph/gate.sh`, including
+the unchanged ignored count — a suite that started skipping would move that pin and fail.
+
+### Carried, not fixed
+
+Recorded because a release note that lists only wins is a sales document, and each of these has
+bitten this programme already.
+
+- **`STATUS_ACCESS_VIOLATION` in the Windows PDFium suite.** Intermittent, and **undiagnosed**.
+  Same-SHA re-runs pass; a documentation-only commit once tripped it. It is a watch item, not a
+  known defect with a workaround, and nothing in this branch is known to cause it. The Windows
+  job is therefore occasionally red for a reason that will not reproduce — do not read a single
+  Windows failure as evidence about this release without a re-run.
+- **One gate run reported red with no failing step in its log, and it remains unexplained.**
+  Six subsequent full gate runs and five direct suite runs were green. My first read of it was
+  wrong in a way worth keeping: `... | tail -3; echo $?` reports *tail's* exit status, so the
+  `0` said nothing about the gate. Recorded as unexplained rather than called a flake.
+- **The rebuild delta.** An installer rebuilt from the identical commit is not byte-identical:
+  1.0.1's published asset differs from its hand-tested artifact by 221 bytes, 1.0.0's by 3,748.
+  The provenance claim is about the **source commit**, which is exact; it cannot make the binary
+  reproducible. Expect the same shape between this release's dispatch artifact and any later
+  tag-built one, and compare commits rather than checksums.
+
+### Not in this release
+
+It is annotation breadth, not parity. Digital signatures, forms data (FDF proper), redaction,
+and OCR are P3.4–P3.6 and untouched here. `polygon` and `cloud` are named in D-A1 and not
+scheduled. Nothing in this release changes the fact that the application is Windows-only.
+
+- The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+- Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
+  and `release-windows.yml`.
+
+### Hand-test provenance
+
+**Status: pending. Nothing below claims a human has run these bytes.**
+
+Built by a **build-only** `workflow_dispatch` run on `p2-windows-test`; a dispatch keeps its
+artifact and publishes no release, which is why the tag can wait for the hand-test.
+
+| Field | Value |
+|---|---|
+| Dispatch run | *filled in when the run exists* |
+| Artifact | *filled in when the run exists* |
+| File | `DocuPro_1.1.0_x64-setup.exe` |
+| SHA-256 | *filled in when the run exists* |
+
+The tag is cut only after that run is hand-confirmed, and it is cut **at the commit the dispatch
+built from** — not at whatever `HEAD` has become — because the confirmed bytes and the tag must
+be the same claim. That is the order 0.9.0 recorded and 1.0.1 followed.
+
+---
+
 ## 1.0.0
 
 **Reserved for P2.8. Not shipped.** There is no `v1.0.0` tag, no published release, and no
@@ -257,29 +401,33 @@ That is the whole of it: this number shipped the rename and the migration, and n
 
 ## 1.0.2
 
-**Development version. Nothing is built or published under it, and nothing is scheduled to be.**
+**Never shipped, never dispatched, and now retired. It held nothing and no build was made under
+it. The tree went from 1.0.1 to 1.1.0 directly.**
 
 This section exists for the mechanical reason `0.9.1` and `1.0.1` did, and the guard proves it:
-`v1.0.1` now points at `330a4ad` while `HEAD` is untagged, and
+`v1.0.1` points at `330a4ad` while `HEAD` is untagged, and
 `the_tree_version_is_ahead_of_every_published_tag` requires the carriers to name something
 higher than the highest published tag. Left at `1.0.1`, that guard is unsatisfiable by
 construction for every commit after the tag.
 
-**1.0.2 is RESERVED for the first user-facing P3.1 release, and for nothing else.** The P3.1
-plan schedules the phase at **1.1.0** (`docs/P3-PLAN.md` §1), so this reservation is not a claim
-that annotations ship under 1.0.2 — it is a hold. Two reasons it is written down rather than
-left implicit:
+**What the reservation said, and what happened to it.** This number was held — as a *hold*, not
+a claim — for "the first user-facing P3.1 release", on the reasoning that a bare patch bump is
+the obvious thing for any small intervening change to take and would spend the number the first
+installable P3.1 artefact should carry. The P3.1 plan schedules the phase at **1.1.0**
+(`docs/P3-PLAN.md` §1), and when the phase reached release prep the plan was followed. So the
+hold was never drawn on: 1.0.2 is skipped.
 
-1. A bare patch bump is the obvious thing for any small intervening change to take. Taking it
-   would spend the number that the first P3.1 artefact a user actually installs should carry.
-2. Annotations breadth is nine rows and one design; the first row a user can feel may land well
-   before the phase completes. That is the build this number is held for, at the point the
-   phase's own version schedule is re-ruled — not silently, here.
+That is the reservation rule working as written rather than an outcome to tidy away. AGENTS.md
+calls a version assigned to an unshipped phase *a reservation, not a fact* — if a later phase
+publishes first, the earlier one needs a new number. Here the phase it was held for shipped
+under its scheduled number instead, which is the same rule read from the other end: the hold
+lapsed because the thing it was held for took 1.1.0. A reserved number that was never used is a
+smaller problem than a shipped artefact carrying a number that meant "whatever landed that
+week" — and it costs nothing but this paragraph.
 
-**No feature lands under 1.0.2, and no other row may claim it.** If the phase schedule holds at
-1.1.0, 1.0.2 is skipped and the tree goes from 1.0.1 to 1.1.0 directly; a reserved number that
-was never used is a smaller problem than a shipped artefact carrying a number that meant
-"whatever landed that week".
+**No build, no tag, no artifact, no installer.** Nothing was ever dispatched at 1.0.2, so there
+are no bytes to reconcile and no provenance to record. Anyone reading a 1.0.2 file name in a log
+is looking at a tree state, not a release.
 
 - The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
 - Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
