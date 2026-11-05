@@ -86,8 +86,9 @@ each other's rows.
 
 ### Gates
 
-Facts about the tree this section describes, measured at `72c7ed2` (CI run `41941372935`, all
-three jobs green) and re-run as the gate of record after the bump:
+Facts about the tree this section describes. The numbers were measured at `72c7ed2`, then
+re-measured after the bump at `5b6b026` — a version bump that moved a suite would be a different
+tree than the one described — and `5b6b026` is green in CI run `42043756021`, all three jobs.
 
 | Shape | Result |
 |---|---|
@@ -140,10 +141,20 @@ artifact and publishes no release, which is why the tag can wait for the hand-te
 
 | Field | Value |
 |---|---|
-| Dispatch run | *filled in when the run exists* |
-| Artifact | *filled in when the run exists* |
-| File | `DocuPro_1.1.0_x64-setup.exe` |
-| SHA-256 | *filled in when the run exists* |
+| Dispatch run | `42043910748` at `5b6b026`, build-only (`workflow_dispatch`), 2026-11-05 |
+| Artifact | `document-reader-windows-installer`, id `13425023885`, 10,421,207 bytes |
+| File | `DocuPro_1.1.0_x64-setup.exe`, 10,437,206 bytes |
+| SHA-256 | `00933e1be51d70ad08e07f55d2d933bcf5e5651ee35258536224f8807bd521df` |
+| Expires | 2027-02-03 |
+
+Three independent readings agree on the version before anyone runs it: the **filename**, the PE
+**`FileVersion`** resource and the PE **`ProductVersion`** resource all say `1.1.0`, and
+`ProductName` says `DocuPro`. That check exists because the carriers in the tree and the string
+the installer embeds are produced in different places; 1.0.0 records the same three readings.
+
+The dispatch reached step 10, *Assert the PDFium tests actually ran*, successfully — the same
+gate that caught the Windows crash at 0.9.1 — so the Windows suite ran at this version rather
+than skipping.
 
 The tag is cut only after that run is hand-confirmed, and it is cut **at the commit the dispatch
 built from** — not at whatever `HEAD` has become — because the confirmed bytes and the tag must

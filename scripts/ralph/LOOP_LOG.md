@@ -1771,3 +1771,88 @@ error as an unpushed commit — the artifact disagrees with the claim.
 P3.1's task list is complete. Phase close needs the installer hand-test (rule 1), which is not
 mine to do. Release version is a user decision and stays pending: the plan table names 1.1.0
 for P3.1, while 1.0.2 is reserved and never dispatched.
+
+---
+
+## P3.1 release prep — 1.1.0 notes, bump, gate, dispatch, 2026-11-05 — no tag
+
+Version taken as **1.1.0**, the number `docs/P3-PLAN.md` §1 assigns to P3.1. The version
+question had been teed up twice without an override, and the user's instruction to proceed with
+testing is the working go; a later override to 1.0.2 would be a re-bump and a re-dispatch, both
+cheap and both recorded. What is *not* done is the tag: that waits for the hand-test, in the
+order 0.9.0 recorded and 1.0.1 followed.
+
+### Order matters and was followed
+
+Notes first, bump second. The bump is what puts those bytes into an installer, and
+`release_version.rs` enforces both halves — `the_shipped_version_has_release_notes` would fail a
+bump with no section, and `every_release_carrier_reports_the_same_version` would fail a section
+with no bump. Committing them together in that order makes the pair one decision.
+
+### What the 1.1.0 section says, and what it deliberately does not
+
+It describes the **surface**, not the commit list: 13 types in three families; the two reasons
+the writer is split (an `/AP` only where there is nothing to synthesise, so ink/free-text/callout
+/line-arrow but not markup; lopdf as the single byte-writer with pdfium measuring and writing
+none); the comment pane and *why* it is stateless; replies as annotations carrying `/IRT`; XFDF's
+never-overwrite count split into three classes plus decide-first-write-second; search resolving
+an annotation and not only its page; the 1.0.1 migration that runs on this upgrade; blob v2's
+forward safety.
+
+Three carried items are recorded **as carried**: the undiagnosed `STATUS_ACCESS_VIOLATION`, the
+one gate run that went red with no failing step, and the rebuild delta. A release note that lists
+only wins is a sales document, and each of these has already cost this programme a false read.
+
+The search paragraph names the two defects, because they are the honest description of the row:
+every annotation hit was showing its page number as its snippet (column 2 vs 3 on a table with an
+extra leading column), and the pane dropped the id so a hit jumped to the right page and selected
+nothing. The page being right is exactly what hid both.
+
+### 1.0.2 retired, not deleted
+
+It was a **hold, never a claim** — nothing was ever dispatched under it. The reservation rule in
+AGENTS.md is that a version assigned to an unshipped phase is a reservation, not a fact; here the
+phase it was held for shipped under its own scheduled number, so the hold lapsed with nothing
+drawn on it. The section now says that in as many words, including that there are no bytes to
+reconcile. Deleting it would have left a future reader to guess why 1.0.1 is followed by 1.1.0.
+
+### Gate of record at `5b6b026`
+
+`611 passed / 93 ignored` and `704 / 0` — both pins unmoved, which is the check that the bump
+changed a number and not a suite. fmt and clippy clean, `tsc` clean, vitest **113**. The
+`Compiling document-reader v1.1.0` line in both the cargo and clippy output is the evidence the
+new version string actually reached the build rather than only the manifests; a manifest edit
+that no compiler reads is the same class of error as an unpushed commit.
+
+### Dispatch
+
+Triggered **after** the push, from `p2-windows-test`, so the built commit is the one CI is
+testing and the one the notes describe. `workflow_dispatch` keeps its artifact and runs no attach
+step; the attach step is tag-gated and the tag is withheld. Run `42043910748`, commit `5b6b026`.
+
+### Next
+
+Watch CI and the dispatch to completion, confirm the artifact name is
+`DocuPro_1.1.0_x64-setup.exe`, record its sha256 in the notes and in this log, then halt. Phase
+close and the tag both wait on the user's hand-test (rule 1).
+
+### Closed out, `2026-11-05`
+
+- **CI `42043756021` at `5b6b026`** — Rust, Frontend, Windows smoke: all success.
+- **Dispatch `42043910748` at `5b6b026`** — success, step 10 (*Assert the PDFium tests actually
+  ran*) passed. Artifact `document-reader-windows-installer`, id `13425023885`, 10,421,207 bytes.
+- **Installer** `DocuPro_1.1.0_x64-setup.exe`, 10,437,206 bytes, sha256
+  `00933e1be51d70ad08e07f55d2d933bcf5e5651ee35258536224f8807bd521df`. Three independent readings
+  agree: filename, PE `FileVersion`, PE `ProductVersion`; `ProductName` is `DocuPro`.
+- **Windows count reconciled, not assumed.** The log's suites sum to **707**, which is not the
+  number to compare: the Windows job invokes `--test memory` (3) and `--test embed_acceptance` (1)
+  as their own steps *and* again inside the full `--include-ignored` run. 707 − 4 = **703**, and
+  local is 704 − 1 `#[cfg(unix)]` poppler test = 703. Exact, with every ignored count 0. A
+  four-test gap closed by addition rather than by assuming the duplicate steps were benign.
+
+### Standing state
+
+No tag, no publish, newest tag still `v1.0.1`. Phase close and the tag both wait on the user's
+hand-test (rule 1). The memory note for 2026-11-04 says the version question was open and the
+carriers were never dispatched; that is now stale in one respect worth flagging rather than
+silently editing — 1.1.0 *has* been dispatched, and the artifact exists.
