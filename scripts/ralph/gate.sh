@@ -102,9 +102,9 @@ fi
 # `add_many_refuses_an_unknown_document_and_writes_nothing`, and `a_replys_text_is_searchable`,
 # which closes DoD 3's requirement that a reply's text reach FTS. 25 + 3 = 28. Ignored stays
 # at 93: no PDFium-backed test changed shape.
-PIN_PLAIN_PASSED=609
+PIN_PLAIN_PASSED=611
 PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=702
+PIN_IGNORED_PASSED=704
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

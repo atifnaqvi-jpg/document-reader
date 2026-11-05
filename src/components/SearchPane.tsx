@@ -6,7 +6,11 @@ import { useIndexStatus } from "../hooks/useIndexStatus";
 interface Props {
   /** Used to label hits: the index stores ids, the UI shows titles. */
   entries: LibraryEntry[];
-  onOpenHit: (entry: LibraryEntry, page: number) => void;
+  /**
+   * `annotationId` is non-null only for a hit that came from an annotation (D-A12): the
+   * caller selects that row so the hit resolves to the mark, not merely to its page.
+   */
+  onOpenHit: (entry: LibraryEntry, page: number, annotationId: string | null) => void;
 }
 
 /** Debounce for the search box: typing should not fire a query per keystroke. */
@@ -88,7 +92,7 @@ export function SearchPane({ entries, onOpenHit }: Props) {
                 type="button"
                 onClick={() => {
                   const entry = entries.find((c) => c.id === hit.documentId);
-                  if (entry) onOpenHit(entry, hit.page);
+                  if (entry) onOpenHit(entry, hit.page, hit.annotationId);
                 }}
               >
                 <span className="search-title">{titleFor(hit.documentId)}</span>

@@ -256,10 +256,18 @@ function sameAddress(a: PageTextRun, b: PageTextRun): boolean {
 export function EditorProvider({
   documentId,
   page,
+  selectRequest,
   children,
 }: {
   documentId: string | null;
   page: number;
+  /**
+   * A jump from outside the provider -- a search hit naming an annotation (D-A12). The
+   * `nonce` makes the same id selectable twice: clicking the same hit again must move the
+   * selection back to it after the user has selected something else, and a bare id would
+   * not change state the second time.
+   */
+  selectRequest?: { id: string; nonce: number } | null;
   children: ReactNode;
 }) {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -312,6 +320,15 @@ export function EditorProvider({
     setStacks(stacksRef.current.get(docKey) ?? { undo: [], redo: [] });
     void refresh();
   }, [docKey, refresh]);
+
+  // A search hit naming an annotation selects it (P3.1 D-A12). Declared after the
+  // document-change effect above so it wins: opening a hit for a *different* document sets
+  // the selection in the same pass, and the reset to null would otherwise land last and
+  // clear the very row the user clicked.
+  useEffect(() => {
+    if (!selectRequest) return;
+    setSelectedId(selectRequest.id);
+  }, [selectRequest]);
 
   // Leaving text-edit mode, switching page or document drops the run selection: the run
   // addresses belong to one page of one document, and carrying one across would offer an

@@ -363,6 +363,77 @@ describe("EditorProvider: undo/redo bookkeeping", () => {
   });
 });
 
+describe("EditorProvider: a search hit selects its annotation (P3.1 D-A12)", () => {
+  /**
+   * A provider whose props the test can change.
+   *
+   * The props live in a plain object the wrapper closes over, and `rerender()` re-renders
+   * the tree so the wrapper reads the new values. A `<Harness>` element passed to
+   * `rerender` would not work: it would render its *own* provider, and the hook under test
+   * sits outside it, so the hook would keep reading the wrapper's original provider and the
+   * assertion would fail against correct code.
+   */
+  function mountWithProps(initial: Annotation[], props: { documentId: string }) {
+    const backend = installFakeBackend();
+    backend.on("list_annotations", () => initial.map((row) => ({ ...row })));
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+
+    const current = { documentId: props.documentId, selectRequest: null as null | { id: string; nonce: number } };
+    const view = renderHook(() => useEditor(), {
+      wrapper: ({ children }) => (
+        <EditorProvider
+          documentId={current.documentId}
+          page={0}
+          selectRequest={current.selectRequest}
+        >
+          {children}
+        </EditorProvider>
+      ),
+    });
+
+    const update = (next: Partial<typeof current>) => {
+      Object.assign(current, next);
+      view.rerender();
+    };
+    return { backend, view, update };
+  }
+
+  it("selects the row a hit names, and can select it again after another pick", async () => {
+    const { view, update } = mountWithProps([makeAnnotation({ id: "hit-me" })], {
+      documentId: "doc-1",
+    });
+    expect(view.result.current.selectedId).toBeNull();
+
+    update({ selectRequest: { id: "hit-me", nonce: 1 } });
+    await waitFor(() => expect(view.result.current.selectedId).toBe("hit-me"));
+
+    // The user picks something else, then clicks the same hit again. The nonce is what
+    // makes the second click an event: with a bare id the prop would be unchanged and the
+    // effect would not run, leaving the selection on whatever the user picked.
+    act(() => view.result.current.setSelectedId(null));
+    expect(view.result.current.selectedId).toBeNull();
+    update({ selectRequest: { id: "hit-me", nonce: 2 } });
+    await waitFor(() => expect(view.result.current.selectedId).toBe("hit-me"));
+  });
+
+  it("keeps the selection when the hit opens a different document in the same render", async () => {
+    // The ordering this guards: the document-change effect resets the selection to null,
+    // and opening a hit for another document changes the document *and* asks for a
+    // selection in the same render. If the reset ran last it would clear the row the user
+    // just clicked -- a bug that only appears cross-document, so a single-document
+    // assertion would stay green through it.
+    const { view, update } = mountWithProps(
+      [makeAnnotation({ id: "other-doc-row" })],
+      { documentId: "doc-1" },
+    );
+    await waitFor(() => expect(view.result.current.selectedId).toBeNull());
+
+    update({ documentId: "doc-2", selectRequest: { id: "other-doc-row", nonce: 1 } });
+    await waitFor(() => expect(view.result.current.selectedId).toBe("other-doc-row"));
+  });
+});
+
 describe("EditorProvider: error surface", () => {
   it("captures a backend rejection as an AppError instead of throwing", async () => {
     const { backend, view } = mountEditor();

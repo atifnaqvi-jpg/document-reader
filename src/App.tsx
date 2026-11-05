@@ -27,6 +27,9 @@ function Workspace() {
   const [error, setError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
   const [jump, setJump] = useState<JumpRequest | null>(null);
+  const [selectRequest, setSelectRequest] = useState<{ id: string; nonce: number } | null>(
+    null,
+  );
   // Which page the viewer is showing, reported up only so the EditorProvider can scope
   // its annotation list. The viewer remains the owner of its own page state.
   const [visiblePage, setVisiblePage] = useState(0);
@@ -78,12 +81,19 @@ function Workspace() {
 
   // A search hit selects a document and asks the viewer for a page. The nonce must change
   // even when the page does not, so clicking the same hit twice re-navigates.
-  const handleOpenHit = useCallback((entry: LibraryEntry, page: number) => {
-    setSelected(entry);
-    // A hit inside a note on another page has to move the viewer too, so annotation
-    // hits navigate exactly like text hits (D5c).
-    setJump((previous) => ({ page, nonce: (previous?.nonce ?? 0) + 1 }));
-  }, []);
+  const handleOpenHit = useCallback(
+    (entry: LibraryEntry, page: number, annotationId: string | null) => {
+      setSelected(entry);
+      // A hit inside a note on another page has to move the viewer too, so annotation
+      // hits navigate exactly like text hits (D5c).
+      setJump((previous) => ({ page, nonce: (previous?.nonce ?? 0) + 1 }));
+      // D-A12: a hit that names an annotation must also select it, so the hit resolves to
+      // the mark and not merely to its page. Held here rather than in the pane because the
+      // pane sits outside the provider; the nonce lets the same hit be reopened.
+      setSelectRequest((previous) => nextSelectRequest(annotationId, previous));
+    },
+    [],
+  );
 
   const handleNavigate = useCallback((where: NavigationTarget) => {
     const viewer = viewerRef.current;
@@ -149,7 +159,11 @@ function Workspace() {
           {/* The provider sits above both the palette and the viewer: the palette sets
               the tool, the viewer's overlay draws with it, and the provider needs the
               page the viewer is on. */}
-          <EditorProvider documentId={selected?.id ?? null} page={visiblePage}>
+          <EditorProvider
+            documentId={selected?.id ?? null}
+            page={visiblePage}
+            selectRequest={selectRequest}
+          >
             <EditorPane entry={selected} currentPage={visiblePage} />
             <ViewerPane
               ref={viewerRef}
@@ -170,6 +184,22 @@ function Workspace() {
       </main>
     </div>
   );
+}
+
+/**
+ * What a search hit asks the editor to select (P3.1 D-A12).
+ *
+ * Pulled out of the click handler so the branch is testable without rendering `App`, which
+ * needs a viewer and a PDF backend. A document hit must clear any pending selection rather
+ * than leave the previous one standing: otherwise clicking the book's text after a note
+ * would still highlight the note, and the two would disagree about what the hit meant.
+ */
+export function nextSelectRequest(
+  annotationId: string | null,
+  previous: { id: string; nonce: number } | null,
+): { id: string; nonce: number } | null {
+  if (annotationId === null) return null;
+  return { id: annotationId, nonce: (previous?.nonce ?? 0) + 1 };
 }
 
 export default function App() {

@@ -58,10 +58,15 @@ fn query_annotations(
     phrase: &str,
     limit: u32,
 ) -> Result<Vec<SearchHit>, AppError> {
-    // `column 2` is `content`, the only indexed column; the snippet markers match
-    // the document query so the UI can highlight both the same way.
+    // `column 3` is `content`; the snippet markers match the document query so the UI can
+    // highlight both the same way.
+    //
+    // It is 3, not 2, because `AnnotationSearch` carries two extra UNINDEXED columns ahead of
+    // `content` (`annotation_id`, `document_id`, `page`, `content`), where `Search` carries two
+    // (`document_id`, `page`, `content`). Asking for 2 here snippet-ised the *page* column:
+    // correct-looking, non-empty, and the page number where the matched text should be.
     let mut statement = connection.prepare(
-        "SELECT document_id, page, snippet(AnnotationSearch, 2, '[', ']', '…', 12), annotation_id
+        "SELECT document_id, page, snippet(AnnotationSearch, 3, '[', ']', '…', 12), annotation_id
            FROM AnnotationSearch
           WHERE AnnotationSearch MATCH ?1
           LIMIT ?2",
@@ -155,6 +160,7 @@ fn quote_phrase(phrase: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AnnotationKind, FreeTextMode};
 
     fn setup() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -337,6 +343,125 @@ mod tests {
         assert_eq!(hits[0].origin, SearchOrigin::Annotation);
         assert_eq!(hits[0].annotation_id.as_deref(), Some(note.id.as_str()));
         assert_eq!(hits[0].page, 2);
+    }
+
+    /// One row per text-bearing kind, each carrying a distinct needle.
+    ///
+    /// D-A12 asks that a hit in *each* text-bearing type resolve to page + id. The kinds are
+    /// listed here explicitly rather than generated from `AnnotationKind::as_str()`: the
+    /// point of the assertion is that the text-bearing set is known and enumerated, so a new
+    /// kind added to the enum shows up as a decision here rather than silently joining a loop.
+    const TEXT_BEARING: &[(AnnotationKind, &str, u32, &str)] = &[
+        (AnnotationKind::Note, "needle-note", 0, "sticky note"),
+        (
+            AnnotationKind::FreeText(FreeTextMode::Textbox),
+            "needle-textbox",
+            1,
+            "textbox",
+        ),
+        (
+            AnnotationKind::FreeText(FreeTextMode::Callout),
+            "needle-callout",
+            2,
+            "callout",
+        ),
+        (
+            AnnotationKind::FreeText(FreeTextMode::Typewriter),
+            "needle-typewriter",
+            3,
+            "typewriter",
+        ),
+        // A highlight carries no text of its own, but P2-D5 indexes whatever `text` the row
+        // holds, and the comment pane lets a user attach one to any kind. Included so the
+        // "markup with a comment" case is covered too.
+        (
+            AnnotationKind::Highlight,
+            "needle-highlight",
+            4,
+            "highlight with a comment",
+        ),
+    ];
+
+    #[test]
+    fn every_text_bearing_kind_produces_a_hit_that_resolves_to_its_page_and_id() {
+        // D-A12, and the reason this is not a tautology: `index_text` is called from `add`
+        // for whatever `text` the caller passed. If any kind's creation path stopped passing
+        // text, that kind would go quietly unsearchable and no existing test would notice --
+        // the only hit test in this module inserts a Note.
+        let mut connection = setup();
+        for (kind, needle, page, _what) in TEXT_BEARING {
+            crate::db::annotations::add(
+                &mut connection,
+                "d1",
+                *page,
+                *kind,
+                "{}".to_string(),
+                Some((*needle).to_string()),
+                1,
+            )
+            .unwrap();
+        }
+
+        for (kind, needle, page, what) in TEXT_BEARING {
+            let hits = query(&connection, needle, 10).unwrap();
+            assert_eq!(
+                hits.len(),
+                1,
+                "{what} ({kind:?}) produced no hit for {needle}"
+            );
+            assert_eq!(hits[0].origin, SearchOrigin::Annotation, "{what}");
+            assert_eq!(hits[0].page, *page, "{what} resolved to the wrong page");
+            assert!(
+                hits[0].annotation_id.is_some(),
+                "{what} hit carries no id, so it cannot jump to its annotation"
+            );
+            assert!(
+                hits[0].snippet.contains(needle),
+                "{what} snippet lost its match: {}",
+                hits[0].snippet
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_is_indexed_and_resolves_to_its_parents_page() {
+        // D-A12: "a reply is indexed with its parent's document/page". The reply lives on the
+        // parent's page by construction (the provider anchors it there), so this asserts that
+        // the page the hit reports is the one the viewer will jump to.
+        let mut connection = setup();
+        let parent = crate::db::annotations::add(
+            &mut connection,
+            "d1",
+            7,
+            AnnotationKind::Note,
+            "{}".to_string(),
+            Some("the question".to_string()),
+            1,
+        )
+        .unwrap();
+        crate::db::annotations::add(
+            &mut connection,
+            "d1",
+            parent.page,
+            AnnotationKind::Note,
+            serde_json::json!({"v": 1, "point": [1.0, 1.0], "parent": parent.id}).to_string(),
+            Some("a needle reply".to_string()),
+            2,
+        )
+        .unwrap();
+
+        let hits = query(&connection, "needle", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].origin, SearchOrigin::Annotation);
+        assert_eq!(hits[0].page, 7);
+        assert!(
+            // The match is wrapped by snippet(), so assert the marker rather than the raw
+            // phrase: `contains("needle reply")` fails on `a [needle] reply`, which is the
+            // correct output. Same trap as the A-4 substring assertion.
+            hits[0].snippet.contains("[needle]"),
+            "snippet: {}",
+            hits[0].snippet
+        );
     }
 
     #[test]
