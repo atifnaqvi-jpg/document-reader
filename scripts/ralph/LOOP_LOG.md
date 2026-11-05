@@ -1695,3 +1695,79 @@ historical document.
 A-10 (one test per text-bearing type, or reword its assertion), then P3.1's remaining rows.
 **Version ruling is PENDING at the user level**: 1.0.2 is reserved, the plan table says 1.1.0
 for P3.1. No bump and no tag until the user answers — the release-prep pulse follows that answer.
+
+---
+
+## P3.1 A-10 (search parity, D-A12) — green, P3.1 task list complete
+
+Landed `4e36346`, CI `41939678096` (Frontend success, Rust success, Windows success). A-10 was
+the last unchecked row in H5; with it ticked the P3.1 task list is complete.
+
+### The row was not a formality, and my 2026-11-04 reading of it was wrong
+
+Yesterday I checked A-10, decided the behaviour "looks right" because `index_text` has no kind
+filter, and left it unticked for want of tests. The tests found two defects that reading could
+not have:
+
+1. **`snippet(AnnotationSearch, 2, …)` read the wrong column.** `AnnotationSearch` is
+   `(annotation_id, document_id, page, content)`; `content` is column **3**, not 2. So every
+   annotation hit in the product displayed its *page number* as its snippet — non-empty,
+   plausible-looking, and not the matched text. The document table is a column shorter, which
+   is why the number 2 was right there and wrong here.
+2. **The UI dropped `annotationId`.** `onOpenHit(entry, hit.page)` — a hit inside a note
+   jumped to the correct page and selected nothing. Half of D-A12, and it looked complete
+   because the page was right.
+
+Both are the A-9 shape again: the visible half working hides the other half not. Recorded
+because the 2026-11-04 note asserted the opposite, and a future reader should not trust it.
+
+### Assertion 1 is also its own guardrail
+
+The kind list is written out (`Note`, three `FreeTextMode`s, a commented highlight) rather than
+generated from `AnnotationKind::as_str()`. A loop over the enum would pass today and pass again
+when a fourteenth kind arrives with no indexing path, because it would silently join the loop.
+Enumerating means a new kind lands here as a decision to make.
+
+### The cross-document ordering bug, and why only one test catches it
+
+Opening a search hit changes document *and* asks for a selection in the same render. The
+provider already had an effect that resets `selectedId` to null on document change. Effects run
+in declaration order, so the new selection effect must be declared *after* the reset, or the
+reset lands last and clears the row the user just clicked.
+
+The reordered mutant is caught by exactly one of the two provider tests — the cross-document
+one. A single-document test stays green through it. This is the same lesson as A-4's shared
+string builders and A-6's `kappa`: a mutant only proves something if a test exercises the
+configuration where the two orders differ.
+
+### Mutation record
+
+| Mutant | Outcome |
+|---|---|
+| `snippet(AnnotationSearch, 3` → `2` | CAUGHT (2 tests) |
+| `onOpenHit(…, hit.annotationId)` → `null` | CAUGHT (1 test) |
+| selection effect body gutted | CAUGHT (2 tests) |
+| selection effect moved before document reset | CAUGHT (1 test, cross-document only) |
+| document hit returns `previous` instead of `null` | CAUGHT (1 test) |
+
+Each substitution was asserted present in the file before the verdict was read. The Rust
+mutant ran through `scripts/mutate.sh`; the four frontend ones are vitest failures, where the
+harness's compile-step hazards do not apply but the "did the edit land" check still does.
+
+### Gate
+
+Plain **611** passed / 93 ignored (pins moved 609→611). `--include-ignored` **704** / 0 (pins
+moved 702→704; the unchanged 93 is pinned too, so a suite that started skipping fails instead
+of passing). vitest **113** across 8 files. `cargo fmt --check` and clippy `-D warnings` clean.
+Windows CI reports **703** passed, 0 ignored — local 704 minus the one `#[cfg(unix)]` poppler
+test, with both new Rust tests named `ok` in the Windows log rather than assumed.
+
+One correction during the work: my first commit message said vitest 115. The real count is 113,
+and it was amended. A test count in the record that does not match the run is the same class of
+error as an unpushed commit — the artifact disagrees with the claim.
+
+### Next
+
+P3.1's task list is complete. Phase close needs the installer hand-test (rule 1), which is not
+mine to do. Release version is a user decision and stays pending: the plan table names 1.1.0
+for P3.1, while 1.0.2 is reserved and never dispatched.

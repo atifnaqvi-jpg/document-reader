@@ -1220,18 +1220,37 @@ family. Then drawing, where D-A8 forces appearance-stream work.
       all caught — each re-run until the substitution was confirmed present, because a
       mutant that never applied reports SURVIVED on unchanged code.
 
-- [ ] **A-10 Search resolves a hit in each text-bearing type (D-A12).**
+- [x] **A-10 Search resolves a hit in each text-bearing type (D-A12).** Landed `4e36346`,
+      CI `41939678096` green (Frontend, Rust, Windows — all success).
       **NEW ASSERTION:** a query matching a textbox/callout/typewriter/reply body returns that
       annotation's page and id.
-      **State checked 2026-11-04, deliberately left unticked.** The *behaviour* looks right:
-      `db::annotations::index_text` has no kind filter, so a `FreeText` row is indexed exactly
-      as a `Note` row is, and `annotation_hits_are_tagged_and_carry_their_id` proves the hit
-      carries page and id. What is missing is the assertion as written: the only hit test
-      inserts `AnnotationKind::Note`, and no test indexes a textbox, callout or typewriter.
-      Ticking on "the code path is shared, so it must work" is the reasoning that produced the
-      D-A10 defect in A-9 — `skipped_existing` was also on the struct and also looked wired.
-      The row needs one test per named type, or the assertion reworded to say what is
-      actually proven. Not done here because it is a row of its own, not part of A-9.
+      **Assertion 1 — a hit in every text-bearing kind:**
+      `every_text_bearing_kind_produces_a_hit_that_resolves_to_its_page_and_id` inserts a note,
+      textbox, callout, typewriter and a commented highlight, then asserts for each that the
+      hit exists, is tagged `Annotation`, carries the row's page, carries an id, and has a
+      snippet containing the needled term. The kind list is written out rather than looped over
+      `as_str()`: the point is that the text-bearing set is *enumerated*, so a new kind arrives
+      as a decision here instead of silently joining a loop.
+      **Assertion 2 — a reply:** `a_reply_is_indexed_and_resolves_to_its_parents_page` (D-A12's
+      "a reply is indexed with its parent's document/page").
+      **Assertion 3 — the UI end:** `SearchPane.test.tsx` — an annotation hit passes its id to
+      the callback, a document hit passes `null`; `App.select.test.ts` — the id becomes a
+      nonce-bearing select request, and a document hit *clears* the previous selection;
+      `EditorProvider.test.tsx` — the request selects the row, works twice for the same id,
+      and survives a document change in the same render.
+      **Two defects the assertion found, both of which looked finished from the outside:**
+      `snippet(AnnotationSearch, 2, …)` addressed column 2, which is `page` — `content` is
+      column 3 there because that table carries an extra `annotation_id` ahead of the two
+      columns `Search` has. Every annotation hit was therefore displaying its page number as
+      its snippet. And the pane dropped `annotationId` entirely: the click called
+      `onOpenHit(entry, hit.page)`, so a hit inside a note jumped to the right page and
+      selected nothing — half of D-A12, and invisible because the page was correct.
+      So the row was not the "shared code path, so it must work" formality recorded on
+      2026-11-04. That reading was wrong in the same way A-9's was.
+      **Mutation coverage:** M41–M45, five mutants, all caught, each re-run until the
+      substitution was confirmed present — snippet column 3→2; `hit.annotationId`→`null`;
+      the selection effect gutted; the selection effect moved *before* the document reset
+      (caught by the cross-document test only); a document hit keeping the previous selection.
 
 **Not scheduled:** polygon/cloud (D-A1 names them; they need the same lopdf path as line and can
 follow without a new ruling).
