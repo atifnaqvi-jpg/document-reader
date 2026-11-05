@@ -13,6 +13,9 @@ import type {
 import { parseAnnotationData } from "../api/types";
 import { useEditor } from "../state/EditorProvider";
 import {
+  FREE_TEXT_INSET_POINTS,
+  FREE_TEXT_LEADING,
+  FREE_TEXT_SIZE_POINTS,
   MARK_RULE_THICKNESS,
   dragToRect,
   isDrawable,
@@ -667,6 +670,13 @@ function AnnotationMark({
       metrics.scale,
       metrics.pageHeightPoints,
     );
+    // The preview has to draw at the size the file will draw. The writer sets 12pt, so the
+    // on-screen font is 12 x zoom: a fixed 12px made the preview a different annotation from
+    // the one saved at every zoom except 1, which is why text typed into the box looked
+    // displaced once the page was zoomed. Line height and inset are the writer's own
+    // constants for the same reason -- the box in the file is padded by 2pt, not 3px.
+    const fontSize = FREE_TEXT_SIZE_POINTS * metrics.scale;
+    const lineHeight = fontSize * FREE_TEXT_LEADING;
     return (
       <button
         type="button"
@@ -682,6 +692,9 @@ function AnnotationMark({
           borderColor: colour,
           color: colour,
           pointerEvents: "auto",
+          fontSize,
+          lineHeight: `${lineHeight}px`,
+          padding: FREE_TEXT_INSET_POINTS * metrics.scale,
         }}
       >
         <span className="annotation-free-text">{annotation.text}</span>

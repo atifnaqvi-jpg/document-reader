@@ -1442,6 +1442,93 @@ mod tests {
         );
     }
 
+    /// A-11 (post-landing defect D1): the free-text `/Rect` and its `/AP /BBox` must describe
+    /// the same box, the way the ink pair already does.
+    ///
+    /// This is the guard whose absence let the 1.1.0 misalignment ship. Ink has
+    /// `the_ink_appearance_box_matches_the_annotation_rect`; free text had no equivalent, so
+    /// the caller could pass a width/height that was not the rect's and nothing noticed. It
+    /// still holds that invariant, and additionally pins the box's position so a flipped rect
+    /// (the classic y-flip bug) cannot pass by having the right size in the wrong place.
+    #[test]
+    fn the_free_text_appearance_box_matches_the_annotation_rect() {
+        let annotations = vec![free_text_row(
+            FreeTextMode::Textbox,
+            r##"{"v":1,"rect":[72,600,272,660],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        let rect: Vec<f32> = numbers(dictionary.get(b"Rect").unwrap());
+        let stream = appearance_stream_of(&document, dictionary);
+        let bbox: Vec<f32> = numbers(stream.dict.get(b"BBox").unwrap());
+
+        // The BBox is in the appearance's own space, so it starts at the origin and is the
+        // rect's *size*; the rect carries the position. Equal size is the invariant.
+        let rect_width = rect[2] - rect[0];
+        let rect_height = rect[3] - rect[1];
+        let (bbox_width, bbox_height) = (bbox[2] - bbox[0], bbox[3] - bbox[1]);
+        assert!(
+            (rect_width - bbox_width).abs() < 0.01 && (rect_height - bbox_height).abs() < 0.01,
+            "appearance box {bbox:?} does not match rect {rect:?}"
+        );
+        assert_eq!(
+            (bbox[0], bbox[1]),
+            (0.0, 0.0),
+            "a non-origin BBox would double-displace the text: the viewer already \
+             positions the form at /Rect"
+        );
+        // The stored rect must be the one the user swept, in PDF space: y grows upward, so a
+        // box drawn below the middle of the page has y0 < y1 and both inside the page box.
+        assert!(
+            rect[1] < rect[3] && rect[0] < rect[2],
+            "rect is inverted: {rect:?}"
+        );
+
+        // The text must actually land inside that box. `BBox` alone only says how big the
+        // frame is; the placement is in the stream.
+        let content = String::from_utf8_lossy(stream.content.as_slice()).to_string();
+        let first_td = content
+            .find(" Td")
+            .map(|at| content[..at].rsplit('\n').next().unwrap_or(""))
+            .expect("the stream must position the text");
+        let mut numbers_in_td = first_td.split_whitespace();
+        let _x = numbers_in_td.next();
+        let y: f32 = numbers_in_td
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no numeric y in {first_td:?}"));
+        assert!(
+            (0.0..=bbox_height).contains(&y),
+            "first baseline y={y} is outside the box height {bbox_height}"
+        );
+    }
+
+    /// A-11: a box shorter than one line still draws its text.
+    ///
+    /// The first baseline used to be the full font size unconditionally, so the truncation
+    /// check `baseline_from_top > height` fired on the very first line and the stream came out
+    /// with `BT` and `ET` and no `Tj` at all. The annotation was in the comment pane, in the
+    /// file, and invisible on the page. Found by rendering a real saved file through PDFium:
+    /// a 10pt-tall box produced zero dark pixels.
+    #[test]
+    fn a_free_text_box_shorter_than_one_line_still_draws_its_text() {
+        let annotations = vec![free_text_row(
+            FreeTextMode::Textbox,
+            r##"{"v":1,"rect":[72,600,272,610],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+        let stream = appearance_stream_of(&document, dictionary);
+        let content = String::from_utf8_lossy(stream.content.as_slice()).to_string();
+        assert!(
+            content.contains("Tj"),
+            "a 10pt box drew no text at all: {content:?}"
+        );
+    }
+
     fn ink_row(data: &str) -> Annotation {
         Annotation {
             id: "ink-1".to_string(),

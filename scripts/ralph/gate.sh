@@ -102,9 +102,15 @@ fi
 # `add_many_refuses_an_unknown_document_and_writes_nothing`, and `a_replys_text_is_searchable`,
 # which closes DoD 3's requirement that a reply's text reach FTS. 25 + 3 = 28. Ignored stays
 # at 93: no PDFium-backed test changed shape.
-PIN_PLAIN_PASSED=611
-PIN_PLAIN_IGNORED=93
-PIN_IGNORED_PASSED=704
+# 2026-11-05 (A-11 free-text defect): +6 in the plain shape (611 -> 617) and +3 ignored
+# (93 -> 96), and the --include-ignored shape +9 (704 -> 713). The six are the wrap and
+# short-box unit tests in `appearance.rs` plus the rect/BBox guard in `annotate.rs`; the
+# three are the new pixel tests in `tests/free_text_appearance.rs`, which need PDFium. The
+# include-ignored shape moves by all nine because it runs both sets. Measured, not computed:
+# `cargo test` reported 617/96 and `-- --include-ignored` 713/0 on this tree.
+PIN_PLAIN_PASSED=617
+PIN_PLAIN_IGNORED=96
+PIN_IGNORED_PASSED=713
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

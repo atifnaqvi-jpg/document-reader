@@ -436,16 +436,16 @@ button:disabled {
 }
 
 /* A free-text box: the frame is the writer's, but the viewer draws it too so the mark is
-   visible and targetable while it is selected. */
+   visible and targetable while it is selected. Font size, leading and inset are NOT set
+   here: they are the writer's constants scaled by zoom, and are applied inline by
+   `AnnotationOverlay`. A fixed size in the stylesheet made the preview disagree with the
+   saved file at every zoom but 1. */
 .kind-free-text {
   border: 1px solid;
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
-  padding: 2px 3px;
   background: none;
-  font-size: 12px;
-  line-height: 1.2;
   text-align: left;
   overflow: hidden;
 }

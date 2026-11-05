@@ -110,7 +110,11 @@ pub fn free_text_appearance(
     // An appearance stream's origin is the box's lower-left, so text starts near the top and
     // steps down. `Td` is relative to the current text position, hence the growing offset.
     let usable_width = (width - FREE_TEXT_INSET * 2.0).max(1.0);
-    let mut baseline_from_top = FREE_TEXT_SIZE;
+    // Clamped to the box height so the first line is always inside it. Starting at the full
+    // font size put every baseline past the bottom edge of a box shorter than one line, and
+    // the stream came out empty: an annotation listed in the comment pane and invisible on
+    // the page, which is the worst of both. The `/BBox` clips the descender.
+    let mut baseline_from_top = FREE_TEXT_SIZE.min(height);
     let mut placed = 0.0_f32;
 
     for line in wrap_to_width(text, usable_width, FREE_TEXT_SIZE) {
@@ -451,9 +455,15 @@ pub fn free_text_font() -> Dictionary {
     }
 }
 
-/// Greedy wrap at spaces. A word longer than the box is kept whole rather than cut:
-/// truncating mid-word would put a partial word on the page that the stored text does not
-/// contain.
+/// Greedy wrap at spaces, honouring the line breaks the user typed. A word longer than the
+/// box is kept whole rather than cut: truncating mid-word would put a partial word on the
+/// page that the stored text does not contain.
+///
+/// The typed breaks matter as much as the wrapping. Splitting the whole string on whitespace
+/// collapses `\n` into a space, so three lines typed with Enter came back as two re-flowed
+/// ones: the text moved up the box and the tail fell off the bottom, which is what "the text
+/// sits misaligned and is hidden" looks like on screen. A free-text box is a text area, and a
+/// text area keeps its hard breaks.
 fn wrap_to_width(text: &str, width: f32, size: f32) -> Vec<String> {
     // Width is estimated, not measured: an appearance stream has no metrics engine available,
     // and Helvetica averages roughly half its point size per character. A generous estimate
@@ -466,23 +476,25 @@ fn wrap_to_width(text: &str, width: f32, size: f32) -> Vec<String> {
     };
 
     let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.chars().count() + 1 + word.chars().count() <= max_chars {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(std::mem::take(&mut current));
-            current.push_str(word);
+    // A textarea usually ends with the newline the user pressed last. Keeping it would burn a
+    // row of a tight box on nothing, so one trailing break is dropped; interior ones stay.
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.chars().count() + 1 + word.chars().count() <= max_chars {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
         }
-    }
-    if !current.is_empty() {
+        // Pushed even when empty: a blank line the user typed has to occupy a row, or every
+        // line after it slides up the box.
         lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
     }
     lines
 }
@@ -589,6 +601,43 @@ mod tests {
             fonts.get(FREE_TEXT_FONT.as_bytes()).is_ok(),
             "the appearance must declare the font it draws with, or `Tf` names nothing"
         );
+    }
+
+    #[test]
+    fn typed_line_breaks_are_kept_as_separate_lines() {
+        // The reported 1.1.0 defect: three lines typed with Enter came back as two re-flowed
+        // ones, because the wrap split the whole string on whitespace and `\n` became a space.
+        // The `/Contents` kept the newlines, so the pane and the page disagreed about how many
+        // lines the annotation had, and the text moved up the box.
+        let lines = wrap_to_width("alpha\nbeta\ngamma", 196.0, 12.0);
+        assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn a_typed_blank_line_occupies_a_row() {
+        // Without this the line after a blank one slides up into its place.
+        let lines = wrap_to_width("alpha\n\nbeta", 196.0, 12.0);
+        assert_eq!(lines, vec!["alpha", "", "beta"]);
+    }
+
+    #[test]
+    fn one_trailing_newline_does_not_burn_a_row() {
+        // A textarea almost always ends with the final Enter. Keeping that empty paragraph
+        // would push a tight box's last real line out of view for nothing.
+        assert_eq!(
+            wrap_to_width("alpha\nbeta\n", 196.0, 12.0),
+            vec!["alpha", "beta"]
+        );
+        // An interior blank line is still a row: only the trailing one is dropped.
+        assert_eq!(
+            wrap_to_width("alpha\n\nbeta\n", 196.0, 12.0),
+            vec!["alpha", "", "beta"]
+        );
+    }
+
+    #[test]
+    fn a_single_typed_line_is_unchanged_by_the_break_handling() {
+        assert_eq!(wrap_to_width("one line", 196.0, 12.0), vec!["one line"]);
     }
 
     #[test]

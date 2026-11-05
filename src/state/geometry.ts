@@ -38,6 +38,21 @@ export const MIN_DIMENSION_POINTS = 0.5;
 export const NOTE_ICON_POINTS = 20;
 
 /**
+ * Font size a free-text box is written at, in points; mirrors `FREE_TEXT_SIZE` in
+ * `editor/annotate/appearance.rs`.
+ *
+ * The preview must multiply this by zoom. A fixed pixel size in the stylesheet made the
+ * on-screen box a different annotation from the saved one at every zoom but 1.
+ */
+export const FREE_TEXT_SIZE_POINTS = 12;
+
+/** Leading between lines, as a multiple of the font size; mirrors the writer's. */
+export const FREE_TEXT_LEADING = 1.2;
+
+/** Left/top inset of the text inside a free-text box, in points; mirrors the writer's. */
+export const FREE_TEXT_INSET_POINTS = 2;
+
+/**
  * UI pixels -> PDF points. `pageHeightPoints` is the unrotated page height.
  *
  * The y flip is `pageHeight - y` rather than `-y`: annotations are positioned within
