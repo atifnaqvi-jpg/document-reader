@@ -1856,3 +1856,46 @@ No tag, no publish, newest tag still `v1.0.1`. Phase close and the tag both wait
 hand-test (rule 1). The memory note for 2026-11-04 says the version question was open and the
 carriers were never dispatched; that is now stale in one respect worth flagging rather than
 silently editing — 1.1.0 *has* been dispatched, and the artifact exists.
+
+---
+
+## A-11 free-text defect — pushed on the user's word, `2026-11-07`
+
+### The push
+
+The two A-11 commits (`d05b7db` the fix, `e49dc8b` the before/after raster) sat unpushed at the
+end of the 2026-11-05 session because the standing order reserves the push for the user. The user
+gave the word; the operator executed it at **2026-11-07 01:40Z**, moving `origin/p2-windows-test`
+`426c69a..e49dc8b`. Verified locally, not taken on report: `git rev-parse origin/p2-windows-test`
+and `HEAD` both return `e49dc8b86a7cd67f158c4649cecd020884454ab0`, worktree clean. A two-commit
+push produced **one** CI run, on the tip — there is no separate run for `d05b7db`, and a missing
+run there is not a skipped gate, only how a branch push batches.
+
+### The stale dispatch — the one to read twice
+
+Run **`42325198969`**, *Release (Windows installer)*, `workflow_dispatch`, started **01:39:03Z**
+— **one minute before the push landed and building `426c69a`, the pre-fix tree.** Whoever triggered
+it fired before `e49dc8b` existed on origin, so it checks out without any of the four fixes. Its
+artifact is a 1.1.0 installer that still hides text in a short note box. **Do not use it for the
+re-test**, and do not compare a failure against it. Nothing is wrong with the run; it is simply
+answering a question asked one minute too early.
+
+The re-test build must come from `e49dc8b` or later, so a fresh **build-only** `workflow_dispatch`
+was fired at **01:42:09Z** on `p2-windows-test`: run **`42325474926`**, head `e49dc8b`.
+`workflow_dispatch` keeps its artifact and runs no attach step (the attach step is tag-gated, and
+the tag is withheld), so this builds the fix without publishing anything.
+
+### Why this defect is worth a row of its own
+
+A-3 shipped three guards that all passed. They read the appearance stream, and a stream containing
+`BT`/`ET` with no `Tj` is *legal PDF that draws nothing* — every assertion about the stream is
+satisfied and the user sees an empty box. Nothing between A-3 and here ever rasterised a saved
+file. `tests/free_text_appearance.rs` now does, and it is the assertion that would have caught
+this on the day.
+
+### Next
+
+Both runs watched to completion below; the A-11 row in `IMPLEMENTATION_PLAN.md` ticked with the
+run id and the four mutation-verified guards. No tag, no publish — the v1.1.0 tag waits on the
+user's re-test of the **new** build, per the standing order.
+
