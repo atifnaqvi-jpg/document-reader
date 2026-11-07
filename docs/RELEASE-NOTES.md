@@ -9,10 +9,10 @@ the version in `Cargo.toml` has a section here.
 
 ## 1.1.0
 
-**P3.1 — annotations breadth. Built, not yet released: no `v1.1.0` tag exists and nothing is
-published under this number.** The installer comes from a build-only `workflow_dispatch` run
-(the attach step is tag-gated, and a tag is what the hand-test withholds). Provenance is in
-"Hand-test provenance" below, and it says *pending* until a human has run the bytes.
+**P3.1 — annotations breadth. Released.** Tagged `v1.1.0` after the hand-test passed: the user
+ran the build-only dispatch artifact and reported the note box fixed. Provenance, including the
+dispatch the human actually ran and the fact that the tag is one docs-only commit past it, is in
+"Hand-test provenance" below.
 
 This is the first release a user can feel as an annotation product. Before it, the palette was
 five markup types and a note; the comment surface did not exist.
@@ -84,18 +84,78 @@ a v2 blob is **skipped** by an older reader rather than misread. That is the pro
 a 1.0.x install and a 1.1.0 install share a database during the transition without corrupting
 each other's rows.
 
+### Two defects found after these notes were first written, and fixed before the tag
+
+Both were reported by the user hand-testing a build of this version. Neither is in the feature
+list above, and both would have shipped: the notes were written, the installer was built, and
+only then did a human open the product and find them. They are recorded here rather than being
+folded into "what it ships", because the sequence is the point — the notes claimed a version
+that a person had not yet used.
+
+**A-11 — the free-text note box hid its own text** (`d05b7db`, `e49dc8b`). Typed text in a note
+did not appear where it was typed, and at small zoom a box could look like it fitted text the
+saved file would overflow. Four independent causes, each measured against real Chromium and a
+PDFium raster of the saved file rather than reasoned about:
+
+1. The preview drew at a fixed `12px` while the writer draws `12pt × zoom`, so preview and file
+   agreed only at 100%. The mismatch was measured across zoom 0.5–3 as 6/12/24/36px in the file
+   against a constant 12px on screen. Preview metrics now come from the writer's own constants.
+2. Typed newlines collapsed: the wrapper split on whitespace, so three typed lines were written
+   as two re-flowed ones. `/Contents` kept the newlines and the page did not.
+3. A box shorter than one line drew **nothing** — a legal PDF with an empty appearance stream,
+   which no stream-level assertion can catch.
+4. Free text had no `/Rect`-versus-`/BBox` guard, though ink already had one.
+
+The guards are the part worth knowing about: three of them had passed throughout, because
+reading the appearance stream cannot tell you a box renders its text off the page. The one that
+catches it rasterises the saved file through PDFium and counts ink
+(`tests/free_text_appearance.rs`), and borderless typewriter mode is used for ink-only claims
+because a bordered box's own frame satisfies "something was drawn" from the wrong cause. Rendered
+before/after: `docs/evidence/free-text-before-after.png`.
+
+**A-11b — the note-prompt textarea sat flush against its top border** (`be00673`). Found on a
+build that already contained A-11: typed text overlapped the top border and the first line was
+half-clipped. The saved file was correct — A-11's pixel tests proved that — so this was editor
+chrome, a different surface from the free-text mark, sharing no rule with it.
+
+The cause, measured on the live element: `.page-stage` sets `line-height: 0` so it can shrink-wrap
+the page raster, and the textareas said `font: inherit`. That is a *shorthand*, so it re-applied
+the inherited zero along with the family and size — computed `lineHeight` was `"0px"` against a
+14px font. Every line box was zero pixels tall, lines drew at the same y overprinting each other,
+and the first hung above the content box where the border clipped it. A named `line-height` is
+what overrides a shorthand; `padding` supplied the inset the control had never had. Guarded by
+four tests in `tests/app_css_chrome.rs`, each mutation-verified. Rendered before/after:
+`docs/evidence/note-prompt-before-after.png`.
+
+Both fixes are in the installer this release publishes. Version stays `1.1.0`: these are defects
+in a version no user had received, fixed inside its own hand-test cycle, not a new feature set.
+
 ### Gates
 
-Facts about the tree this section describes. The numbers were measured at `72c7ed2`, then
-re-measured after the bump at `5b6b026` — a version bump that moved a suite would be a different
-tree than the one described — and `5b6b026` is green in CI run `42043756021`, all three jobs.
+Facts about the tree this section describes. Numbers were measured at `72c7ed2`, re-measured
+after the version bump at `5b6b026`, and re-measured again after the A-11 and A-11b fixes at
+`be00673` — a bump or a test that moved a suite would be a different tree than the one
+described. The numbers below are the tagged tree's; the hand-tested bytes come from `be00673`,
+which carries two fewer tests (621/96 and 717) because the two release-body guards were written
+after that build.
 
 | Shape | Result |
 |---|---|
-| `cargo test` (Linux, PDFium present) | **611 passed, 93 ignored** |
-| `cargo test -- --include-ignored` (Linux, PDFium present) | **704 passed, 0 ignored** |
-| Windows CI, `-- --include-ignored` | **703 passed, 0 ignored** |
-| Frontend | vitest **113**, `tsc` and `vite build` clean |
+| `cargo test` (Linux, PDFium present) | **623 passed, 96 ignored** |
+| `cargo test -- --include-ignored` (Linux, PDFium present) | **719 passed, 0 ignored** |
+| Windows CI, `-- --include-ignored` | **718 passed, 0 ignored** |
+| Frontend | vitest **117**, `tsc` and `vite build` clean |
+
+The Windows figure is one lower **by construction, not by a skip**: one test is gated
+`#[cfg(unix)]` because it drives poppler's CLI tools, which are a Unix install here, and Windows
+runs the PDFium equivalent instead. Both shapes are pinned in `scripts/ralph/gate.sh`, including
+the unchanged ignored count — a suite that started skipping would move that pin and fail.
+
+These counts moved three times after the notes were first written: A-11 added six non-PDFium
+tests and three PDFium pixel tests (`611/93 → 617/96`, include-ignored `704 → 713`), A-11b added
+four stylesheet guards (`→ 621/96`, `→ 717`), and preparing the tag added two release-body
+guards (`→ 623/96`, `→ 719`). The frontend count moved `113 → 117` when A-11 added
+`FreeTextPreview.test.tsx`.
 
 The Windows figure is one lower **by construction, not by a skip**: one test is gated
 `#[cfg(unix)]` because it drives poppler's CLI tools, which are a Unix install here, and Windows
@@ -116,6 +176,14 @@ bitten this programme already.
   Six subsequent full gate runs and five direct suite runs were green. My first read of it was
   wrong in a way worth keeping: `... | tail -3; echo $?` reports *tail's* exit status, so the
   `0` said nothing about the gate. Recorded as unexplained rather than called a flake.
+- **The release body was hardcoded, so v1.0.1 shipped a false headline.** Its Releases page
+  says *"Document Reader 1.0.0 — line-level reflow; text editing is complete"* over a tag three
+  phases past that. The asset, the tag and `RELEASE-NOTES.md` were all correct; only the one
+  sentence a visitor reads first was not, because nothing read it. Fixed here and guarded by
+  `the_release_body_names_the_version_being_published` and
+  `the_release_body_does_not_advertise_a_previous_phases_subject`. **v1.0.1 itself is not
+  republished** — its tag and asset are what they were, and rewriting a published release's
+  body would edit the record of what shipped rather than record it.
 - **The rebuild delta.** An installer rebuilt from the identical commit is not byte-identical:
   1.0.1's published asset differs from its hand-tested artifact by 221 bytes, 1.0.0's by 3,748.
   The provenance claim is about the **source commit**, which is exact; it cannot make the binary
@@ -134,18 +202,20 @@ scheduled. Nothing in this release changes the fact that the application is Wind
 
 ### Hand-test provenance
 
-**Status: pending. Nothing below claims a human has run these bytes.**
+**Status: hand-tested and accepted. The tag follows the confirmation, not the build.**
 
 Built by a **build-only** `workflow_dispatch` run on `p2-windows-test`; a dispatch keeps its
-artifact and publishes no release, which is why the tag can wait for the hand-test.
+artifact and publishes no release, which is why the tag could wait for the hand-test.
 
 | Field | Value |
 |---|---|
-| Dispatch run | `42043910748` at `5b6b026`, build-only (`workflow_dispatch`), 2026-11-05 |
-| Artifact | `document-reader-windows-installer`, id `13425023885`, 10,421,207 bytes |
-| File | `DocuPro_1.1.0_x64-setup.exe`, 10,437,206 bytes |
-| SHA-256 | `00933e1be51d70ad08e07f55d2d933bcf5e5651ee35258536224f8807bd521df` |
-| Expires | 2027-02-03 |
+| Dispatch run | `42331384386` at `be00673`, build-only (`workflow_dispatch`), 2026-11-07 |
+| Artifact | `document-reader-windows-installer`, id `13557413255`, 10,432,931 bytes |
+| File | `DocuPro_1.1.0_x64-setup.exe`, 10,448,919 bytes |
+| SHA-256 | `5bbd6c00e9f08a6e6de29465b7b997a73badc9b2e29174ed8e04e65f92db4f05` |
+| CI on that commit | `42331300847`, all three jobs, Windows green on the first attempt |
+| Hand-test verdict | *"Note works fine — the reported note-box text defect is fixed on the new build."* |
+| Tagged commit | `2ece9bc` (docs-only, one commit past `be00673`; see below) |
 
 Three independent readings agree on the version before anyone runs it: the **filename**, the PE
 **`FileVersion`** resource and the PE **`ProductVersion`** resource all say `1.1.0`, and
@@ -156,9 +226,25 @@ The dispatch reached step 10, *Assert the PDFium tests actually ran*, successful
 gate that caught the Windows crash at 0.9.1 — so the Windows suite ran at this version rather
 than skipping.
 
-The tag is cut only after that run is hand-confirmed, and it is cut **at the commit the dispatch
-built from** — not at whatever `HEAD` has become — because the confirmed bytes and the tag must
-be the same claim. That is the order 0.9.0 recorded and 1.0.1 followed.
+**The tag is one docs-only commit past the hand-tested build, and that is a deliberate departure
+from the 0.9.0/1.0.1 order.** Those releases cut the tag at exactly the dispatch's commit. Here
+the hand-test verdict, the corrected counts and this section were written *after* the build, and
+putting a tag on `be00673` would publish a release whose notes still said "not yet released" and
+carried `611/93` from a tree two defect-fixes old. So the amendment landed first and the tag sits
+on it. Nothing in the delta can change behaviour: `2ece9bc` touches `docs/RELEASE-NOTES.md` and
+`scripts/ralph/LOOP_LOG.md` only, and CI `42332240342` is green on it. The bytes a human ran are
+still built from `be00673`, which is why that SHA is in the table above rather than the tag's.
+
+A **second build-only dispatch** is run from the tagged commit so the equivalence is checkable
+rather than asserted — there is then a dispatch record of the tag's own commit, not only of the
+commit the hand-test ran. It publishes nothing, per the tag-gated attach step; its run id is
+recorded in `scripts/ralph/LOOP_LOG.md` rather than here, because this section is committed
+before that run exists and a number written now could only be guessed.
+
+**Do not compare this release's asset against the hand-tested zip byte-for-byte.** An installer
+rebuilt from the identical commit is not byte-identical — 1.0.1 differs from its own hand-tested
+artifact by 221 bytes and 1.0.0 by 3,748. The claim this table makes is about the **source
+commit**, which is exact, and it cannot make the binary reproducible.
 
 ---
 

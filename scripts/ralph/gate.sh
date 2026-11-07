@@ -113,9 +113,11 @@ fi
 # shared selector, the line-height override, the top inset, and the guard that the free-text
 # preview keeps its metrics out of the stylesheet. None touch PDFium, so ignored stays 96.
 # Measured, not computed: 621/96 and 717/0 on this tree.
-PIN_PLAIN_PASSED=621
+# 2026-11-07 (v1.1.0 tag prep): +2 in both shapes, 621 -> 623 and 717 -> 719, for the two
+# release-body guards in `tests/release_workflow.rs`. Measured: 623/96 and 719/0.
+PIN_PLAIN_PASSED=623
 PIN_PLAIN_IGNORED=96
-PIN_IGNORED_PASSED=717
+PIN_IGNORED_PASSED=719
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

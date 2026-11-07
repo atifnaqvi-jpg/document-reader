@@ -147,9 +147,15 @@ jobs:
           files: src-tauri/target/release/bundle/nsis/*.exe
           generate_release_notes: true
           prerelease: false
+          # The headline is written per tag, not once. v1.0.1 published with 1.0.0's
+          # headline still in place -- "Document Reader 1.0.0 -- line-level reflow" under a
+          # tag three phases past it -- because the string was hardcoded and no guard read it.
+          # Describe the version this tag publishes; `generate_release_notes: true` still adds
+          # the commit list below it.
           body: |
-            **Document Reader 1.0.0** — line-level reflow; text editing is complete against
-            the parity table. See
+            **Document Reader 1.1.0** — annotation breadth: thirteen annotation types, a
+            comment pane with statuses and reply chains, XFDF import/export, and search that
+            resolves an annotation rather than only its page. See
             [the release notes](https://github.com/atifnaqvi-jpg/document-reader/blob/main/docs/RELEASE-NOTES.md)
             for what changed, what is still refused, and the phase's acceptance record.
 

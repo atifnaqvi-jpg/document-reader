@@ -443,6 +443,147 @@ fn a_tag_publishes_a_full_release_since_1_0_0() {
     );
 }
 
+/// The published release body must name the version this tag actually publishes.
+///
+/// v1.0.1 published with `**Document Reader 1.0.0** — line-level reflow` as its headline. The
+/// text was hardcoded when 1.0.0 was the shipping version and nothing read it again, so a tag
+/// three phases later described the wrong product: a user arriving from the Releases page was
+/// told this was a text-editing release when it was an annotations release. The asset, the tag
+/// and the notes were all correct; only the sentence humans actually read was wrong.
+///
+/// A hardcoded string cannot be right for more than one version, so this asserts the body
+/// carries the version in `Cargo.toml` — the same carrier `release_version.rs` holds the other
+/// six to. It reads the body out of the publish step's `with:` block via `publish_input`, which
+/// already skips comments, so a version mentioned in the explanatory comment above the block
+/// cannot satisfy it.
+#[test]
+fn the_release_body_names_the_version_being_published() {
+    let text = workflow();
+    let body = publish_body(&text).expect(
+        "the publish step must carry a `body:`; without one GitHub publishes an empty page",
+    );
+
+    let version = publish_version();
+    assert!(
+        body.contains(&version),
+        "the release body must name {version}, the version in Cargo.toml. It says: {body:?}. \
+         A hardcoded headline published v1.0.1 under 1.0.0's description."
+    );
+}
+
+/// The body must not still advertise the phase 1.0.0 closed, unless 1.0.0 is what ships.
+///
+/// The version check above is satisfied by a body naming both versions, which is exactly what
+/// a careless edit produces. This is the other half: the phrase 1.0.1 wrongly shipped with must
+/// be absent while the tree is past 1.0.0.
+#[test]
+fn the_release_body_does_not_advertise_a_previous_phases_subject() {
+    let body = publish_body(&workflow()).expect("the publish step must carry a `body:`");
+    if publish_version() == "1.0.0" {
+        return;
+    }
+    assert!(
+        !body.contains("line-level reflow"),
+        "the release body still calls this a line-level reflow release, which was 1.0.0's \
+         subject. 1.0.1 published that way by accident; it must not happen again."
+    );
+}
+
+/// Reads `version` from `[package]` in `Cargo.toml`, the same source `release_version.rs` uses
+/// to hold all six carriers together.
+fn publish_version() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = line.strip_prefix("version") {
+                return rest
+                    .trim_start_matches([' ', '='])
+                    .trim_matches('"')
+                    .to_string();
+            }
+        }
+    }
+    panic!("no `version` key under `[package]` in Cargo.toml");
+}
+
+/// The publish step's `body:` **as text**, handling the block scalar it is written as.
+///
+/// `publish_input` returns the raw value on the key's line, which for `body: |` is just `"|"` —
+/// the content is in the indented lines below. Comparing a version against `"|"` would fail for
+/// every possible version, so this needs its own reader rather than a loosened `publish_input`.
+///
+/// The block ends at the first non-blank line indented no deeper than the key. Blank lines are
+/// kept because the body relies on them for paragraph breaks; trailing blank lines are dropped
+/// so the returned text compares cleanly.
+fn publish_body(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let uses = lines.iter().position(|line| {
+        let code = line.split('#').next().unwrap_or("").trim();
+        code.starts_with("uses:") && code.contains("softprops/action-gh-release")
+    })?;
+    let uses_indent = lines[uses].len() - lines[uses].trim_start().len();
+
+    let mut with_indent: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate().skip(uses + 1) {
+        let code = line.split('#').next().unwrap_or("");
+        if code.trim().is_empty() {
+            continue;
+        }
+        let indent = code.len() - code.trim_start().len();
+        let item = code.trim();
+        if indent <= uses_indent {
+            if item.starts_with("- ") || indent < uses_indent {
+                break;
+            }
+            if item.trim_end_matches(':') == "with" {
+                with_indent = Some(indent);
+                continue;
+            }
+            with_indent = None;
+            continue;
+        }
+        let Some(w) = with_indent else { continue };
+        if indent <= w {
+            with_indent = None;
+            continue;
+        }
+        let Some(rest) = item.strip_prefix("body:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if !(rest == "|" || rest == ">") {
+            // Inline body; nothing to unindent.
+            return Some(rest.to_string());
+        }
+        // Block scalar: take every following line indented deeper than the key.
+        let mut body: Vec<&str> = Vec::new();
+        for follow in &lines[i + 1..] {
+            if follow.trim().is_empty() {
+                body.push("");
+                continue;
+            }
+            let ind = follow.len() - follow.trim_start().len();
+            if ind <= indent {
+                break;
+            }
+            body.push(follow.trim());
+        }
+        while body.last() == Some(&"") {
+            body.pop();
+        }
+        return Some(body.join("\n"));
+    }
+    None
+}
+
 /// Guard the parser, so a matcher that finds nothing cannot make the test above pass by
 /// reading a `None` that looks like an expected absence.
 #[test]
