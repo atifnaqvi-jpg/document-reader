@@ -2163,3 +2163,47 @@ lands**, because the plan is the authority the phase is judged against.
 
 **Stage gate held.** No implementation code, no version bump, no guards beyond the registration,
 no dispatch. Carriers verified still `1.1.1`.
+
+## 2026-11-07 — P3.2 SCOPE-A landed; CI caught a guard that was green only on my machine
+
+`protect_save` is in (`270742c`): lopdf V4 (AES-128, rev 4), password + seven explicit
+permission bits, sibling `(protected)` copy through the existing atomic write. `I-PR1` is
+verified from the write side — the function reopens the file **from disk** with its password
+and compares page count and text before returning, and deletes the copy if that fails.
+
+**Both CI jobs went red on one citation, and the reason is worth keeping.** The design doc
+cited `src-tauri/resources/libpdfium.so`. That file exists on this box and is **untracked**, so
+`governed_docs_cite_only_paths_that_exist` — which resolves against the working tree — passed
+locally and failed on the runner, taking the Windows job down with it because that job runs the
+whole suite. The lesson is about the guard's authority, not about the doc: **a path guard
+reads the checkout, so any citation of an untracked local artefact is green here and red on
+CI.** The `.so` is a build input that a fresh clone does not have; it must be described, never
+cited as a repository path. Fix: the fact that depends on it (`nm -D` finds 0 redaction
+symbols) now names "the bundled PDFium library" instead.
+
+**Two runtime mutations survived before a real guard was found** — the part of this turn worth
+re-reading:
+1. Moving `compress()` after `encrypt()` changed nothing, because the writer already refuses
+   object streams for an encrypted document. Equivalent mutant, not a hole.
+2. Appending an object after `encrypt()` changed nothing *in the tests* either, and the test
+   that should have caught it (`the_protected_output_does_not_leak_plaintext`) was looking at
+   a different string. A probe settled it: the appended object **did** appear verbatim in the
+   output bytes. The hazard is real; a content-level test cannot see it, because a leaked
+   object is reachable from nowhere and says nothing.
+So the guard is source-level (`protect_ordering.rs`): it reads the statements between
+`encrypt()` and `save_to()` and forbids any write, rename, renumber, compress or trailer edit
+there. It fails closed if either marker moves. That mutation is now CAUGHT.
+
+**`protecting_an_already_protected_file_is_refused` needed three attempts**, and each failure
+is a different way a test lies. (1) `is_err()` — green with the guard deleted, because
+`Document::load` fails on an encrypted file anyway. (2) asserting the word "already" — still
+green with the guard deleted, because that matched *lopdf's own* message, "PDF document is
+already encrypted". (3) asserting our own wording — CAUGHT. What the explicit guard actually
+buys is a usable message before the document is re-serialised, so that is what the test pins.
+Measured fact worth keeping: **lopdf already refuses double encryption**, so this guard is
+defence-in-depth with better wording, not the only barrier.
+
+Counts after SCOPE-A, reconciled against the CI shapes rather than assumed:
+with the library and `--include-ignored`, **728 passed / 0 failed / 0 ignored**; the Linux CI
+shape (no library, default run) is **627 passed / 101 ignored**, still above the 624 floor.
+The +8 is five `#[ignore]`d PDFium tests and three non-ignored ordering tests.
