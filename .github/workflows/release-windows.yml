@@ -157,10 +157,17 @@ jobs:
           # until v1.1.0, and `main` is 67 commits behind and its newest section is 0.9.0 -- so
           # v1.0.0, v1.0.1 and v1.1.0 all linked to a page that never mentioned their release.
           # A tag ref cannot rot the same way: the notes at the tag are the notes for it.
+          #
+          # 1.1.1 is a development number and must never be tagged. The body below names it
+          # anyway, because `the_release_body_names_the_version_being_published` holds this
+          # string to the version in Cargo.toml, and a body still claiming 1.1.0 under a 1.1.1
+          # tree is the stale-headline defect (v1.0.1 published that way). Whoever bumps to
+          # 1.2.0 rewrites this whole block for that phase -- the guard is what makes them.
           body: |
-            **Document Reader 1.1.0** — annotation breadth: thirteen annotation types, a
-            comment pane with statuses and reply chains, XFDF import/export, and search that
-            resolves an annotation rather than only its page. See
+            **Document Reader 1.1.1** — development version, not a release. It carries one
+            fix: the "release notes" link below now resolves to the tag being published instead
+            of to a branch, which had pointed every release since v1.0.0 at a page that never
+            mentioned it. See
             [the release notes](https://github.com/atifnaqvi-jpg/document-reader/blob/${{ github.ref_name }}/docs/RELEASE-NOTES.md)
             for what changed, what is still refused, and the phase's acceptance record.
 

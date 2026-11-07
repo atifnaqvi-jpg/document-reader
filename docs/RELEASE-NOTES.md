@@ -7,6 +7,47 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 1.1.1
+
+**Development version. Not a release: no tag, no installer, no hand-test.** It exists to give
+the tree a version number ahead of the highest published tag, which is what lets the next
+commit land at all.
+
+### What it carries
+
+One fix, written during the v1.1.0 tag and then refused by the tree's own guard.
+
+- **The release-page notes link now points at the tag, not at a branch.** v1.1.0 published a
+  link to `blob/main/docs/RELEASE-NOTES.md`. `main` is 67 commits behind `p2-windows-test` and
+  its newest section is `0.9.0`, so the link under v1.1.0 — and under v1.0.0 and v1.0.1 before
+  it — landed on a page that never mentioned the release the reader came from. The link now
+  interpolates `github.ref_name`: the notes committed at the tag are the notes for that tag, and
+  a tag cannot drift away from itself the way a branch does. Guarded by
+  `the_notes_link_points_at_the_tag_not_a_branch`, mutation-verified by restoring `blob/main`.
+
+The fix is **forward-only by design**. v1.1.0's published body still carries the old link.
+Rewriting a published release body would edit the record of what actually shipped, which is the
+one thing a release page is for; the defect is fixed where the next publish reads it.
+
+Why it could not land on 1.1.0: `the_tree_version_is_ahead_of_every_published_tag` refuses any
+untagged commit whose carriers still name a published tag. Once `v1.1.0` existed, a commit
+carrying `1.1.0` was indistinguishable from the released one. The guard was right and the work
+was parked on a branch rather than forced past it. This section and the bump are that branch
+riding in.
+
+Not in this version: nothing else. `1.1.1` is a number reserved for the tree's own bookkeeping.
+P3.2 keeps `1.2.0` per the plan.
+
+Gate counts at this version: plain `624 passed / 96 ignored`, `--include-ignored`
+`720 passed / 0 ignored` — the pins in `scripts/ralph/gate.sh`, each moved +1 for the notes-link
+guard. Vitest unchanged at 9 files / 117 tests.
+
+- The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+- Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
+  and `release-windows.yml`.
+
+---
+
 ## 1.1.0
 
 **P3.1 — annotations breadth. Released.** Tagged `v1.1.0` after the hand-test passed: the user

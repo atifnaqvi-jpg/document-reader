@@ -2070,3 +2070,42 @@ publish body had to be corrected. What the delta does not touch is `src-tauri/sr
 the installer a human accepted is still what ships; but the weaker, true statement replaces the
 stronger, false one. Recorded in the notes rather than quietly dropped, because "the tag is
 exactly the bytes a human ran" is the claim a release is supposed to be able to make.
+
+---
+
+## 2026-11-07 — v1.1.0 published; P3.1 closed; 1.1.1 bump
+
+**Release.** `v1.1.0` tagged at `8950403`, published as a full release with the Windows
+installer attached. Tag evidence (dispatch, artifact, sha-256, the hand-test verdict verbatim)
+is in `docs/RELEASE-NOTES.md` §1.1.0 and `docs/P3-PLAN.md` §1.
+
+**The publish body's headline was still 1.0.0's.** Found while preparing the tag, not planned
+for: the string was hardcoded when 1.0.0 shipped, so `v1.0.1` published three phases later under
+"line-level reflow" and `v1.1.0` would have repeated it. Nothing read that string. Two guards now
+do, both mutation-killed by restoring the exact body `v1.0.1` shipped. The live body reads
+"Document Reader 1.1.0 — annotation breadth…".
+
+**A second defect, and a guard that refused its fix.** v1.1.0's release page links its notes at
+`blob/main/docs/RELEASE-NOTES.md`; `main` is 67 commits behind and its newest section is `0.9.0`,
+so v1.0.0, v1.0.1 and v1.1.0 all linked to a page that never mentioned them. The fix
+interpolates `github.ref_name`. `release_version.rs` then refused it: once `v1.1.0` existed, no
+untagged commit could still carry `1.1.0`. The guard was right, so the fix was **parked** on
+`fix-1.1.1-notes-link` (`bc5fae1`, pins 624/720) instead of forced past it, and the branch was
+reverted to the tag so the published tree stayed clean.
+
+**The bump, and the ride.** `1.1.1` across all six carriers, `## 1.1.1` written as a development
+version (no tag, no installer, no hand-test), and `bc5fae1` fast-forwarded in — so the notes-link
+fix and its two guard updates land on a version number that can legally carry them. The publish
+body moved with the carriers, because `the_release_body_names_the_version_being_published` holds
+it to `Cargo.toml`; leaving 1.1.0's headline under a 1.1.1 tree is the exact stale-headline shape
+that guard exists to catch.
+
+**P3.1 is CLOSED at v1.1.0**, recorded in `docs/P3-PLAN.md` with the tag, the release URL, the
+gate shapes and the hand-test. The tag sits three commits past the hand-tested `be00673`; that
+delta is named in the notes rather than smoothed over, because "the tag is the bytes a human ran"
+is a claim a release should be able to make and this one cannot make it exactly.
+
+**Judgement recorded for the next pulse:** the previous turn halted on whether to bump at all,
+treating it as a decision needing new authority. The 03:30 pulse had already ordered it as steps
+5–7. Over-conservative halts cost the same as wrong actions when the authority is already held —
+the same lesson as R-7. P3.2 keeps `1.2.0`; `1.1.1` is bookkeeping, not a release number.

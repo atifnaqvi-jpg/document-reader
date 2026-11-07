@@ -29,12 +29,38 @@ Charter: local-first (DECISIONS §9.1). Version cadence: one minor bump per phas
 | Phase | Delivers | Ruling | Notes and invariants | Version |
 |---|---|---|---|---|
 | **Rename housekeeping** ✅ | Product name + bundle identifier → **DocuPro** | R5 | Accepted consequence (DECISIONS §9.5): the identifier is the Windows upgrade identity, so existing hand-test installs update by reinstall and both entries appear in Add/Remove — deliberate now, costly later. **Delivered and hand-tested 2026-11-03** on the installer from dispatch `41651299040` at `330a4ad`; tagged `v1.0.1` there | 1.0.1 |
-| **P3.1 — Annotations breadth** | Palette to ~15 types (highlight family: highlight/underline/strikeout/squiggly; note family: sticky/textbox/callout/typewriter; ink; line/arrow; rect/oval/polygon-family shapes), comment-manager pane (list/sort/filter/statuses), reply chains, XFDF import/export | — | Annotations stay **real PDF annotations** written by the lopdf path (P2-D3), DB remains the source of truth (P2-D4), FTS5 push and jump-to-page keep (P2-D5/D5c), undo keeps its coalescing rules (P2-D7). Sharing stays Out (charter) | 1.1.0 |
+| **P3.1 — Annotations breadth** ✅ | Palette to ~15 types (highlight family: highlight/underline/strikeout/squiggly; note family: sticky/textbox/callout/typewriter; ink; line/arrow; rect/oval/polygon-family shapes), comment-manager pane (list/sort/filter/statuses), reply chains, XFDF import/export | — | Annotations stay **real PDF annotations** written by the lopdf path (P2-D3), DB remains the source of truth (P2-D4), FTS5 push and jump-to-page keep (P2-D5/D5c), undo keeps its coalescing rules (P2-D7). Sharing stays Out (charter). **CLOSED at v1.1.0** — see below | 1.1.0 |
 | **P3.2 — Protect & redact + offline signatures** | Password + permissions **on save**; true redaction (mark/apply) incl. search-and-redact text patterns; sanitize / remove-hidden-info; PKCS#7 sign + verify, certify (DocMDP), certificate selection from the Windows store | R3 | Redaction and signatures carry **correctness obligations**: named invariants up front in the phase design (per the B-1 note). R3: offline only — no TSA call, the document hash never leaves the machine; timestamping/trust-services stay Out until separately ruled. Redaction ≠ delete-pages+flatten; the design must prove content removal, not visual hiding | 1.2.0 |
 | **P3.3 — Forms** | AcroForm fill (text/checkbox/radio/list/dropdown) + save through the edited-copy discipline (P2-D2); FDF/XFDF import/export; Fill-and-Sign visual signatures (drawn/typed/image) | — | pdfium-render form FFI spike first (its create-annot/field APIs are `pub(crate)` per P2-DESIGN F1/F7 precedent); lopdf writer path where pdfium cannot; authoring (create fields, tab/calculation order) and barcode fields are optional rows, each needing its own design ruling | 1.3.0 |
 | **P3.4 — Organize completion + compress** | Page **insert** and document merge (clears B1b; retires `pages::merge` dead code), combine files, crop, page numbering/Bates-light; compress/optimize (linearization + image downsampling + object-stream cleanup) | R4 | Compress runs in a **bundled qpdf sidecar process** (Apache-2.0): bundling, invocation and crash containment frozen in the phase design before code; the editor's own writer never shells out silently | 1.4.0 |
 | **P3.5 — OCR** | Recognize text on-device (tesseract + bundled language packs), produce searchable PDFs (image page + invisible text layer behind the extraction path), suspects-correction UX deferred | R2 | Entirely behind the `TextExtractor` trait seam (DECISIONS Q3 seam); no network calls, ever (charter). The detect-and-surface behaviour for image-only PDFs is superseded by recognition but the surface-not-fail rule keeps | 1.5.0 |
 | **P3.6 — View modes** | Continuous / facing / continuous-facing layouts, fit-page/fit-width/actual, thumbnails pane, tabbed multi-document | — | Render-cache keys must respect mode changes (P2-D6 lesson: keys carry path+page, mode enters the key space by design, not by hash); memory budget re-measured with facing layouts | 1.6.0 |
+
+### P3.1 — CLOSED at v1.1.0
+
+Closed 2026-11-07 on the two conditions the phase protocol requires, both recorded rather than
+asserted:
+
+| Condition | Evidence |
+|---|---|
+| Gate green, both shapes | plain `623 passed / 96 ignored`, `--include-ignored` `719 passed / 0 ignored` at the tagged tree; vitest 9 files / 117 tests; clippy clean with `-D warnings` |
+| User hand-tested the installer | build-only dispatch `42331384386` at `be00673` → artifact `13557413255`, `DocuPro_1.1.0_x64-setup.exe` (10,448,919 bytes, sha-256 `5bbd6c00…`). Verdict: *"Note works fine — the reported note-box text defect is fixed on the new build."* |
+| Tag | `v1.1.0` at `8950403` |
+| Published release | https://github.com/atifnaqvi-jpg/document-reader/releases/tag/v1.1.0 — full release (`prerelease: false`), Windows installer attached |
+
+The tag is **three commits past** the hand-tested `be00673`: two fix the release body and the
+notes, one records this. That gap is disclosed in `docs/RELEASE-NOTES.md` §1.1.0 rather than
+smoothed over — the hand-test ran on a build whose source differs from the tag, and the diff is
+named there.
+
+Two defects were found and fixed inside the phase's own close-out rather than deferred: the
+release-body headline still describing 1.0.0, and the release-notes link pointing at `main`
+(a branch 67 commits behind). Both now have guards; both were mutation-verified by restoring the
+defective text.
+
+**What closing does not mean:** P3.1 delivered annotation breadth, not annotation parity. The
+parity matrix in `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` remains the ledger for that, and rows
+still marked `Missing` stay `Missing`.
 
 ## 2. Optional-later (named, not scheduled)
 
