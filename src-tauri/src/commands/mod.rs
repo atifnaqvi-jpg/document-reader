@@ -1227,6 +1227,38 @@ pub async fn decrypt_copy(
     Ok(outcome)
 }
 
+/// Produces a protected (password + permissions) copy of a document (P3.2 SCOPE-A).
+///
+/// The source is opened read-only and never written (D-PR4): the copy lands beside it as
+/// `"{stem} (protected).pdf"`. `protect_save` verifies the output by reopening it with the
+/// password before returning, so a success here means the file the user is handed actually
+/// opens. Passwords are used for this call and are not stored (the *copy* has just been
+/// given one; a later edit of it goes through the existing password prompt).
+#[tauri::command]
+pub async fn protect_document(
+    db: State<'_, Db>,
+    document_id: String,
+    user_password: String,
+    owner_password: String,
+    permissions: crate::editor::protect::PermissionsChoice,
+) -> Result<crate::editor::protect::ProtectOutcome, AppError> {
+    let path = document_path(&db, &document_id)?;
+
+    let source = path.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        crate::editor::protect::protect_save(
+            Path::new(&source),
+            &user_password,
+            &owner_password,
+            permissions,
+        )
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("protect task failed: {error}")))??;
+
+    Ok(outcome)
+}
+
 /// Drops a document's remembered password (P2.4 T10), called when the document closes.
 #[tauri::command]
 pub fn forget_password(passwords: State<'_, PasswordStore>, path: String) -> Result<(), AppError> {

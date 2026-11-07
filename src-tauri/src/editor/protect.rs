@@ -92,6 +92,267 @@ pub fn unprotected_path(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// P3.2 SCOPE-A: protect on save (design D-PR1..D-PR6)
+//
+// The P2.4 note above ("re-encryption is a capability that does not exist") was true of
+// P2.4 and is superseded here on purpose: P3.2 adds the write direction. What does **not**
+// change is the rule that made that note worth writing — encryption happens at exactly one
+// place, after every other mutation, and the source file is never a write target (D-PR4).
+// ---------------------------------------------------------------------------
+
+/// Which permissions the user granted, one field per real `/P` bit.
+///
+/// A struct of `bool`s rather than a bitflags value because the UI must show every bit's
+/// state explicitly (D-PR3): `Permissions::default()` is `all()`, so any representation
+/// that can be "partly set" starts by granting everything and clearing nothing, which
+/// ships a document that looks restricted and is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsChoice {
+    pub print: bool,
+    pub modify: bool,
+    pub copy: bool,
+    pub annotate: bool,
+    pub fill_forms: bool,
+    pub assemble: bool,
+    pub print_high_quality: bool,
+}
+
+impl PermissionsChoice {
+    /// Every permission granted. An explicit value, not an omitted field.
+    pub fn all() -> Self {
+        Self {
+            print: true,
+            modify: true,
+            copy: true,
+            annotate: true,
+            fill_forms: true,
+            assemble: true,
+            print_high_quality: true,
+        }
+    }
+
+    /// Maps the user's boxes onto lopdf's bitflags.
+    ///
+    /// `correct_bits()` inside lopdf force-sets the reserved bits; this function only
+    /// decides the seven the user can actually see.
+    fn to_lopdf(self) -> lopdf::Permissions {
+        use lopdf::Permissions;
+        let mut bits = Permissions::empty();
+        let mut set = |flag: bool, permission: Permissions| {
+            if flag {
+                bits |= permission;
+            }
+        };
+        set(self.print, Permissions::PRINTABLE);
+        set(self.modify, Permissions::MODIFIABLE);
+        set(self.copy, Permissions::COPYABLE);
+        set(self.annotate, Permissions::ANNOTABLE);
+        set(self.fill_forms, Permissions::FILLABLE);
+        set(self.assemble, Permissions::ASSEMBLABLE);
+        set(
+            self.print_high_quality,
+            Permissions::PRINTABLE_IN_HIGH_QUALITY,
+        );
+        bits
+    }
+}
+
+/// The result of a successful protection: where it landed and what was verified.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtectOutcome {
+    pub path: String,
+    pub pages: u32,
+}
+
+/// `"{stem} (protected).pdf"`, then `(protected 2)`, … — the D-PR4 name, alongside the
+/// original, never over it. Same shape as [`unprotected_path`] on purpose: both are
+/// "a derived copy of this document", and two different conventions would be two things
+/// for the user to learn.
+pub fn protected_path(
+    original: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, AppError> {
+    sibling_copy_path(original, "protected", exists)
+}
+
+/// Shared namer for the `(unprotected)`/`(protected)` families.
+fn sibling_copy_path(
+    original: &Path,
+    label: &str,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, AppError> {
+    let parent = original
+        .parent()
+        .ok_or_else(|| AppError::Other("document has no parent directory".to_string()))?;
+    let stem = original
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| AppError::Other("document name is not valid utf-8".to_string()))?;
+    let extension = original
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("pdf");
+
+    let first = parent.join(format!("{stem} ({label}).{extension}"));
+    if !exists(&first) {
+        return Ok(first);
+    }
+    for number in 2..=9_999_u32 {
+        let candidate = parent.join(format!("{stem} ({label} {number}).{extension}"));
+        if !exists(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(AppError::Other(format!(
+        "reached the limit of {label} copies for this document"
+    )))
+}
+
+/// Encrypts `source` to a new sibling file (P3.2 SCOPE-A; design D-PR1/D-PR2/D-PR4).
+///
+/// The order is the invariant (**I-PR3**), and it is this function's whole shape:
+///
+/// 1. refuse if the source is already encrypted — layering encryption is not a request
+///    anyone means to make, and it would hide which password opens the file;
+/// 2. load, renumber, compress — every mutation;
+/// 3. `encrypt` **last**, because lopdf drops the file encryption key once it returns and
+///    any object written afterwards would go out in the clear under an `/Encrypt` that
+///    claims otherwise;
+/// 4. serialise, write through the D2 atomic temp-and-rename discipline;
+/// 5. verify the result by **reopening it with the password** and comparing page count
+///    and text; on failure, remove the copy and refuse.
+///
+/// Steps 1–3 mean there is no code path that mutates a document after encryption, because
+/// nothing follows `encrypt` but serialisation.
+pub fn protect_save(
+    source: &Path,
+    user_password: &str,
+    owner_password: &str,
+    permissions: PermissionsChoice,
+) -> Result<ProtectOutcome, AppError> {
+    use lopdf::encryption::crypt_filters::{Aes128CryptFilter, CryptFilter};
+    use lopdf::{EncryptionState, EncryptionVersion, Object};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    if user_password.is_empty() {
+        // An empty user password is a real PDF state, but it is not what a "protect with a
+        // password" dialog means, and accepting it silently produces a file that opens
+        // without prompting while claiming to be protected.
+        return Err(AppError::Other(
+            "a protection password cannot be empty".to_string(),
+        ));
+    }
+
+    if is_encrypted(source)? {
+        return Err(AppError::Other(
+            "this document is already password-protected".to_string(),
+        ));
+    }
+
+    let mut document = Document::load(source)
+        .map_err(|error| AppError::Other(format!("could not open PDF: {error}")))?;
+
+    let page_count = document.get_pages().len() as u32;
+    let expected_text = extract_all_text(&document, page_count);
+
+    // Encrypted files need a `/ID` in the trailer; without one lopdf refuses with
+    // `MissingFileID`. Generated deterministically from the content-free parts we have so
+    // the same input yields the same id, which keeps the round-trip test stable.
+    if !document.trailer.has(b"ID") {
+        let id = Object::string_literal(b"docupro-protected".to_vec());
+        document
+            .trailer
+            .set("ID", Object::Array(vec![id.clone(), id]));
+    }
+
+    document.renumber_objects();
+    document.compress();
+
+    // --- Encrypt, and then do nothing else but serialise (D-PR1 / I-PR3). ---
+    let mut filters: BTreeMap<Vec<u8>, Arc<dyn CryptFilter>> = BTreeMap::new();
+    filters.insert(b"StdCF".to_vec(), Arc::new(Aes128CryptFilter));
+
+    let state: EncryptionState = EncryptionVersion::V4 {
+        document: &document,
+        encrypt_metadata: true,
+        crypt_filters: filters,
+        stream_filter: b"StdCF".to_vec(),
+        string_filter: b"StdCF".to_vec(),
+        owner_password,
+        user_password,
+        permissions: permissions.to_lopdf(),
+    }
+    .try_into()
+    .map_err(|error| AppError::Other(format!("could not build encryption state: {error}")))?;
+
+    document
+        .encrypt(&state)
+        .map_err(|error| AppError::Other(format!("could not encrypt the document: {error}")))?;
+
+    let mut bytes = Vec::new();
+    document
+        .save_to(&mut bytes)
+        .map_err(|error| AppError::Other(format!("could not write the protected PDF: {error}")))?;
+
+    let target = protected_path(source, |candidate| candidate.exists())?;
+
+    let write = || -> Result<(), AppError> {
+        crate::editor::save::write_atomically(&target, &bytes)?;
+        verify_protected(&target, user_password, page_count, &expected_text)
+    };
+
+    if let Err(error) = write() {
+        let _ = std::fs::remove_file(&target);
+        return Err(error);
+    }
+
+    Ok(ProtectOutcome {
+        path: target.to_string_lossy().to_string(),
+        pages: page_count,
+    })
+}
+
+/// Reopens the protected copy with `password` and checks it still says what it said.
+///
+/// This is I-PR1 verified from the write side. Deliberately reopens **from disk** rather
+/// than trusting `bytes`: the failure this catches is a file that cannot be opened, and an
+/// in-memory check cannot see that.
+fn verify_protected(
+    path: &Path,
+    password: &str,
+    expected_pages: u32,
+    expected_text: &str,
+) -> Result<(), AppError> {
+    let reopened = Document::load_with_password(path, password).map_err(|error| {
+        AppError::Other(format!(
+            "the protected copy does not reopen with its own password: {error}"
+        ))
+    })?;
+
+    let pages = reopened.get_pages().len() as u32;
+    if pages != expected_pages {
+        return Err(AppError::Other(format!(
+            "the protected copy has {pages} pages, expected {expected_pages}"
+        )));
+    }
+
+    // lopdf leaves the document decrypted once a password was accepted, so text extraction
+    // works directly. A wrong content comparison here means the encryption round-trip lost
+    // or corrupted objects.
+    let text = extract_all_text(&reopened, pages);
+    if text != expected_text {
+        return Err(AppError::Other(
+            "the protected copy's text does not match the original".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// The result of a successful decryption: where it landed and what was verified.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

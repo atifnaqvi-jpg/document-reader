@@ -96,6 +96,7 @@ pub fn run() {
             commands::edit_page_text,
             commands::revert_page_text,
             commands::decrypt_copy,
+            commands::protect_document,
             commands::forget_password,
         ])
         .run(tauri::generate_context!())
