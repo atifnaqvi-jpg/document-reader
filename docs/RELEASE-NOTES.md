@@ -135,7 +135,9 @@ in a version no user had received, fixed inside its own hand-test cycle, not a n
 Facts about the tree this section describes. Numbers were measured at `72c7ed2`, re-measured
 after the version bump at `5b6b026`, and re-measured again after the A-11 and A-11b fixes at
 `be00673` — a bump or a test that moved a suite would be a different tree than the one
-described. The numbers below are the tagged tree's; the hand-tested bytes come from `be00673`,
+described. The numbers below were measured locally and in CI run `42337063396` (all three jobs
+green) on the tag's parent, which differs from the tag only in this file; the hand-tested bytes
+come from `be00673`,
 which carries two fewer tests (621/96 and 717) because the two release-body guards were written
 after that build.
 
@@ -215,7 +217,7 @@ artifact and publishes no release, which is why the tag could wait for the hand-
 | SHA-256 | `5bbd6c00e9f08a6e6de29465b7b997a73badc9b2e29174ed8e04e65f92db4f05` |
 | CI on that commit | `42331300847`, all three jobs, Windows green on the first attempt |
 | Hand-test verdict | *"Note works fine — the reported note-box text defect is fixed on the new build."* |
-| Tagged commit | `2ece9bc` (docs-only, one commit past `be00673`; see below) |
+| Tagged commit | the commit carrying this section, three commits past `be00673`; see below |
 
 Three independent readings agree on the version before anyone runs it: the **filename**, the PE
 **`FileVersion`** resource and the PE **`ProductVersion`** resource all say `1.1.0`, and
@@ -226,14 +228,39 @@ The dispatch reached step 10, *Assert the PDFium tests actually ran*, successful
 gate that caught the Windows crash at 0.9.1 — so the Windows suite ran at this version rather
 than skipping.
 
-**The tag is one docs-only commit past the hand-tested build, and that is a deliberate departure
-from the 0.9.0/1.0.1 order.** Those releases cut the tag at exactly the dispatch's commit. Here
-the hand-test verdict, the corrected counts and this section were written *after* the build, and
-putting a tag on `be00673` would publish a release whose notes still said "not yet released" and
-carried `611/93` from a tree two defect-fixes old. So the amendment landed first and the tag sits
-on it. Nothing in the delta can change behaviour: `2ece9bc` touches `docs/RELEASE-NOTES.md` and
-`scripts/ralph/LOOP_LOG.md` only, and CI `42332240342` is green on it. The bytes a human ran are
-still built from `be00673`, which is why that SHA is in the table above rather than the tag's.
+**The tag sits three commits past the hand-tested build, and those commits are not all docs.**
+This is a deliberate departure from the 0.9.0/1.0.1 order, and it needs stating precisely
+because the honest answer is weaker than the one I first wrote here.
+
+Those releases cut the tag at exactly the dispatch's commit. Here the hand-test verdict, the
+corrected counts and this section were written *after* the build, and tagging `be00673` would
+publish notes that still said "not yet released" and carried `611/93` from a tree two
+defect-fixes old. Amending first was the lesser evil, but it means the tag is not the
+hand-tested commit, and the delta is:
+
+| Path | Why it moved | Can it change the installer? |
+|---|---|---|
+| `docs/RELEASE-NOTES.md`, `scripts/ralph/LOOP_LOG.md` | this section | No — prose |
+| `scripts/ralph/gate.sh`, `.github/workflows/ci.yml`, `src-tauri/tests/ci_workflow.rs` | pins `621/717 → 623/719` for the two new guards | No — the floor only rises |
+| `src-tauri/tests/release_workflow.rs` | the two new guards, plus `publish_body` | No — a test file |
+| `.github/workflows/release-windows.yml` | **the publish body's headline** | No installer change, but **it does change what the release page says** |
+
+That last row is the one my first draft of this paragraph got wrong by calling the whole delta
+"docs-only". It is not: the workflow file is what writes the sentence on the Releases page, and
+correcting it is the entire point of the tag-side work. What the delta cannot change is the
+`.exe` a human ran: no file under `src-tauri/src/` or `src/` is touched — only a test file, the
+two workflows, the gate script and prose — which is why the hand-test verdict still applies to
+the shipped installer and not merely to some earlier build.
+
+Naming the tagged SHA in this file would be self-defeating — writing the name changes the commit
+it names — so it is given as a measured distance instead: `git rev-list --count be00673..HEAD`
+returned 3 when this was written, and `git describe --tags --exact-match` is the authority.
+
+The stronger claim that would be nice to make — "the tag is exactly the build a human ran" — is
+false, and the alternative that would make it true is worse: a tag on `be00673` publishing notes
+that misdescribe the release. If a future release needs that identity to be exact, the order has
+to change instead: write the notes, build, hand-test, *then* tag the tested commit with no
+further edit. That is what 0.9.0 and 1.0.1 did and what this release should have done.
 
 A **second build-only dispatch** is run from the tagged commit so the equivalence is checkable
 rather than asserted — there is then a dispatch record of the tag's own commit, not only of the

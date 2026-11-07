@@ -2033,3 +2033,40 @@ textarea. It is the wrong installer to test from here on.
 
 Phase close and the tag still wait on the user's hand-test (rule 1). Version stays 1.1.0: two
 defect fixes inside an unreleased hand-test cycle, not a new feature set.
+
+## 2026-11-07 — v1.1.0 release authority
+
+User hand-tested the A-11+A-11b build and accepted it: "Note works fine — the reported
+note-box text defect is fixed on the new build." The re-test gate is satisfied, so the
+order is: amend the notes, then dispatch from the tagged commit, then tag.
+
+**Step 1 — the `## 1.1.0` section now records both post-notes defects.** A-11 (the note box
+hid its own text) and A-11b (the prompt textarea's zero line-height) are written up with
+their commits, their measured causes, and the guards that now hold them. The section had
+said "Built, not yet released" because it was written before either defect was reported;
+that sentence was true when written and false by the time anyone could read it.
+
+**Counts moved, and the notes move with them.** The two release-body guards written during
+step 1 take the pinned shapes to `623/96` plain and `719/0` include-ignored, measured here
+and pinned in `gate.sh`, `ci.yml` and `ci_workflow.rs`. Windows measures `718` — one lower
+by construction, the `#[cfg(unix)]` poppler test.
+
+**A defect found while preparing the tag, not in the plan.** The published release body was
+hardcoded to `**Document Reader 1.0.0** — line-level reflow`. `v1.0.1` therefore published
+three phases later under 1.0.0's headline, and `v1.1.0` would have done the same. No guard
+read that string; two do now, and both were mutation-killed by restoring the exact body
+`v1.0.1` shipped. `v1.0.1`'s own release is left alone — editing a published body would
+rewrite the record of what shipped instead of recording it.
+
+**Step 2 — dispatch from the tag's own commit.** `42337148619`, build-only. It exists so the
+tag's commit has a build record of its own rather than an inference from the hand-tested
+one. Note that this is *not* a second hand-test: the accepted bytes are `be00673`'s.
+
+**Step 3 — tag.** Cut after CI on the tag's parent came back 3/3 green.
+
+The tag is three commits past the hand-tested `be00673`, and my first draft of the notes called
+that delta "docs-only". It is not: `.github/workflows/release-windows.yml` is in it, because the
+publish body had to be corrected. What the delta does not touch is `src-tauri/src/` or `src/`, so
+the installer a human accepted is still what ships; but the weaker, true statement replaces the
+stronger, false one. Recorded in the notes rather than quietly dropped, because "the tag is
+exactly the bytes a human ran" is the claim a release is supposed to be able to make.
