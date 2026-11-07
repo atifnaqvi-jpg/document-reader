@@ -206,9 +206,10 @@ jobs:
           # needs PDFium and the ignored count stays 90.
           # Measured at 616, not 525: this floor had drifted far below the tree, so a test
           # stopping being collected would have taken 91 deletions to notice. Re-measured
-          # from the tree on 2026-11-05 with A-11's six new non-PDFium tests included.
-          if [ "$passed" -lt 617 ]; then
-            echo "::error::only $passed tests ran; 617 is the non-PDFium baseline. A test stopped being collected."
+          # from the tree on 2026-11-05 with A-11's six new non-PDFium tests included, and
+          # again on 2026-11-07 with A-11b's four stylesheet guards (617 -> 621).
+          if [ "$passed" -lt 621 ]; then
+            echo "::error::only $passed tests ran; 621 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

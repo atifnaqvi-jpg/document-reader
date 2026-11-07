@@ -503,12 +503,24 @@ button:disabled {
   width: 13rem;
 }
 
+/* Editor chrome, not PDF space: these are UI surfaces, so the inset is a fixed few pixels
+   rather than the writer's points-times-zoom.
+   The `line-height` is not cosmetic. Both prompts render inside `.page-stage`, which sets
+   `line-height: 0` to shrink-wrap the page raster, and `font: inherit` is a *shorthand* that
+   re-applies the inherited line-height along with the family and size. The textarea therefore
+   got a zero-height line box: every line drew at the same y, overprinting itself and hanging
+   above the content box so the first line was clipped by the border. Naming `line-height`
+   explicitly overrides the shorthand's inherited value; `padding` supplies the inset the
+   textarea never had. Both are pinned by `App.style.test.ts`. */
 .annotation-note-prompt textarea,
 .annotation-note-editor textarea {
   width: 100%;
   min-height: 3.5rem;
   resize: vertical;
   font: inherit;
+  line-height: 1.4;
+  padding: 3px 4px;
+  box-sizing: border-box;
 }
 
 .annotation-note-prompt-actions {

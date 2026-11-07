@@ -108,9 +108,14 @@ fi
 # three are the new pixel tests in `tests/free_text_appearance.rs`, which need PDFium. The
 # include-ignored shape moves by all nine because it runs both sets. Measured, not computed:
 # `cargo test` reported 617/96 and `-- --include-ignored` 713/0 on this tree.
-PIN_PLAIN_PASSED=617
+# 2026-11-07 (A-11b note-prompt chrome): +4 in the plain shape (617 -> 621) and the same +4
+# in the include-ignored shape (713 -> 717). The four are `tests/app_css_chrome.rs`: the
+# shared selector, the line-height override, the top inset, and the guard that the free-text
+# preview keeps its metrics out of the stylesheet. None touch PDFium, so ignored stays 96.
+# Measured, not computed: 621/96 and 717/0 on this tree.
+PIN_PLAIN_PASSED=621
 PIN_PLAIN_IGNORED=96
-PIN_IGNORED_PASSED=713
+PIN_IGNORED_PASSED=717
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

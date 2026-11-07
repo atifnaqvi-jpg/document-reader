@@ -1295,6 +1295,42 @@ family. Then drawing, where D-A8 forces appearance-stream work.
       working. Reverting the two stream fixes reproduces the user's exact symptoms; restoring them
       makes all three pass.
 
+- [x] **A-11b Editor chrome: note-prompt textarea first line flush against the border
+      (post-1.1.0 defect, A-11 family).** Landed with the A-11 follow-up; reported by the user
+      hand-testing the fix build itself, which is the useful part — A-11 shipped and still looked
+      wrong in the one place the pixel tests cannot see. *"the typed text renders flush against /
+      overlapping the top border, first line half-clipped."*
+      **Scope held by evidence, not assumption:** `free_text_appearance.rs` rasterises the saved
+      file and counts ink, so the file was already correct. This is editor chrome only — the
+      *editing* textarea, which shares no rule with the free-text mark. The writer was not touched.
+      **Cause, measured in real Chromium rather than reasoned from the CSS:** `.page-stage` sets
+      `line-height: 0` so it can shrink-wrap the page raster. The textareas said `font: inherit`,
+      which is a *shorthand* — it re-applies the inherited line-height along with the family and
+      size. Measured on the live element: `lineHeight "0px"` against `fontSize 14px`. Each line box
+      was zero pixels tall, so every line drew at the same y overprinting itself, and the first
+      line hung above the content box where the border clipped it. A named `line-height` is what
+      overrides a shorthand; `padding` supplied the inset the control had never had (UA default
+      2px, and nothing on this rule). Fixed at `line-height: 1.4; padding: 3px 4px` — UI chrome, so
+      fixed pixels, not the writer's points-times-zoom. `.kind-free-text` untouched.
+      **Why the isolated harness lied first:** a standalone page with the same `App.css` reported
+      `lineHeight "normal"` and 2px padding — no defect. The defect only exists inside
+      `.page-stage`, so the harness had to reproduce the real ancestor chain before it could
+      observe anything. A reproduction that cannot fail is not a reproduction.
+      **Guards — `tests/app_css_chrome.rs`, all four mutation-verified:**
+      `the_textarea_rule_covers_the_note_editor_too` (editor selector dropped → dies),
+      `the_textarea_sets_a_line_height_that_overrides_the_inherited_zero` (`line-height` removed →
+      dies; also rejects `normal` and ratios under 1), `the_textarea_carries_a_top_inset`
+      (`padding: 0` → dies; range-checked 2–8px), and
+      `the_free_text_preview_keeps_its_metrics_out_of_the_stylesheet` (preview `font-size`/
+      `line-height` re-added → dies), which guards A-11's own fix from being undone by the next
+      person who wants to "just centre the text". These are Rust, not Vitest: jsdom has no layout
+      engine and Vitest stubs CSS imports to an empty string, so a frontend guard here would have
+      asserted nothing while reporting green — rule 5's exact failure mode.
+      Before/after, real Chromium: `docs/evidence/note-prompt-before-after.png`.
+      **Pins re-measured, not incremented:** plain `617/96 → 621/96`, include-ignored `713 → 717`
+      (`--include-ignored` reported 717). Four numbers across `gate.sh`, `ci.yml` and
+      `ci_workflow.rs` moved together and each edit was caught by the guard that watches it.
+
 **Not scheduled:** polygon/cloud (D-A1 names them; they need the same lopdf path as line and can
 follow without a new ruling).
 
