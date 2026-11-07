@@ -11,6 +11,7 @@ pub mod gc;
 pub mod geometry;
 pub mod lopdf_write;
 pub mod migrate;
+pub mod object_gc;
 pub mod pages;
 pub mod protect;
 pub mod reflow;

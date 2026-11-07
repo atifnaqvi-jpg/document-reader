@@ -215,9 +215,12 @@ jobs:
           # from the tree on 2026-11-05 with A-11's six new non-PDFium tests included, and
           # again on 2026-11-07 with A-11b's four stylesheet guards (617 -> 621) and the two
           # release-body guards written while preparing the v1.1.0 tag (621 -> 623), then the
-          # notes-link guard written after the tag (623 -> 624).
-          if [ "$passed" -lt 627 ]; then
-            echo "::error::only $passed tests ran; 627 is the non-PDFium baseline. A test stopped being collected."
+          # notes-link guard written after the tag (623 -> 624), then P3.2 SCOPE-A's eight
+          # protect tests (624 -> 627). Re-measured, not incremented, for SCOPE-B's
+          # `tests/object_gc.rs`: 627 -> 634, seven tests that build documents in memory and
+          # need no library, so this floor moves and the ignored pin above does not.
+          if [ "$passed" -lt 634 ]; then
+            echo "::error::only $passed tests ran; 634 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
