@@ -152,11 +152,16 @@ jobs:
           # tag three phases past it -- because the string was hardcoded and no guard read it.
           # Describe the version this tag publishes; `generate_release_notes: true` still adds
           # the commit list below it.
+          #
+          # The notes link is pinned to `github.ref_name`, not to `main`. It pointed at `main`
+          # until v1.1.0, and `main` is 67 commits behind and its newest section is 0.9.0 -- so
+          # v1.0.0, v1.0.1 and v1.1.0 all linked to a page that never mentioned their release.
+          # A tag ref cannot rot the same way: the notes at the tag are the notes for it.
           body: |
             **Document Reader 1.1.0** — annotation breadth: thirteen annotation types, a
             comment pane with statuses and reply chains, XFDF import/export, and search that
             resolves an annotation rather than only its page. See
-            [the release notes](https://github.com/atifnaqvi-jpg/document-reader/blob/main/docs/RELEASE-NOTES.md)
+            [the release notes](https://github.com/atifnaqvi-jpg/document-reader/blob/${{ github.ref_name }}/docs/RELEASE-NOTES.md)
             for what changed, what is still refused, and the phase's acceptance record.
 
             Windows installer for Document Reader ${{ github.ref_name }}.

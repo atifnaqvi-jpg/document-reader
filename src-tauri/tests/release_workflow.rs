@@ -489,6 +489,30 @@ fn the_release_body_does_not_advertise_a_previous_phases_subject() {
     );
 }
 
+/// The notes link must resolve to notes that describe the tag being published.
+///
+/// It pointed at `blob/main/docs/RELEASE-NOTES.md` until v1.1.0. `main` is 67 commits behind
+/// `p2-windows-test` and its newest section is 0.9.0, so the link under v1.0.0, v1.0.1 and
+/// v1.1.0 all landed on a page with no section for the release the reader came from. Nothing
+/// read the URL, so nothing noticed.
+///
+/// A tag ref cannot rot the same way: the notes committed at the tag are the notes for it.
+/// This asserts the reference is the tag rather than a moving branch, without insisting on a
+/// particular host or path — the defect is the ref, not the URL shape.
+#[test]
+fn the_notes_link_points_at_the_tag_not_a_branch() {
+    let body = publish_body(&workflow()).expect("the publish step must carry a `body:`");
+    assert!(
+        !body.contains("/blob/main/") && !body.contains("/blob/master/"),
+        "the notes link points at a branch, which drifts away from the release. `main` is far \
+         behind and its newest release section is 0.9.0. Point at the tag: {body:?}"
+    );
+    assert!(
+        body.contains("github.ref_name"),
+        "the notes link does not reference the tag being published, so it cannot track it: {body:?}"
+    );
+}
+
 /// Reads `version` from `[package]` in `Cargo.toml`, the same source `release_version.rs` uses
 /// to hold all six carriers together.
 fn publish_version() -> String {

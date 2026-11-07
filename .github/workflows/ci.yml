@@ -208,9 +208,10 @@ jobs:
           # stopping being collected would have taken 91 deletions to notice. Re-measured
           # from the tree on 2026-11-05 with A-11's six new non-PDFium tests included, and
           # again on 2026-11-07 with A-11b's four stylesheet guards (617 -> 621) and the two
-          # release-body guards written while preparing the v1.1.0 tag (621 -> 623).
-          if [ "$passed" -lt 623 ]; then
-            echo "::error::only $passed tests ran; 623 is the non-PDFium baseline. A test stopped being collected."
+          # release-body guards written while preparing the v1.1.0 tag (621 -> 623), then the
+          # notes-link guard written after the tag (623 -> 624).
+          if [ "$passed" -lt 624 ]; then
+            echo "::error::only $passed tests ran; 624 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
