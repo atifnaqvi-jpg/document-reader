@@ -2207,3 +2207,15 @@ Counts after SCOPE-A, reconciled against the CI shapes rather than assumed:
 with the library and `--include-ignored`, **728 passed / 0 failed / 0 ignored**; the Linux CI
 shape (no library, default run) is **627 passed / 101 ignored**, still above the 624 floor.
 The +8 is five `#[ignore]`d PDFium tests and three non-ignored ordering tests.
+
+**Second CI failure, same commit, different lesson: the counts are exact pins, not floors.**
+`if [ "$ignored" -ne 96 ]` compares for equality, and SCOPE-A's five `#[ignore]`d PDFium tests
+made it 101. `--include-ignored` on the Windows job hid this: there nothing is ignored, so the
+Windows job was green while Linux was red. Two guards had to move together -- the workflow pin
+and `ci_workflow.rs`'s assertion on the workflow text -- or the pair disagrees. Both are now
+101 ignored / 627 passed, re-measured from the tree rather than incremented, and the moved
+`ne 101` pin is mutation-verified: forcing it back to `ne 96` fails
+`the_linux_job_does_not_force_pdfium_tests_without_a_library`.
+The general rule this turn paid for twice: **a local green run proves the tests pass, not that
+CI's arithmetic about them still holds.** Every new test has to be classified -- does it need
+the library or not -- and then both pins consulted.

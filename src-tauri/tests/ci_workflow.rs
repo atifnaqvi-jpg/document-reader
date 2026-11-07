@@ -312,7 +312,7 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
     );
     assert!(
-        tests_step.contains("ignored") && tests_step.contains("ne 96"),
+        tests_step.contains("ignored") && tests_step.contains("ne 101"),
         "the Linux job must assert exactly the 90 known machine-dependent tests: 76 from before
          the Form XObject walk, the three PDFium-side walk tests it added, the two that compose
          the picker path (font search; describe/edit/save/re-open), two from P2.7.7's Type0
@@ -320,7 +320,9 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
          four from P2.8's expectation reader, which needs PDFium's character grid by design,
          two from P2.8 case (a)'s reflow writes, whose oracle is per-glyph ink for the same
          reason, one from R-1a's kerned prefix, which compares a reported tail origin against
-         that same ink, and one from R-4, which compares three runs' positions against it"
+         that same ink, one from R-4, which compares three runs' positions against it, and
+         P3.2 SCOPE-A's five protect_save tests, which reopen the protected copy through
+         PDFium because lopdf wrote it and cannot be its own oracle"
     );
 }
 
@@ -372,8 +374,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 624 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 624. \
+        tests_step.contains(r#"if [ "$passed" -lt 627 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 627. \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }

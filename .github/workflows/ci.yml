@@ -130,8 +130,14 @@ jobs:
           # (`tests/free_text_appearance.rs`) render a saved annotation through PDFium and
           # count its ink, which is the only way to tell "the stream is legal" from "the user
           # can see the text". They cannot run here for the same reason as the rest.
-          if [ "$ignored" -ne 96 ]; then
-            echo "::error::$ignored tests ignored; 96 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured at 101, not 96: P3.2 SCOPE-A's five `tests/protect_save.rs` tests reopen
+          # the protected file through PDFium, which is the point -- lopdf wrote it, so asking
+          # lopdf to read it back would only prove the two halves agree. They cannot run
+          # without the library, so they move this pin. Their three siblings in
+          # `tests/protect_ordering.rs` read source text and need no library, so they move the
+          # `passed` floor instead.
+          if [ "$ignored" -ne 101 ]; then
+            echo "::error::$ignored tests ignored; 101 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -210,8 +216,8 @@ jobs:
           # again on 2026-11-07 with A-11b's four stylesheet guards (617 -> 621) and the two
           # release-body guards written while preparing the v1.1.0 tag (621 -> 623), then the
           # notes-link guard written after the tag (623 -> 624).
-          if [ "$passed" -lt 624 ]; then
-            echo "::error::only $passed tests ran; 624 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 627 ]; then
+            echo "::error::only $passed tests ran; 627 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
