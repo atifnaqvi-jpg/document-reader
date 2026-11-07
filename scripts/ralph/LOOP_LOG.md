@@ -2109,3 +2109,14 @@ is a claim a release should be able to make and this one cannot make it exactly.
 treating it as a decision needing new authority. The 03:30 pulse had already ordered it as steps
 5–7. Over-conservative halts cost the same as wrong actions when the authority is already held —
 the same lesson as R-7. P3.2 keeps `1.2.0`; `1.1.1` is bookkeeping, not a release number.
+
+**CI on the bump (`a09a232`), measured rather than assumed.** Run `42403563860`, 3/3 green:
+Rust `624 passed / 96 ignored` — an exact single-shape match to the pins; Windows
+`719 passed / 0 ignored`, read from the workflow's own `PDFium tests ran:` line rather than
+summed from the log, because that job runs the suite plus two single-test invocations and a
+raw sum double-counts them (it reports 723). Windows is one below Linux's 720 by construction:
+the `#[cfg(unix)]` poppler test. Frontend 9 files / 117 tests.
+
+Reading counts out of that log is where I got it wrong twice in the previous turn: the lines
+carry an ISO timestamp, so an `awk '$4'`-style parse silently yields 0. Parse with a regex on
+the `test result: ok. N passed` shape, or read the workflow's own total.
