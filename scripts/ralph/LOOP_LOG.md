@@ -1962,3 +1962,74 @@ Recorded because "flaky, ignore it" is exactly the label rule 5 warns about: the
 between this and a silent skip is that the failing attempt was read, the rerun was read, and both
 verdicts are written down here rather than only the green one.
 
+
+### A-11b, `2026-11-07` — the fix shipped and still looked wrong
+
+The A-11 installer was hand-tested and the free-text note box came back *"typed text renders
+flush against / overlapping the top border, first line half-clipped"*. A-11 had already closed,
+with pixel proof that the saved file was right, and it was. Both facts are true at once: the
+pixel tests rasterise the **saved** file, and the thing the user was looking at is the **editor**.
+`tests/free_text_appearance.rs` cannot see a stylesheet, and nothing in the gate could.
+
+**The measurement, because the CSS reading was plausible and wrong.** A first harness loaded the
+real `App.css` into Chromium and reported `lineHeight: "normal"`, 2px padding — no defect. It was
+lying by omission: it rendered the prompt on its own, and the defect lives in an ancestor. With
+`.page-stage` in the chain the same element measured **`lineHeight "0px"` against `fontSize 14px`**.
+`.page-stage` sets `line-height: 0` to shrink-wrap the page raster; `font: inherit` is a
+*shorthand* and re-applied that zero to the textarea. Zero-height line boxes: every line at the
+same y overprinting, the first hanging above the content box where the border clipped it.
+
+A reproduction that cannot fail is not a reproduction. The first harness has been kept in the
+record rather than quietly fixed, because it is the exact trap this repository keeps falling
+into — a green result from a setup that could not have gone red.
+
+**Fix.** `line-height: 1.4; padding: 3px 4px; box-sizing: border-box` on the rule shared by
+`.annotation-note-prompt textarea` and `.annotation-note-editor textarea`. UI chrome, so fixed
+pixels; the writer and `.kind-free-text` are untouched.
+
+**Guards.** `tests/app_css_chrome.rs`, four tests, each mutation-verified:
+
+| mutation | guard that died |
+| --- | --- |
+| `line-height` deleted | `..._sets_a_line_height_that_overrides_the_inherited_zero` |
+| `padding: 3px 4px` → `0` | `the_textarea_carries_a_top_inset` |
+| `line-height: 1.4` → `0.6` | `..._sets_a_line_height...` (ratio under 1) |
+| editor selector dropped | `the_textarea_rule_covers_the_note_editor_too` |
+
+A fifth guard, `the_free_text_preview_keeps_its_metrics_out_of_the_stylesheet`, protects A-11's
+own fix: re-adding `font-size`/`line-height` to `.kind-free-text` kills it (verified).
+
+**Why Rust and not Vitest.** Tried Vitest first and it was a trap worth recording: `import css
+from "./App.css?raw"` returns **the empty string**, because Vitest stubs CSS modules. A guard
+written there would have passed forever while asserting nothing — rule 5's "green pass wearing a
+label", found by printing the length. `css: true` makes it work but changes CSS handling for
+every test in the suite, so it was reverted. Reading the file in a Rust test is what the repo
+already does for `.github/workflows/ci.yml`, and it needs no new dependency.
+
+**Pins, re-measured.** Plain `617/96 → 621/96`, include-ignored `713 → 717`. Four numbers in
+`gate.sh`, `ci.yml` and `ci_workflow.rs` moved together; the `ci_workflow` floor guard was
+mutation-checked by setting `ci.yml` back to 617 and watching it fail.
+
+**One stale number in the briefing, corrected:** vitest was reported as 113. It is **117**, and
+was 117 *before* this turn — `FreeTextPreview.test.tsx` added four tests in `d05b7db`. Verified by
+running vitest in a worktree at the parent commit `eadbb2d`, not by assuming.
+
+**Verdicts.**
+
+| run | commit | result |
+| --- | --- | --- |
+| CI `42331300847` | `be00673` | **3/3 success**, Windows job green on the **first** attempt |
+| Release `42331384386` | `be00673` | **success**, artifact `13557413255` |
+| CI `42328426531` | `eadbb2d` | success (the run that was in flight last turn) |
+
+New installer, built from `be00673`:
+`DocuPro_1.1.0_x64-setup.exe`, 10,448,919 bytes,
+**sha256 `5bbd6c00e9f08a6e6de29465b7b997a73badc9b2e29174ed8e04e65f92db4f05`**,
+PE32 NSIS, ProductName `DocuPro`, FileVersion/ProductVersion `1.1.0`. Staged at
+`/tmp/dlfix2/DocuPro_1.1.0_x64-setup.exe`.
+
+**This supersedes `7eb81dbd…c797`** — that build predates A-11b and still has the flush-top
+textarea. It is the wrong installer to test from here on.
+
+Phase close and the tag still wait on the user's hand-test (rule 1). Version stays 1.1.0: two
+defect fixes inside an unreleased hand-test cycle, not a new feature set.
