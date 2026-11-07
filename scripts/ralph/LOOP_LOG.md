@@ -1899,3 +1899,42 @@ Both runs watched to completion below; the A-11 row in `IMPLEMENTATION_PLAN.md` 
 run id and the four mutation-verified guards. No tag, no publish — the v1.1.0 tag waits on the
 user's re-test of the **new** build, per the standing order.
 
+### Closed out, `2026-11-07`
+
+- **CI `42325390987` at `e49dc8b`** — Rust, Frontend, Windows smoke: all three success. Read from
+  the jobs API, not from the badge.
+- **CI `42326150828` at `4bd39ae`** — the plan/log commit is documentation only and still ran the
+  full workflow rather than being skipped, which is the cheap way to keep the plan honest. All
+  three jobs success.
+- **Dispatch `42325474926` at `e49dc8b`** (the re-test build) — success, all steps. The checkout
+  step logs `git log -1 --format=%H` → `e49dc8b86a7cd67f158c4649cecd020884454ab0`, so the built
+  commit is verified at build time rather than inferred from the dispatch payload. Step 10
+  (*Assert the PDFium tests actually ran*) reports **712 passed, 0 ignored** — 713 local
+  include-ignored minus the one `#[cfg(unix)]` poppler test, the same arithmetic that reconciled
+  703 before. Artifact `document-reader-windows-installer`, id `13555540808`, 10,430,973 bytes.
+- **Installer** `DocuPro_1.1.0_x64-setup.exe`, 10,446,963 bytes, sha256
+  `7eb81dbdd5d057dba5cc65283e3b467a1756d28b7ae733c7103afeffb008c797`. Version read back from the
+  PE string table: `FileVersion 1.1.0`, `ProductVersion 1.1.0`, `ProductName DocuPro`,
+  `FileDescription DocuPro`. The API's artifact `digest` is the sha256 of the **zip**, not of the
+  exe inside it — two different hashes, and quoting the API one as the installer's would be wrong.
+
+### The stale dispatch, resolved — and it failed anyway
+
+The warning above said not to use `42325198969`. It turned out to be moot in a way worth
+recording precisely: **that run failed and produced zero artifacts** (`total_count: 0`), so no
+stale installer exists to be mistaken for the fix. It did not fail on any A-11 assertion — it
+died in *Run tests* with `exit code 0xc0000005, STATUS_ACCESS_VIOLATION` from the lib test binary
+under `--include-ignored`, after 502 tests had printed `ok`. That is the intermittent Windows
+PDFium crash noted as undiagnosed in `AGENTS.md`.
+
+So the pre-fix tree was never actually built, and the re-test build on `e49dc8b` passed the same
+assertion with **712 passed, 0 ignored** and no crash. That is one more observation on the
+intermittent, not a diagnosis: same suite, same runner family, one crash and one clean run four
+minutes apart. It does not clear the item, and `STATUS_ACCESS_VIOLATION` stays open.
+
+### Standing state, `2026-11-07`
+
+`origin/p2-windows-test` is `4bd39ae`. No tag, no publish, newest tag still `v1.0.1`. The
+**only** installer with the A-11 fix is `42325474926` / artifact `13555540808`
+(sha256 `7eb81dbd…c797`). Phase close and the v1.1.0 tag both wait on the user's hand-test of that
+build (rule 1).
