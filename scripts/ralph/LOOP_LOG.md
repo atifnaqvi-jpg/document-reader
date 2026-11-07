@@ -1934,7 +1934,31 @@ minutes apart. It does not clear the item, and `STATUS_ACCESS_VIOLATION` stays o
 
 ### Standing state, `2026-11-07`
 
-`origin/p2-windows-test` is `4bd39ae`. No tag, no publish, newest tag still `v1.0.1`. The
+`origin/p2-windows-test` is `f8aa139`. No tag, no publish, newest tag still `v1.0.1`. The
 **only** installer with the A-11 fix is `42325474926` / artifact `13555540808`
 (sha256 `7eb81dbd…c797`). Phase close and the v1.1.0 tag both wait on the user's hand-test of that
 build (rule 1).
+
+### The intermittent, measured rather than shrugged at
+
+`STATUS_ACCESS_VIOLATION` was called intermittent in the briefing. This session produced a clean
+natural experiment, so it is worth recording what the numbers actually say:
+
+- `42325198969` (pre-fix `426c69a`), *Run tests*: **crash**, exit `0xc0000005`.
+- `42325474926` (fix `e49dc8b`), same assertion step: **712 passed, 0 ignored, no crash**.
+- `42326150828` (`4bd39ae`), Windows smoke: **green**.
+- `42326884432` (`f8aa139`), Windows smoke: **crash** — then **green on rerun, attempt 2**, same
+  run, same commit, same runner image.
+
+Two things follow. First, the crash is not caused by A-11: the failing commit `f8aa139` changed
+only two Markdown files under `scripts/ralph/`, and the crash reproduced on the docs commit while
+passing on the commit that actually contains the code. Second, the crash point moved — pre-fix it
+died after `pdfium_availability_check_never_panics`; on `f8aa139` it died one test later, after
+`concurrent_renders_and_evictions_do_not_corrupt_pdfium`. A crash whose *position* varies between
+runs on identical binaries is a race, and this session does not attempt to fix it. It stays open
+in `AGENTS.md` and in `docs/P3-GAP-ANALYSIS.md`, unchanged.
+
+Recorded because "flaky, ignore it" is exactly the label rule 5 warns about: the difference
+between this and a silent skip is that the failing attempt was read, the rerun was read, and both
+verdicts are written down here rather than only the green one.
+
