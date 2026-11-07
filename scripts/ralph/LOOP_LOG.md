@@ -2120,3 +2120,46 @@ the `#[cfg(unix)]` poppler test. Frontend 9 files / 117 tests.
 Reading counts out of that log is where I got it wrong twice in the previous turn: the lines
 carry an ISO timestamp, so an `awk '$4'`-style parse silently yields 0. Parse with a regex on
 the `test result: ok. N passed` shape, or read the workflow's own total.
+
+## 2026-11-07 — P3.2 design FROZEN (user sign-off) and the citation guard it tripped
+
+**Sign-off.** The P3.2 design (`docs/P3.2-protect-redact-signatures-DESIGN.md`) was approved as
+written, including **D-SG1** — the pure-Rust crypto dependency set (`rsa`, `pkcs7`, `x509-cert`,
+`pkcs12`, plus `windows` certificate-store features) over a vendored OpenSSL. That was the one
+decision flagged as hard to reverse, so it is recorded here rather than left implicit in a status
+line. Carriers stay `1.1.1`; `1.2.0` remains the P3.2 release reservation.
+
+**Registering the doc found real drift in the doc itself, which is the point of registering it.**
+Adding it to `GOVERNED_DOCS` turned the citation guard red on three separate rules and **17 line
+number citations**:
+
+- `governed_docs_point_at_symbols_not_line_numbers` — every `document.rs:420`-style pointer was
+  rejected. The rule is right: a line number is stale by construction, and the guard's own header
+  records that both such pointers in earlier documents had already drifted onto unrelated code.
+  All 17 are now bare symbol names.
+- `docs_cite_only_identifiers_that_exist` — nine identifiers the design *intends to create*
+  (`protect_save`, `redact_apply`, `object_gc`, …) were backticked as if they existed, plus four
+  third-party crate symbols (`prune_objects`, `traverse_objects`, `from_pdfium`,
+  `check_incremental_save_supported`) that live outside this tree. Future identifiers are now
+  plain prose; crate APIs are described rather than cited.
+- `governed_docs_cite_only_paths_that_exist` — half-paths (`editor/protect.rs` from a crate-root
+  doc, `annotation/redacted.rs`) do not resolve. Paths are now bare stems or full repo paths.
+
+The regex pass that stripped the line numbers **also mangled sentences** (empty backtick pairs,
+a duplicated phrase, orphaned `:339`), caught by reading the file back rather than trusting the
+edit. Re-read your own automated edits before committing them — a green guard does not mean the
+prose survived it.
+
+**A second drift found and deliberately NOT fixed here.** The guard's docstring says it governs
+"the plan itself, the audit" and "every P3 phase design", but `docs/P3-PLAN.md` and
+`docs/P3-GAP-ANALYSIS.md` are **not** in `GOVERNED_DOCS`. Wiring them in was tried in this turn
+and fails on four citations:
+`docs/P3-PLAN.md` cites the template `docs/P3.x-<slug>-DESIGN.md`; `docs/P3-GAP-ANALYSIS.md`
+cites `editor/annotate.rs` and `editor/protect.rs` as half-paths and backticks `text_without_rise`,
+the helper deleted in `dcffa91` (the stock take records that closure in struck text, but this
+line is live). That is a docs-only fix in two programme documents and belongs in its own commit
+with its own reasoning, not folded into a freeze commit. **Open, and worth doing before P3.2
+lands**, because the plan is the authority the phase is judged against.
+
+**Stage gate held.** No implementation code, no version bump, no guards beyond the registration,
+no dispatch. Carriers verified still `1.1.1`.

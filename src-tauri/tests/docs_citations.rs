@@ -180,7 +180,8 @@ fn cited_paths(text: &str) -> Citations {
 /// crate API that moved, is wrong before a line of code exists. `docs/P3.1-annotations-DESIGN.md`
 /// is the case in point: writing it turned up that `docs/P2-DESIGN.md` F1 had overstated the
 /// `pub(crate)` boundary, which is exactly the drift this list is here to catch.
-const GOVERNED_DOCS: [&str; 9] = [
+const GOVERNED_DOCS: [&str; 10] = [
+    "docs/P3.2-protect-redact-signatures-DESIGN.md",
     "docs/P3-rename-housekeeping-DESIGN.md",
     "docs/P3.1-annotations-DESIGN.md",
     "docs/P2.7.1-mcid-DESIGN.md",
