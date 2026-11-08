@@ -136,13 +136,14 @@ jobs:
           # without the library, so they move this pin. Their three siblings in
           # `tests/protect_ordering.rs` read source text and need no library, so they move the
           # `passed` floor instead.
-          # Measured at 104, not 101: P3.2 SCOPE-B's three `tests/redact_pdfium.rs` oracles ask
+          # Measured at 106, not 101: P3.2's three `tests/redact_pdfium.rs` oracles and SCOPE-C's two
+          # `tests/incremental_pdfium.rs` oracles ask
           # PDFium what the redacted page says and how big it is, which is the whole point --
           # a byte scan we wrote cannot tell "our writer agrees with itself" from "a reader
           # shows nothing". They move this pin; the seven in `tests/redact_content.rs` need no
           # library and move the `passed` floor instead.
-          if [ "$ignored" -ne 104 ]; then
-            echo "::error::$ignored tests ignored; 104 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          if [ "$ignored" -ne 106 ]; then
+            echo "::error::$ignored tests ignored; 106 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -228,9 +229,10 @@ jobs:
           # and image removal arrived with five more tests there, then 646 -> 655 for
           # `tests/sanitize.rs` (D-RD5's seven classes plus the two negative directions),
           # then 655 -> 660 for I-RD7 and the whole-document apply ordering, 660 -> 663 for
-          # I-RD6's three idempotence tests, 663 -> 669 for D-RD6's search-and-redact.
-          if [ "$passed" -lt 669 ]; then
-            echo "::error::only $passed tests ran; 669 is the non-PDFium baseline. A test stopped being collected."
+          # I-RD6's three idempotence tests, 663 -> 669 for D-RD6's search-and-redact,
+          # then 669 -> 675 for SCOPE-C's incremental-append proof (§10 step 1).
+          if [ "$passed" -lt 675 ]; then
+            echo "::error::only $passed tests ran; 675 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
