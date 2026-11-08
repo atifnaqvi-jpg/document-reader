@@ -1,23 +1,55 @@
 # DocuPro
 
-A local-first personal library reader for desktop. Open, read, and search
-your own documents — nothing leaves your machine.
+A local-first PDF reader and editor for Windows. Read, search, and edit your
+own documents — edit text in place, annotate, protect, redact, and sign
+offline. Nothing ever leaves your machine.
 
 - 📐 [Architecture design (draft)](docs/ARCHITECTURE.md) — components, modules, roadmap.
 - ✅ [Frozen decisions (v1.0)](docs/DECISIONS.md) — resolves the architecture open questions. **Read this first.**
 - 🎛️ [UX specification](docs/UX-DESIGN.md) — surfaces, states, and `UX-###` requirements derived from the shipped build; feeds phase designs.
+- 🗺️ [P3 plan](docs/P3-PLAN.md) — the phase programme: annotations (shipped), protect/redact/signatures (in flight), forms, organize/compress, OCR.
 
 ## Privacy
 
 Documents are read from your local disk and never transmitted anywhere.
-There is no server, no account, and no telemetry in v1.
+There is no server, no account, and no telemetry. Signatures are offline by
+design: the file hash never leaves the machine, and revocation information is
+read only from the document itself or from certificates the user imports.
 
-## v1 Scope
+## Features
 
-- **Target:** Windows desktop. macOS/Linux later.
-- **Reads:** PDF, TXT, Markdown.
-- **Includes:** dark mode, full-text search over your library, bookmarks.
-- **Not included:** OCR / scanned PDFs, EPUB, DOCX, annotations, sync.
+- **Read:** PDF (native PDFium), TXT, Markdown; dark mode; bookmarks; a library
+  with full-text search (FTS5) and a background indexer.
+- **Edit text in place:** structure-aware boundaries and line-level reflow;
+  merged runs; font substitution AND font embedding/subsetting for the edited
+  text; rotated/transformed text; CID/Type0 editing.
+- **Annotate:** 13 annotation kinds (markup: highlight, underline, strikeout,
+  squiggly; notes: sticky, text box, callout, typewriter, free text; ink;
+  line/arrow; rectangle, oval); a comment pane with replies and statuses;
+  XFDF import/export; annotation search with jump-to-hit (v1.1.0).
+- **Protect:** password and permission encryption written through the atomic
+  save path (AES-128/rev 4).
+- **Redact:** true removal — the content is deleted from the file, never
+  painted over; metadata sanitize; reachability GC with xref integrity so
+  nothing dangles (in flight for v1.2.0).
+- **Sign:** offline PFX/PKCS#12 import, CMS/PKCS#7 detached signatures, DocMDP
+  certification, and signature badges — strictly no network (in flight for
+  v1.2.0).
+- **Not in v1:** OCR of scanned PDFs (planned as P3.5), EPUB/DOCX, any form of
+  sync or cloud.
+
+## Platform
+
+Windows-only for v1; macOS/Linux are possible later. The installer is per-user
+(never a per-machine install), bundles PDFium, downloads the WebView2 runtime
+only if it is missing.
+
+## Shipped
+
+- ✅ **v1.0.0** — the text-editing programme (in-place edits through reflow) complete.
+- ✅ **v1.0.1** — DocuPro naming + library migration.
+- ✅ **v1.1.0** — the annotation programme (13 kinds, comment pane, XFDF, annotation search).
+- 🔨 **v1.2.0** — protect + redact + offline signatures, in flight.
 
 ## Stack
 
@@ -167,3 +199,16 @@ here is the untracked aarch64 drop. See the comment at the top of that job.
 
 The full render path is exercised in CI on `windows-latest`, which fails the
 build if any of those tests skipped.
+
+## License
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
