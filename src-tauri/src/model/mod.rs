@@ -380,6 +380,21 @@ pub enum AppError {
          exported from your certificate manager"
     )]
     PfxInvalid(String),
+    /// P3.2 D-SG5: the platform certificate store could not be read, or does not exist here.
+    ///
+    /// Distinct from "the store opened and holds nothing", which is a fact about the user's
+    /// machine rather than a limitation of this build. Collapsing the two would render an
+    /// unsupported platform as "you have no signing certificates", which is a false statement the
+    /// user cannot act on.
+    #[error("the certificate store is not available: {0}")]
+    CertificateStoreUnavailable(String),
+    /// P3.2 D-SG4: a certificate's bytes could not be parsed, so it cannot be described or offered.
+    ///
+    /// The certificate is reported with this reason rather than dropped (see `Skipped`): a
+    /// certificate that silently disappears from a picker is indistinguishable from one that was
+    /// never installed.
+    #[error("this certificate could not be read ({0})")]
+    CertificateUnreadable(String),
     #[error("{0}")]
     Other(String),
 }
@@ -407,6 +422,8 @@ impl AppError {
             AppError::ContentTooLarge => "CONTENT_TOO_LARGE",
             AppError::PfxPasswordOrDamaged => "PFX_PASSWORD_OR_DAMAGED",
             AppError::PfxInvalid(_) => "PFX_INVALID",
+            AppError::CertificateStoreUnavailable(_) => "CERTIFICATE_STORE_UNAVAILABLE",
+            AppError::CertificateUnreadable(_) => "CERTIFICATE_UNREADABLE",
             AppError::Other(_) => "OTHER",
         }
     }

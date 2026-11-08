@@ -57,6 +57,18 @@ ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 # in the lock (`der 0.8` here, `der 0.7` under `rsa`). Bounded by design K25: the crate parses and
 # decrypts only, and every type leaving `editor::signature::pfx` is raw DER.
 p12-keystore = "0.4.1"
+# Describing a certificate (P3.2 D-SG1, already in the approved stack). It arrived in the lock
+# transitively under `p12-keystore`; naming it makes it direct, which is what lets `identity.rs`
+# parse a certificate's subject, validity and key algorithm. No new crate, no new `der`
+# generation: this is the same `x509-cert 0.3.0` the PFX reader already pulls.
+x509-cert = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The Windows certificate store (D-SG5). Already in the lock transitively via Tauri/tao at the same
+# version (K21), so this is a *direct* dependency with the certificate features switched on, not a
+# new crate in the graph. Target-gated so a Linux build never compiles it: the store exists only on
+# the shipping platform, and `signature/winstore.rs` is the only module allowed to name it.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
