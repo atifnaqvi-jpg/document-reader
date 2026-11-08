@@ -106,6 +106,21 @@ impl ApplyRedaction {
             .map(|page| page.runs_removed + page.xobject_runs_removed)
             .sum()
     }
+
+    /// True when this apply removed no content at all (I-RD6).
+    ///
+    /// Applying the same marks to an already-redacted file finds nothing to remove; the
+    /// caller reports "nothing to apply" instead of writing a second file that differs only
+    /// in its timestamp. Sanitize does not count here: it reports its own work, and a second
+    /// pass finding no metadata is also a no-op.
+    pub fn nothing_to_apply(&self) -> bool {
+        self.runs_removed() == 0
+            && self
+                .pages
+                .iter()
+                .all(|page| page.annotations_removed == 0 && page.images_removed == 0)
+            && self.sanitized.is_empty()
+    }
 }
 
 /// Applies every page's marks and then sanitizes (D-RD5), in that order.

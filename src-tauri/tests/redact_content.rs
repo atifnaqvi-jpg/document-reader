@@ -645,3 +645,75 @@ fn stripping_redact_marks_keeps_other_annotations() {
         .expect("the surviving annotation stays in /Annots");
     assert_eq!(annots.len(), 1, "exactly one annotation remains");
 }
+
+// ---- I-RD6: idempotence ----
+
+#[test]
+fn applying_the_same_marks_twice_reports_nothing_to_do_the_second_time() {
+    // I-RD6. The second apply must not double-remove, and it must say so rather than write a
+    // second file that differs only by timestamp.
+    let mut doc = fixture();
+    let marks = [(0u32, vec![secret_rect()])];
+
+    let first = apply_redactions(&mut doc, &marks).expect("first apply");
+    assert!(!first.nothing_to_apply(), "the first apply must do work");
+    assert!(first.runs_removed() > 0);
+
+    let second = apply_redactions(&mut doc, &marks).expect("second apply");
+    assert!(
+        second.nothing_to_apply(),
+        "I-RD6: the second apply must report nothing to do, got {second:?}"
+    );
+    assert_eq!(second.runs_removed(), 0, "nothing removed the second time");
+}
+
+#[test]
+fn a_redacted_document_is_unchanged_by_a_second_apply() {
+    // The stronger form: not just "it says it did nothing" but "the bytes did not move".
+    let mut doc = fixture();
+    let marks = [(0u32, vec![secret_rect()])];
+
+    apply_redactions(&mut doc, &marks).expect("first apply");
+    let after_first = format!("{:?}", doc.objects);
+
+    apply_redactions(&mut doc, &marks).expect("second apply");
+    let after_second = format!("{:?}", doc.objects);
+
+    assert_eq!(
+        after_first, after_second,
+        "I-RD6: a second apply must not alter the object graph"
+    );
+}
+
+#[test]
+fn an_apply_that_only_removes_an_annotation_is_not_a_no_op() {
+    // The clause that makes `nothing_to_apply` honest. On a second apply the text is already
+    // gone, so `runs_removed` is 0 — but an annotation added since then still intersects the
+    // mark, and reporting "nothing to apply" would leave its /Contents in the file.
+    let mut doc = fixture();
+    let marks = [(0u32, vec![secret_rect()])];
+
+    apply_redactions(&mut doc, &marks).expect("first apply");
+
+    // A new note lands under the mark between the two applies.
+    let annot_id = add_square(&mut doc, [80, 692, 180, 704], "added later");
+    let second = apply_redactions(&mut doc, &marks).expect("second apply");
+
+    assert!(
+        !second.nothing_to_apply(),
+        "I-RD6: removing the new annotation is work, not a no-op"
+    );
+    assert_eq!(
+        second
+            .pages
+            .iter()
+            .map(|p| p.annotations_removed)
+            .sum::<usize>(),
+        1,
+        "the new annotation must be the thing removed"
+    );
+    assert!(
+        !doc.objects.contains_key(&annot_id),
+        "and it must be gone from the document"
+    );
+}
