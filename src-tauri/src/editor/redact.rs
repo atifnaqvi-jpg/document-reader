@@ -26,7 +26,7 @@
 
 use std::collections::BTreeSet;
 
-use lopdf::{content::Content, Object, ObjectId};
+use lopdf::{content::Content, Document, Object, ObjectId};
 
 use crate::editor::geometry::{Point2, RunFrame};
 use crate::editor::object_gc::sweep_unreachable;
@@ -76,6 +76,10 @@ pub struct PageRedaction {
     pub runs_removed: usize,
     /// Number of text-showing operations deleted from inside Form XObjects.
     pub xobject_runs_removed: usize,
+    /// Annotations deleted because their box intersected a mark (D-RD2).
+    pub annotations_removed: usize,
+    /// Image draws deleted because the image intersected a mark, whole (D-RD2/D-RD7).
+    pub images_removed: usize,
     /// Objects dropped by the reachability sweep afterwards (D-RD4).
     pub objects_dropped: usize,
 }
@@ -168,6 +172,11 @@ pub fn redact_page(
         }
     }
 
+    // Annotations and images are removed whatever the text pass finds: a mark over a picture
+    // with no text under it is still a mark the user asked to apply.
+    report.annotations_removed = remove_intersecting_annotations(document, page, rects)?;
+    report.images_removed = remove_intersecting_images(document, page, rects)?;
+
     if doomed.is_empty() {
         report.objects_dropped = sweep_unreachable(document)?.len();
         return Ok(report);
@@ -217,6 +226,340 @@ pub fn redact_page(
 
     report.objects_dropped = sweep_unreachable(document)?.len();
     Ok(report)
+}
+
+/// Deletes every annotation whose `/Rect` intersects any mark (D-RD2).
+///
+/// An annotation is a first-class object with its own `/Contents`, so leaving it in place
+/// leaves the text the user redacted *in the file* even when the page's content stream no
+/// longer draws it. Removing the `/Annots` entry and then dropping the object is what makes
+/// it unrecoverable; the reachability sweep after [`redact_page`] does the dropping.
+///
+/// A `/Rect` that cannot be read is treated as intersecting (D-RD3): an annotation of unknown
+/// extent that might sit under the mark is removed rather than kept.
+pub fn remove_intersecting_annotations(
+    document: &mut lopdf::Document,
+    page: u32,
+    rects: &[Rect],
+) -> Result<usize, AppError> {
+    if rects.is_empty() {
+        return Ok(0);
+    }
+    let page_id = textlocate::page_id(document, page)?;
+
+    let annots = match document
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .and_then(|page| page.get(b"Annots").cloned())
+    {
+        Ok(entry) => entry,
+        Err(_) => return Ok(0),
+    };
+
+    let entries: Vec<Object> = match &annots {
+        Object::Reference(id) => document
+            .get_object(*id)
+            .and_then(Object::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        Object::Array(array) => array.clone(),
+        _ => return Ok(0),
+    };
+
+    let mut kept = Vec::with_capacity(entries.len());
+    let mut removed = 0usize;
+    for entry in entries {
+        let object = match &entry {
+            Object::Reference(id) => document.get_object(*id).ok(),
+            other => Some(other),
+        };
+        let doomed = match object.and_then(|object| object.as_dict().ok()) {
+            Some(dict) => annotation_intersects(dict, document, rects),
+            None => true,
+        };
+        if doomed {
+            removed += 1;
+        } else {
+            kept.push(entry);
+        }
+    }
+
+    if removed > 0 {
+        let page = document
+            .get_object_mut(page_id)
+            .and_then(Object::as_dict_mut)
+            .map_err(|error| {
+                AppError::Other(format!("page object is not a dictionary: {error}"))
+            })?;
+        if kept.is_empty() {
+            page.remove(b"Annots");
+        } else {
+            page.set("Annots", kept);
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Whether one annotation's box intersects any mark; unreadable means yes (D-RD3).
+fn annotation_intersects(dict: &lopdf::Dictionary, document: &Document, rects: &[Rect]) -> bool {
+    match annotation_rect(dict, document) {
+        Some(rect) => rects.iter().any(|mark| rect.intersects(mark)),
+        None => true,
+    }
+}
+
+fn annotation_rect(dict: &lopdf::Dictionary, document: &Document) -> Option<Rect> {
+    let array = dict.get(b"Rect").ok()?;
+    let array = document.dereference(array).ok()?.1.as_array().ok()?;
+    if array.len() != 4 {
+        return None;
+    }
+    let mut corners = [0.0f32; 4];
+    for (index, value) in array.iter().enumerate() {
+        corners[index] = match value {
+            Object::Integer(value) => *value as f32,
+            Object::Real(value) => *value,
+            _ => return None,
+        };
+    }
+    Some(Rect::new(corners[0], corners[1], corners[2], corners[3]))
+}
+
+/// Deletes every image XObject the page draws inside a mark (D-RD2, D-RD7).
+///
+/// Whole-object removal, never partial masking: a `Do` that would draw an intersecting image
+/// is deleted, which is what stops the pixels being drawn at all. The image object itself is
+/// dropped by the reachability sweep when nothing else references it; when another page shares
+/// it, the shared object survives for that page, which is the page-scoped removal D-RD4's
+/// reachability rule implies.
+///
+/// The image's page-space box comes from the `cm` in force at its `Do`, so a scaled or placed
+/// image is judged where it actually appears rather than at its natural size.
+pub fn remove_intersecting_images(
+    document: &mut lopdf::Document,
+    page: u32,
+    rects: &[Rect],
+) -> Result<usize, AppError> {
+    if rects.is_empty() {
+        return Ok(0);
+    }
+    let page_id = textlocate::page_id(document, page)?;
+    let mut content = textlocate::decoded_content(document, page_id)?;
+
+    // Replay `cm`/`q`/`Q` so each `Do` is judged through the transform in force.
+    let mut saved: Vec<[f32; 6]> = Vec::new();
+    let mut matrix = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut doomed = Vec::new();
+
+    for (index, operation) in content.operations.iter().enumerate() {
+        match operation.operator.as_str() {
+            "q" => saved.push(matrix),
+            "Q" => {
+                if let Some(previous) = saved.pop() {
+                    matrix = previous;
+                }
+            }
+            "cm" => {
+                if let Some(next) = matrix_from_operands(&operation.operands) {
+                    matrix = multiply(matrix, next);
+                }
+            }
+            "Do" => {
+                let Some(Object::Name(name)) = operation.operands.first() else {
+                    continue;
+                };
+                let Some(stream) = xobject_entry(document, page_id, name) else {
+                    continue;
+                };
+                // Only images are judged here; forms hold content, which the text pass owns.
+                if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image") {
+                    continue;
+                }
+                if image_intersects(matrix, rects) {
+                    doomed.push(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for index in doomed.iter().rev() {
+        content.operations.remove(*index);
+    }
+    if !doomed.is_empty() {
+        write_content_at_path(document, page_id, &[], &content)?;
+        prune_unused_xobjects(document, page_id, &content)?;
+    }
+
+    Ok(doomed.len())
+}
+
+/// Drops `/XObject` entries the rewritten content no longer draws (D-RD2, I-RD3).
+///
+/// Deleting the `Do` stops the image being *drawn*, which is not the same as removing it:
+/// the resource dictionary still references the object, so the reachability sweep keeps it
+/// alive and the pixels stay in the file for anyone with a recovery tool. That is the
+/// "leftover XObject" leak I-RD3 exists to catch, and it was caught here by
+/// `an_image_drawn_under_the_mark_is_removed_whole` failing after the `Do` was already gone.
+///
+/// An entry is removed only when no `Do` in the rewritten content names it, so an image still
+/// drawn by another `Do` on the same page is untouched.
+fn prune_unused_xobjects(
+    document: &mut Document,
+    page_id: ObjectId,
+    content: &Content<Vec<lopdf::content::Operation>>,
+) -> Result<(), AppError> {
+    let drawn: BTreeSet<Vec<u8>> = content
+        .operations
+        .iter()
+        .filter(|operation| operation.operator == "Do")
+        .filter_map(|operation| match operation.operands.first() {
+            Some(Object::Name(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let page = document
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .map_err(|error| AppError::Other(format!("page object is not a dictionary: {error}")))?;
+    // `/Resources` may be inline or indirect; only the indirect form needs a mutable lookup.
+    let resources_id = match page.get(b"Resources").ok() {
+        Some(Object::Reference(id)) => Some(*id),
+        _ => None,
+    };
+
+    let unused: Vec<Vec<u8>> = {
+        let resources = match resources_id {
+            Some(id) => document
+                .get_object(id)
+                .and_then(Object::as_dict)
+                .map_err(|error| {
+                    AppError::Other(format!("resources are not a dictionary: {error}"))
+                })?,
+            // Inline `/Resources`: the dictionary lives one level down inside the page, so
+            // reading `/XObject` off the page itself finds nothing and returns early.
+            None => page
+                .get(b"Resources")
+                .and_then(Object::as_dict)
+                .map_err(|error| {
+                    AppError::Other(format!("page has no readable /Resources: {error}"))
+                })?,
+        };
+        let Some(xobjects) = resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|object| document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_dict().ok())
+        else {
+            return Ok(());
+        };
+        xobjects
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !drawn.contains(name))
+            .collect()
+    };
+
+    if unused.is_empty() {
+        return Ok(());
+    }
+
+    // The inline case must step *through* `/Resources`: `get_object_mut(page)` yields the page
+    // dictionary, whose `/XObject` key does not exist — the entry lives one level down.
+    let resources = match resources_id {
+        Some(id) => document.get_object_mut(id),
+        None => document.get_object_mut(page_id).and_then(|page| {
+            page.as_dict_mut()
+                .and_then(|page| page.get_mut(b"Resources"))
+        }),
+    }
+    .and_then(Object::as_dict_mut)
+    .map_err(|error| AppError::Other(format!("resources are not a dictionary: {error}")))?;
+    let xobjects = resources
+        .get_mut(b"XObject")
+        .map_err(|error| AppError::Other(format!("resources have no /XObject: {error}")))?
+        .as_dict_mut()
+        .map_err(|error| AppError::Other(format!("/XObject is not a dictionary: {error}")))?;
+    for name in unused {
+        xobjects.remove(&name);
+    }
+
+    Ok(())
+}
+
+/// Whether an image drawn through `matrix` can touch any mark (D-RD3: unreadable is yes).
+fn image_intersects(matrix: [f32; 6], rects: &[Rect]) -> bool {
+    // An image occupies the unit square, transformed by the `cm` in force.
+    let corners = [(0.0f32, 0.0f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(x, y)| {
+        Point2::new(
+            matrix[0] * x + matrix[2] * y + matrix[4],
+            matrix[1] * x + matrix[3] * y + matrix[5],
+        )
+    });
+    let boxed = Rect {
+        x0: corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min),
+        y0: corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min),
+        x1: corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max),
+        y1: corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max),
+    };
+    rects.iter().any(|mark| boxed.intersects(mark))
+}
+
+fn matrix_from_operands(operands: &[Object]) -> Option<[f32; 6]> {
+    if operands.len() != 6 {
+        return None;
+    }
+    let mut out = [0.0f32; 6];
+    for (index, operand) in operands.iter().enumerate() {
+        out[index] = match operand {
+            Object::Integer(value) => *value as f32,
+            Object::Real(value) => *value,
+            _ => return None,
+        };
+    }
+    Some(out)
+}
+
+fn multiply(left: [f32; 6], right: [f32; 6]) -> [f32; 6] {
+    [
+        left[0] * right[0] + left[1] * right[2],
+        left[0] * right[1] + left[1] * right[3],
+        left[2] * right[0] + left[3] * right[2],
+        left[2] * right[1] + left[3] * right[3],
+        left[4] * right[0] + left[5] * right[2] + right[4],
+        left[4] * right[1] + left[5] * right[3] + right[5],
+    ]
+}
+
+fn xobject_entry<'a>(
+    document: &'a Document,
+    page_id: ObjectId,
+    name: &[u8],
+) -> Option<&'a lopdf::Stream> {
+    let page = document.get_object(page_id).ok()?.as_dict().ok()?;
+    let resources = page
+        .get(b"Resources")
+        .ok()
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(_, object)| object.as_dict().ok())?;
+    let xobjects = resources
+        .get(b"XObject")
+        .ok()
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(_, object)| object.as_dict().ok())?;
+    xobjects
+        .get(name)
+        .ok()
+        .and_then(|object| document.dereference(object).ok())
+        .and_then(|(_, object)| object.as_stream().ok())
 }
 
 /// Decodes the content stream at `path`, descending through the named Form XObjects.

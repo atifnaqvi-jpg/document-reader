@@ -252,3 +252,233 @@ fn removing_the_highest_numbered_object_leaves_the_xref_consistent() {
     let path = write_temp(&mut doc, "rd4-xref.pdf");
     Document::load(&path).expect("I-RD4: the xref and object table must agree with the file");
 }
+
+// ---- D-RD2: annotations and images ----
+
+use lopdf::dictionary as dict_macro;
+
+/// Adds one square annotation at `rect` to page 0, returning its object id.
+fn add_square(doc: &mut Document, rect: [i64; 4], contents: &str) -> lopdf::ObjectId {
+    let annot_id = doc.new_object_id();
+    doc.objects.insert(
+        annot_id,
+        Object::Dictionary(dict_macro! {
+            "Type" => "Annot",
+            "Subtype" => "Square",
+            "Rect" => vec![rect[0].into(), rect[1].into(), rect[2].into(), rect[3].into()],
+            "Contents" => Object::string_literal(contents),
+        }),
+    );
+    let page_id = doc.get_pages().values().copied().next().unwrap();
+    let annots = doc
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .and_then(|page| page.get(b"Annots").cloned())
+        .unwrap_or(Object::Array(Vec::new()));
+    let mut array = match annots {
+        Object::Array(array) => array,
+        other => vec![other],
+    };
+    array.push(Object::Reference(annot_id));
+    doc.get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .unwrap()
+        .set("Annots", array);
+    annot_id
+}
+
+#[test]
+fn an_annotation_inside_the_mark_is_deleted_and_its_text_goes_with_it() {
+    let mut doc = fixture();
+    let annot_id = add_square(&mut doc, [80, 692, 180, 704], "note under the mark");
+    assert!(contains(&all_object_bytes(&doc), "note under the mark"));
+
+    let report = redact_page(&mut doc, 0, &[secret_rect()]).expect("redact");
+
+    assert_eq!(
+        report.annotations_removed, 1,
+        "the intersecting note must go"
+    );
+    assert!(
+        !doc.objects.contains_key(&annot_id)
+            || !contains(&all_object_bytes(&doc), "note under the mark"),
+        "D-RD2: the annotation's /Contents must not survive in the file"
+    );
+}
+
+#[test]
+fn an_annotation_outside_the_mark_survives() {
+    let mut doc = fixture();
+    add_square(&mut doc, [400, 400, 500, 500], "far from the mark");
+
+    let report = redact_page(&mut doc, 0, &[secret_rect()]).expect("redact");
+
+    assert_eq!(
+        report.annotations_removed, 0,
+        "an annotation outside every mark must be kept (over-removal of metadata is a \
+         different failure from over-removal of content)"
+    );
+    assert!(contains(&all_object_bytes(&doc), "far from the mark"));
+}
+
+#[test]
+fn an_image_drawn_under_the_mark_is_removed_whole() {
+    let mut doc = fixture();
+    let page_id = doc.get_pages().values().copied().next().unwrap();
+
+    // A 2x2 image drawn over the secret's area via `cm`.
+    let image_id = doc.new_object_id();
+    doc.objects.insert(
+        image_id,
+        Stream::new(
+            dict_macro! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2,
+                "Height" => 2,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            vec![0u8; 4],
+        )
+        .into(),
+    );
+    let resources = doc
+        .get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .unwrap()
+        .get_mut(b"Resources")
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    resources.set(
+        "XObject",
+        dict_macro! { "Im1" => Object::Reference(image_id) },
+    );
+
+    // Append the `Do` after the text, scaled to 100x100 at (72, 690).
+    let content_id = doc
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .and_then(|page| page.get(b"Contents"))
+        .and_then(Object::as_reference)
+        .unwrap();
+    let stream = doc
+        .get_object_mut(content_id)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap();
+    let mut bytes = stream.content.clone();
+    bytes.extend_from_slice(b"\nq 100 0 0 100 72 690 cm /Im1 Do Q\n");
+    stream.set_content(bytes);
+
+    let report = redact_page(&mut doc, 0, &[secret_rect()]).expect("redact");
+
+    assert_eq!(
+        report.images_removed, 1,
+        "D-RD7: the intersecting image goes whole"
+    );
+    let content = document_reader_lib::editor::textlocate::decoded_content(&doc, page_id).unwrap();
+    assert!(
+        !content
+            .operations
+            .iter()
+            .any(|operation| operation.operator == "Do"),
+        "the Do that drew the removed image must be gone"
+    );
+    assert!(
+        !doc.objects.contains_key(&image_id),
+        "the image object must be swept once nothing references it"
+    );
+}
+
+#[test]
+fn an_image_far_from_every_mark_survives() {
+    let mut doc = fixture();
+    let page_id = doc.get_pages().values().copied().next().unwrap();
+    let image_id = doc.new_object_id();
+    doc.objects.insert(
+        image_id,
+        Stream::new(
+            dict_macro! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2,
+                "Height" => 2,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            vec![0u8; 4],
+        )
+        .into(),
+    );
+    doc.get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .unwrap()
+        .get_mut(b"Resources")
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "XObject",
+            dict_macro! { "Im1" => Object::Reference(image_id) },
+        );
+
+    let content_id = doc
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .and_then(|page| page.get(b"Contents"))
+        .and_then(Object::as_reference)
+        .unwrap();
+    let stream = doc
+        .get_object_mut(content_id)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap();
+    let mut bytes = stream.content.clone();
+    bytes.extend_from_slice(b"\nq 50 0 0 50 400 400 cm /Im1 Do Q\n");
+    stream.set_content(bytes);
+
+    let report = redact_page(&mut doc, 0, &[secret_rect()]).expect("redact");
+
+    assert_eq!(
+        report.images_removed, 0,
+        "an image outside every mark must stay"
+    );
+    assert!(doc.objects.contains_key(&image_id));
+}
+
+#[test]
+fn an_annotation_whose_rect_cannot_be_read_is_removed() {
+    // D-RD3's fail-safe direction. A `/Rect` that is missing, malformed or not a number means
+    // the extent is unknown, and an annotation of unknown extent might sit under the mark.
+    // Keeping it is under-removal -- a silent disclosure -- which the phase forbids.
+    let mut doc = fixture();
+    let annot_id = doc.new_object_id();
+    doc.objects.insert(
+        annot_id,
+        Object::Dictionary(dict_macro! {
+            "Type" => "Annot",
+            "Subtype" => "Square",
+            // Three numbers, not four: not a rectangle.
+            "Rect" => vec![80.into(), 692.into(), 180.into()],
+            "Contents" => Object::string_literal("malformed rect note"),
+        }),
+    );
+    let page_id = doc.get_pages().values().copied().next().unwrap();
+    doc.get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .unwrap()
+        .set("Annots", vec![Object::Reference(annot_id)]);
+
+    let report = redact_page(&mut doc, 0, &[secret_rect()]).expect("redact");
+
+    assert_eq!(
+        report.annotations_removed, 1,
+        "D-RD3: an annotation whose box cannot be read must be removed, not kept"
+    );
+    assert!(
+        !contains(&all_object_bytes(&doc), "malformed rect note"),
+        "its /Contents must not survive in the file"
+    );
+}
