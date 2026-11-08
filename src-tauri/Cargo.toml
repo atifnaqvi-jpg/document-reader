@@ -50,6 +50,12 @@ quick-xml = "0.42"
 base64 = "0.22"
 lopdf = { version = "0.45", default-features = false, features = ["serde"] }
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+# PFX/PKCS#12 import (P3.2 D-SG1, amended 2026-11-08). `pkcs12` itself cannot decrypt a PFX at
+# either published version -- it carries a literal decryption TODO -- so the keystore reader is
+# `p12-keystore`, which does PBES2/PBKDF2 and verifies the MAC. Cost: a second `der` generation
+# in the lock (`der 0.8` here, `der 0.7` under `rsa`). Bounded by design K25: the crate parses and
+# decrypts only, and every type leaving `editor::signature::pfx` is raw DER.
+p12-keystore = "0.4.1"
 
 [dev-dependencies]
 tempfile = "3"

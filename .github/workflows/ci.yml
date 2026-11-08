@@ -232,9 +232,11 @@ jobs:
           # I-RD6's three idempotence tests, 663 -> 669 for D-RD6's search-and-redact,
           # then 669 -> 675 for SCOPE-C's incremental-append proof (§10 step 1), then
           # 675 -> 684 for `tests/signature_substrate.rs` (the /Contents gap, in-place patching
-          # of the range and contents, and I-SG1's independent digest oracle).
-          if [ "$passed" -lt 684 ]; then
-            echo "::error::only $passed tests ran; 684 is the non-PDFium baseline. A test stopped being collected."
+          # of the range and contents, and I-SG1's independent digest oracle), then 684 -> 697
+          # for the PFX importer (8 unit tests) and `tests/signing_surface.rs` (5 source-shape
+          # guards for D-SG3 and design K25).
+          if [ "$passed" -lt 697 ]; then
+            echo "::error::only $passed tests ran; 697 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

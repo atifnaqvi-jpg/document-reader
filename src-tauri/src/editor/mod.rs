@@ -20,6 +20,7 @@ pub mod runmetrics;
 pub mod sanitize;
 pub mod save;
 pub mod session;
+pub mod signature;
 pub mod substitute;
 #[cfg(any(test, feature = "testfixtures"))]
 pub mod testpdf;

@@ -360,6 +360,26 @@ pub enum AppError {
     /// A page's decoded content exceeded the processing cap (P2.4 T3e / F3).
     #[error("this page's content is too large to edit safely")]
     ContentTooLarge,
+    /// P3.2 D-SG5: the PFX opened with the wrong password, **or** the archive is damaged.
+    ///
+    /// Deliberately one code for both, because the PKCS#12 MAC cannot tell them apart: a wrong
+    /// password and a corrupted file both make the MAC disagree. Offering the user a single
+    /// sentence naming both possibilities is honest; splitting it would be a guess dressed as a
+    /// diagnosis, and telling them "the file is corrupt" when they mistyped is the worse guess.
+    #[error(
+        "the password did not open this keystore, or the keystore file is damaged; check the \
+         password and try again"
+    )]
+    PfxPasswordOrDamaged,
+    /// P3.2 D-SG5: the file is not a PFX this build can read, and the password is not the issue.
+    ///
+    /// The detail is the reader's own reason, included because "not a keystore" without it leaves
+    /// the user with no next step; the sentence above it already states the remedy.
+    #[error(
+        "this file is not a keystore this editor can read ({0}); choose a PFX/PKCS#12 file \
+         exported from your certificate manager"
+    )]
+    PfxInvalid(String),
     #[error("{0}")]
     Other(String),
 }
@@ -385,6 +405,8 @@ impl AppError {
             AppError::SubstituteRefused => "SUBSTITUTE_REFUSED",
             AppError::TextRunMismatch => "TEXT_RUN_MISMATCH",
             AppError::ContentTooLarge => "CONTENT_TOO_LARGE",
+            AppError::PfxPasswordOrDamaged => "PFX_PASSWORD_OR_DAMAGED",
+            AppError::PfxInvalid(_) => "PFX_INVALID",
             AppError::Other(_) => "OTHER",
         }
     }
