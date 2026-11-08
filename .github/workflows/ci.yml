@@ -230,9 +230,11 @@ jobs:
           # `tests/sanitize.rs` (D-RD5's seven classes plus the two negative directions),
           # then 655 -> 660 for I-RD7 and the whole-document apply ordering, 660 -> 663 for
           # I-RD6's three idempotence tests, 663 -> 669 for D-RD6's search-and-redact,
-          # then 669 -> 675 for SCOPE-C's incremental-append proof (§10 step 1).
-          if [ "$passed" -lt 675 ]; then
-            echo "::error::only $passed tests ran; 675 is the non-PDFium baseline. A test stopped being collected."
+          # then 669 -> 675 for SCOPE-C's incremental-append proof (§10 step 1), then
+          # 675 -> 684 for `tests/signature_substrate.rs` (the /Contents gap, in-place patching
+          # of the range and contents, and I-SG1's independent digest oracle).
+          if [ "$passed" -lt 684 ]; then
+            echo "::error::only $passed tests ran; 684 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
