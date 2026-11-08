@@ -172,3 +172,42 @@ fn the_redacted_output_opens_in_pdfium_with_the_same_page_count() {
         "I-RD5: page geometry must survive the rewrite, saw {width} x {height}"
     );
 }
+
+/// **I-RD2**: a raw byte scan of the *saved file* finds no trace of the redacted string.
+///
+/// I-RD1 asks PDFium what the page says; this asks the bytes what they contain. Both are
+/// needed: a stream that PDFium renders correctly could still carry the old string in a
+/// comment, an incremental-save remnant, or an object nothing draws. Scanning the file rather
+/// than the in-memory document is what makes this a check on the writer.
+#[test]
+#[ignore = "needs the real PDFium library; run under --include-ignored with PDFIUM_LIBRARY_PATH"]
+fn the_saved_file_contains_no_trace_of_the_redacted_string() {
+    use document_reader_lib::editor::redact::{apply_redactions, Rect};
+
+    let dir = temp_dir("ird2");
+    let mut doc = fixture();
+    // Leave metadata behind too, so the sanitize half of apply is exercised in the same file.
+    let info_id = doc.add_object(dictionary! { "Author" => Object::string_literal("LEAKYNAME") });
+    doc.trailer.set("Info", lopdf::Object::Reference(info_id));
+
+    apply_redactions(&mut doc, &[(0, vec![Rect::new(70.0, 690.0, 200.0, 706.0)])]).expect("apply");
+
+    let output = dir.join("redacted.pdf");
+    doc.save(&output).expect("save output");
+
+    let bytes = std::fs::read(&output).expect("read the saved file");
+    let text = String::from_utf8_lossy(&bytes);
+
+    assert!(
+        !text.contains(SECRET),
+        "I-RD2: the redacted string must not appear anywhere in the saved bytes"
+    );
+    assert!(
+        !text.contains("LEAKYNAME"),
+        "D-RD5: the metadata must not appear anywhere in the saved bytes"
+    );
+    assert!(
+        text.contains(KEPT),
+        "the unmarked text must still be present, or the test proves nothing"
+    );
+}

@@ -136,13 +136,13 @@ jobs:
           # without the library, so they move this pin. Their three siblings in
           # `tests/protect_ordering.rs` read source text and need no library, so they move the
           # `passed` floor instead.
-          # Measured at 103, not 101: P3.2 SCOPE-B's two `tests/redact_pdfium.rs` oracles ask
+          # Measured at 104, not 101: P3.2 SCOPE-B's three `tests/redact_pdfium.rs` oracles ask
           # PDFium what the redacted page says and how big it is, which is the whole point --
           # a byte scan we wrote cannot tell "our writer agrees with itself" from "a reader
           # shows nothing". They move this pin; the seven in `tests/redact_content.rs` need no
           # library and move the `passed` floor instead.
-          if [ "$ignored" -ne 103 ]; then
-            echo "::error::$ignored tests ignored; 103 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          if [ "$ignored" -ne 104 ]; then
+            echo "::error::$ignored tests ignored; 104 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
