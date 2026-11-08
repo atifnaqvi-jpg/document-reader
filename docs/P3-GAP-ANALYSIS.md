@@ -4,7 +4,7 @@ Produced 2026-11-01 at the user's direction, under the B-1 amendment in
 `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` (early production of the full-parity
 inventory, sanctioned; it must not disturb P2.8). Basis: the tree at `1183b45`
 (branch `p2-windows-test`, version 0.9.1) read against the parity requirements
-source `docs/reference/acrobat/acrobat-reader-feature-extraction-report.md`
+source `docs/reference/document-reader-capabilities.md`
 (referred to below as "the report"). Every "verified" claim below was checked
 against the tree, the tag list, or the test files on 2026-11-01.
 

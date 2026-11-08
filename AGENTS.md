@@ -2,15 +2,14 @@
 
 ## First action: `cd` to the project directory before running any `git`
 
-An agent session starts in `/workspace/project/<conversation-id>`. That
-directory may be **empty**, and its **parent** `/workspace/project` is itself a git
-repository on branch `master` with **zero commits**. So a `git commit` run from the starting
-directory walks up, finds that parent repository, and silently creates its *first* commit — on a
-repository unrelated to this project, with no HEAD to compare against and nothing to show the
-mistake. It does not fail; it succeeds somewhere else. Always change into
-`/workspace/project/<project-id>` explicitly, and confirm with
-`git rev-parse --show-toplevel` that the top level is the project directory, before any status,
-diff, add or commit.
+An agent session starts in a per-conversation working directory. That directory may be
+**empty**, and its **parent** (a shared workspace root) can itself be a git repository with
+**zero commits**. So a `git commit` run from the starting directory walks up, finds that
+parent repository, and silently creates its *first* commit — on a repository unrelated to
+this project, with no HEAD to compare against and nothing to show the mistake. It does not
+fail; it succeeds somewhere else. Always change into this project root explicitly, and
+confirm with `git rev-parse --show-toplevel` that the top level is the project directory,
+before any status, diff, add or commit.
 
 ## Standing rule: `--include-ignored` must pass before a phase is marked `[x]`
 
@@ -313,12 +312,14 @@ Release tags publish as **pre-releases** until 1.0.0. The `prerelease: true` in
   feature domain.
 - `docs/P3-PLAN.md` — the post-1.0.0 programme (P3.1…P3.6). Phases stay stage-gated:
   freeze a design → sign-off → implement → gate. No P3 phase starts before 1.0.0 ships.
-- `docs/reference/acrobat/acrobat-reader-feature-extraction-report.md` — the parity
-  requirements source ([O]/[I]/[?]-marked); §-references in the P3 docs point here.
+- `docs/reference/document-reader-capabilities.md` — the parity capability baseline
+  (distilled facts, stable §-anchors; the P3 docs reference these anchors). The fuller,
+  product-identified evidence record behind it is kept in a separate private research
+  repository and is deliberately not part of this repo.
 
 ## Out-of-scope projects
 
 **No POS work.** A point-of-sale project is not in scope and never was. See
-`the workspace-level agent instructions` ("Out-of-scope projects") for the binding rule. If you find
+the workspace-level agent instructions ("Out-of-scope projects") for the binding rule. If you find
 yourself designing POS architecture, ADRs, schemas, or asking deployment/country/hardware
 questions about a POS system: stop, delete what you wrote, and report the hallucination.

@@ -6,7 +6,7 @@ migration notice, library survival). Governed by the stage gate in
 `docs/P3-PLAN.md` §4: design, freeze decisions, sign-off, then implementation. This doc covers
 the **Rename housekeeping** row of `docs/P3-PLAN.md` §1, ruling **R5** in `docs/DECISIONS.md` §9,
 target version **1.0.1** (reserved by the tree). Requirements source: the report at
-`docs/reference/acrobat/acrobat-reader-feature-extraction-report.md` — this phase is
+`docs/reference/document-reader-capabilities.md` — this phase is
 branding housekeeping and claims **nothing** from the report's capability catalog; the report
 sections it does not cite are not applicable, and that is stated rather than left ambiguous.
 

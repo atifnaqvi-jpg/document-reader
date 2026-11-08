@@ -20,7 +20,7 @@ every phase since P2.4.
 > on the bundle identifier before any code. The P3.1 design doc follows in the same
 > sign-off pass.
 
-Requirements source: `docs/reference/acrobat/acrobat-reader-feature-extraction-report.md`.
+Requirements source: `docs/reference/document-reader-capabilities.md`.
 Charter: local-first (DECISIONS §9.1). Version cadence: one minor bump per phase
 (Q7 rule), continuing after 1.0.0.
 

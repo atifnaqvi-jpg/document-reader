@@ -239,4 +239,4 @@ document; do not re-ask.*
    deliberate, while the install base is hand-test machines only.
 
 Requirements source for the parity target: the Adobe feature/capability survey at
-`docs/reference/acrobat/acrobat-reader-feature-extraction-report.md`.
+`docs/reference/document-reader-capabilities.md`.
