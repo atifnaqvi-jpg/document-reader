@@ -80,8 +80,125 @@ pub struct PageRedaction {
     pub annotations_removed: usize,
     /// Image draws deleted because the image intersected a mark, whole (D-RD2/D-RD7).
     pub images_removed: usize,
+    /// Pre-existing `/Subtype /Redact` annotations stripped, wherever they sat (I-RD7).
+    ///
+    /// These are not ours: another tool's redaction marks carry the rectangle they cover in
+    /// their `/QuadPoints`, so leaving one behind tells a viewer exactly what we removed.
+    pub redact_annotations_stripped: usize,
     /// Objects dropped by the reachability sweep afterwards (D-RD4).
     pub objects_dropped: usize,
+}
+
+/// What one whole-document apply removed: every page's report plus the sanitize pass.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ApplyRedaction {
+    /// One entry per page that had at least one mark.
+    pub pages: Vec<PageRedaction>,
+    /// D-RD5's sanitize pass, run once after every page.
+    pub sanitized: crate::editor::sanitize::Sanitized,
+}
+
+impl ApplyRedaction {
+    /// Total text-showing operations deleted across the document.
+    pub fn runs_removed(&self) -> usize {
+        self.pages
+            .iter()
+            .map(|page| page.runs_removed + page.xobject_runs_removed)
+            .sum()
+    }
+}
+
+/// Applies every page's marks and then sanitizes (D-RD5), in that order.
+///
+/// Sanitize runs **last** and once, not per page: it clears annotation text outside the
+/// rectangles, which is only correct after every rectangle is known. Running it per page with
+/// that page's marks would clear annotation text on page 1 that a mark on page 2 was meant to
+/// keep.
+///
+/// Ordering also matters for the sweep. `redact_page` sweeps per page and sanitize sweeps at
+/// the end; the second is what removes the objects sanitize orphaned.
+pub fn apply_redactions(
+    document: &mut lopdf::Document,
+    marks: &[(u32, Vec<Rect>)],
+) -> Result<ApplyRedaction, AppError> {
+    let mut report = ApplyRedaction::default();
+
+    // A pre-existing /Redact annotation is not ours to keep, wherever it sits (I-RD7). Done
+    // before the per-page work so the object is gone by the time the sweep runs.
+    let stripped = strip_redact_annotations(document)?;
+
+    for (page, rects) in marks {
+        if rects.is_empty() {
+            continue;
+        }
+        let mut page_report = redact_page(document, *page, rects)?;
+        page_report.redact_annotations_stripped =
+            if report.pages.is_empty() { stripped } else { 0 };
+        report.pages.push(page_report);
+    }
+
+    report.sanitized = crate::editor::sanitize::sanitize(document)?;
+
+    Ok(report)
+}
+
+/// Removes every `/Subtype /Redact` annotation from every page (I-RD7).
+///
+/// The design's claim is that *the marks do not survive as marks*, so a viewer cannot reveal
+/// what was hidden by un-marking it. Our own marks are never written as annotations, but a
+/// file that arrived with someone else's carries the same disclosure.
+pub fn strip_redact_annotations(document: &mut lopdf::Document) -> Result<usize, AppError> {
+    let pages: Vec<ObjectId> = document.get_pages().values().copied().collect();
+    let mut stripped = 0;
+
+    for page_id in pages {
+        let annots = match document.get_object(page_id).and_then(Object::as_dict) {
+            Ok(page) => match page.get(b"Annots").ok() {
+                Some(Object::Reference(id)) => document
+                    .get_object(*id)
+                    .and_then(Object::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+                Some(Object::Array(array)) => array.clone(),
+                _ => continue,
+            },
+            Err(_) => continue,
+        };
+
+        let mut kept = Vec::with_capacity(annots.len());
+        let mut removed = 0;
+        for entry in annots {
+            let is_redact = entry
+                .as_reference()
+                .ok()
+                .and_then(|id| document.get_object(id).ok())
+                .and_then(|object| object.as_dict().ok())
+                .map(|dict| dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Redact"))
+                .unwrap_or(false);
+            if is_redact {
+                removed += 1;
+            } else {
+                kept.push(entry);
+            }
+        }
+
+        if removed > 0 {
+            stripped += removed;
+            let page = document
+                .get_object_mut(page_id)
+                .and_then(Object::as_dict_mut)
+                .map_err(|error| {
+                    AppError::Other(format!("page object is not a dictionary: {error}"))
+                })?;
+            if kept.is_empty() {
+                page.remove(b"Annots");
+            } else {
+                page.set("Annots", kept);
+            }
+        }
+    }
+
+    Ok(stripped)
 }
 
 /// True when `run` overlaps `rect` and must therefore be removed (D-RD3).

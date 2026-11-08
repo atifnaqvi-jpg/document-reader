@@ -482,3 +482,166 @@ fn an_annotation_whose_rect_cannot_be_read_is_removed() {
         "its /Contents must not survive in the file"
     );
 }
+
+// ---- I-RD7: the marks must not survive as marks ----
+
+use document_reader_lib::editor::redact::apply_redactions;
+
+#[test]
+fn a_pre_existing_redact_annotation_is_stripped() {
+    // Another tool's redaction mark carries the rectangle it covers in /QuadPoints, so it
+    // tells a viewer exactly what was removed. I-RD7: the output contains no /Redact.
+    let mut doc = fixture();
+    let annot_id = doc.new_object_id();
+    doc.objects.insert(
+        annot_id,
+        Object::Dictionary(dict_macro! {
+            "Type" => "Annot",
+            "Subtype" => "Redact",
+            "Rect" => vec![72.into(), 690.into(), 200.into(), 706.into()],
+            "QuadPoints" => vec![72.into(), 706.into(), 200.into(), 706.into()],
+        }),
+    );
+    let page_id = doc.get_pages().values().copied().next().unwrap();
+    doc.get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .unwrap()
+        .set("Annots", vec![Object::Reference(annot_id)]);
+
+    let report = apply_redactions(&mut doc, &[(0, vec![secret_rect()])]).expect("apply");
+
+    assert_eq!(
+        report
+            .pages
+            .iter()
+            .map(|p| p.redact_annotations_stripped)
+            .sum::<usize>(),
+        1,
+        "I-RD7: the /Redact annotation must be stripped"
+    );
+    let bytes = format!("{:?}", doc.objects);
+    assert!(
+        !bytes.contains("Redact"),
+        "I-RD7: no /Redact subtype may remain anywhere in the file"
+    );
+}
+
+#[test]
+fn apply_runs_sanitize_and_the_result_has_no_metadata() {
+    // D-RD5 says sanitize is part of apply, not a separate opt-in step. If a caller could
+    // apply without sanitizing, the "remove hidden information" claim would be opt-in and
+    // skippable, which is what the decision forbids.
+    let mut doc = fixture();
+    let info_id = doc.add_object(dict_macro! {
+        "Author" => Object::string_literal("A Person"),
+    });
+    doc.trailer.set("Info", Object::Reference(info_id));
+
+    let report = apply_redactions(&mut doc, &[(0, vec![secret_rect()])]).expect("apply");
+
+    assert!(
+        report.sanitized.info_dropped,
+        "D-RD5: apply must have run sanitize"
+    );
+    let bytes = format!("{:?}", doc.objects);
+    assert!(
+        !bytes.contains("A Person"),
+        "the author must not survive the apply"
+    );
+}
+
+#[test]
+fn apply_removes_text_and_sanitizes_in_one_pass() {
+    let mut doc = fixture();
+    let info_id = doc.add_object(dict_macro! {
+        "Author" => Object::string_literal("Hidden Author"),
+    });
+    doc.trailer.set("Info", Object::Reference(info_id));
+
+    let report = apply_redactions(&mut doc, &[(0, vec![secret_rect()])]).expect("apply");
+
+    assert!(report.runs_removed() > 0, "the text run must be removed");
+    assert!(report.sanitized.info_dropped, "and /Info dropped");
+    let bytes = all_object_bytes(&doc);
+    assert!(!contains(&bytes, "TOPSECRET"), "the text must be gone");
+    assert!(
+        !contains(&bytes, "Hidden Author"),
+        "the metadata must be gone"
+    );
+}
+
+#[test]
+fn apply_with_no_marks_still_sanitizes_but_removes_no_content() {
+    // An empty mark set is a legal call (the panel's Apply with nothing marked). It must not
+    // remove content, but sanitize is part of apply, so it still runs.
+    let mut doc = fixture();
+    let info_id = doc.add_object(dict_macro! {
+        "Author" => Object::string_literal("Hidden Author"),
+    });
+    doc.trailer.set("Info", Object::Reference(info_id));
+
+    let report = apply_redactions(&mut doc, &[]).expect("apply");
+
+    assert_eq!(
+        report.runs_removed(),
+        0,
+        "no marks means no content removal"
+    );
+    assert!(report.pages.is_empty(), "no page had marks");
+    assert!(report.sanitized.info_dropped, "sanitize still runs");
+    assert!(contains(&all_object_bytes(&doc), "TOPSECRET"));
+}
+
+#[test]
+fn stripping_redact_marks_keeps_other_annotations() {
+    // The over-removal direction of I-RD7. Strip only `/Subtype /Redact`: a highlight or a
+    // comment is the user's own content, and deleting it while claiming to remove hidden
+    // information would be a different failure, not a safer one.
+    use document_reader_lib::editor::redact::strip_redact_annotations;
+
+    let mut doc = fixture();
+    let redact_id = doc.new_object_id();
+    doc.objects.insert(
+        redact_id,
+        Object::Dictionary(dict_macro! {
+            "Type" => "Annot",
+            "Subtype" => "Redact",
+            "Rect" => vec![72.into(), 690.into(), 200.into(), 706.into()],
+        }),
+    );
+    let highlight_id = doc.new_object_id();
+    doc.objects.insert(
+        highlight_id,
+        Object::Dictionary(dict_macro! {
+            "Type" => "Annot",
+            "Subtype" => "Highlight",
+            "Rect" => vec![72.into(), 640.into(), 200.into(), 656.into()],
+        }),
+    );
+    let page_id = doc.get_pages().values().copied().next().unwrap();
+    doc.get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .unwrap()
+        .set(
+            "Annots",
+            vec![
+                Object::Reference(redact_id),
+                Object::Reference(highlight_id),
+            ],
+        );
+
+    let stripped = strip_redact_annotations(&mut doc).expect("strip");
+
+    assert_eq!(stripped, 1, "only the /Redact annotation goes");
+    assert!(
+        doc.objects.contains_key(&highlight_id),
+        "a highlight is the user's content and must survive"
+    );
+    let annots = doc
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .and_then(|page| page.get(b"Annots"))
+        .and_then(Object::as_array)
+        .expect("the surviving annotation stays in /Annots");
+    assert_eq!(annots.len(), 1, "exactly one annotation remains");
+}
