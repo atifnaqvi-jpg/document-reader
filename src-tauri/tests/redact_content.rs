@@ -717,3 +717,114 @@ fn an_apply_that_only_removes_an_annotation_is_not_a_no_op() {
         "and it must be gone from the document"
     );
 }
+
+// ---- D-RD6: search-and-redact ----
+
+use document_reader_lib::editor::redact::find_and_mark;
+
+#[test]
+fn search_finds_the_pattern_and_marks_only_its_run() {
+    // D-RD6. The hit must convert to a rectangle covering the matched characters, not the
+    // whole run -- otherwise marking "SECRET" inside "TOPSECRETVALUE" would remove the
+    // surrounding characters the user did not ask to remove.
+    let doc = fixture();
+    let hits = find_and_mark(&doc, 0, "SECRET").expect("search");
+
+    assert_eq!(hits.len(), 1, "one run contains the pattern once");
+    assert_eq!(hits[0].text, "SECRET");
+    assert_eq!(hits[0].page, 0);
+    // The secret run starts at x = 72 and is 14 characters wide at 12pt Helvetica. The
+    // match starts 2 characters in and is 6 characters wide, so the box is strictly inside
+    // the run's own extent on both sides.
+    assert!(
+        hits[0].rect.x0 > 72.0,
+        "the mark starts after the run origin, got {:?}",
+        hits[0].rect
+    );
+    assert!(
+        hits[0].rect.x1 < 72.0 + 14.0 * 12.0,
+        "the mark ends before the run ends, got {:?}",
+        hits[0].rect
+    );
+}
+
+#[test]
+fn search_is_case_insensitive() {
+    let doc = fixture();
+    let lower = find_and_mark(&doc, 0, "topsecretvalue").expect("search");
+    let upper = find_and_mark(&doc, 0, "TOPSECRETVALUE").expect("search");
+
+    assert_eq!(lower.len(), 1, "lowercase must find it");
+    assert_eq!(lower.len(), upper.len());
+    assert_eq!(
+        lower[0].rect, upper[0].rect,
+        "case must not move the rectangle"
+    );
+}
+
+#[test]
+fn search_reports_every_occurrence_in_a_run() {
+    let mut doc = fixture();
+    // Replace the content so one run repeats the pattern.
+    let content_id = doc
+        .get_pages()
+        .values()
+        .copied()
+        .next()
+        .and_then(|page| doc.get_object(page).ok())
+        .and_then(|page| page.as_dict().ok())
+        .and_then(|page| page.get(b"Contents").ok())
+        .and_then(|c| c.as_reference().ok())
+        .expect("content");
+    let content = "BT /F1 12 Tf 72 700 Td (ABAB) Tj ET\n".to_string();
+    doc.objects.insert(
+        content_id,
+        Stream::new(dictionary! {}, content.into_bytes()).into(),
+    );
+
+    let hits = find_and_mark(&doc, 0, "AB").expect("search");
+
+    assert_eq!(hits.len(), 2, "both occurrences must be marked");
+    assert!(
+        hits[1].rect.x0 > hits[0].rect.x0,
+        "the second mark sits to the right of the first"
+    );
+    assert_eq!(hits[0].text, "AB");
+    assert_eq!(hits[1].text, "AB");
+}
+
+#[test]
+fn search_that_matches_nothing_marks_nothing() {
+    let doc = fixture();
+    let hits = find_and_mark(&doc, 0, "notpresent").expect("search");
+    assert!(hits.is_empty(), "no match means no mark, got {hits:?}");
+}
+
+#[test]
+fn an_empty_pattern_marks_nothing_rather_than_everything() {
+    // The dangerous default: an empty needle matches at every position in every run, which
+    // would mark the whole document.
+    let doc = fixture();
+    let hits = find_and_mark(&doc, 0, "").expect("search");
+    assert!(hits.is_empty(), "an empty pattern must mark nothing");
+}
+
+#[test]
+fn a_hit_becomes_a_mark_that_removes_the_text() {
+    // The end-to-end claim: find a word, apply, and the word is gone while its neighbours
+    // stay. This is what distinguishes search-and-redact from "redact the whole run".
+    let mut doc = fixture();
+    let hits = find_and_mark(&doc, 0, "SECRET").expect("search");
+    assert_eq!(hits.len(), 1);
+
+    let rects: Vec<Rect> = hits.iter().map(|hit| hit.rect).collect();
+    let report = apply_redactions(&mut doc, &[(0, rects)]).expect("apply");
+
+    assert!(report.runs_removed() > 0, "the run must be removed");
+    let bytes = all_object_bytes(&doc);
+    assert!(
+        !contains(&bytes, "TOPSECRETVALUE"),
+        "the whole run goes: partial-run glyph removal is not what D-RD2 asks for"
+    );
+    assert!(contains(&bytes, "KEEPME"), "the other run must survive");
+}

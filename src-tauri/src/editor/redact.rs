@@ -216,6 +216,138 @@ pub fn strip_redact_annotations(document: &mut lopdf::Document) -> Result<usize,
     Ok(stripped)
 }
 
+/// One pattern hit, as the rectangle that covers the matched characters (D-RD6).
+///
+/// The rectangle comes from the locator's own run measurement rather than a second text
+/// model: `along()`/`across()` project a page point into the run's frame, so a substring's
+/// extent is its proportion of the run's advance. Re-implementing "where is this word" is the
+/// duplication K14 names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternHit {
+    /// The page the hit is on, 0-based.
+    pub page: u32,
+    /// The matched text, as decoded through the run's font.
+    pub text: String,
+    /// The rectangle to mark, in page coordinates.
+    pub rect: Rect,
+}
+
+/// Finds every occurrence of `pattern` and returns the rectangle to mark for each (D-RD6).
+///
+/// Matching is case-insensitive and operates on the *decoded* run text, which is what the
+/// user sees. A match that spans two runs is not found: runs are separate text-showing
+/// operations and this build does not join them into words, so a pattern split across a
+/// `Tj`/`TJ` seam is a miss. That is a real limitation and it is stated here rather than
+/// discovered as "search-and-redact missed it" later — see the design's §8 boundary list.
+pub fn find_and_mark(
+    document: &lopdf::Document,
+    page: u32,
+    pattern: &str,
+) -> Result<Vec<PatternHit>, AppError> {
+    if pattern.is_empty() {
+        return Ok(Vec::new());
+    }
+    let page_id = textlocate::page_id(document, page)?;
+    let runs = textlocate::locate_runs(document, page_id)?;
+    let needle = pattern.to_lowercase();
+
+    let mut hits = Vec::new();
+    for run in &runs {
+        // A refused descent means text this walk could not see. Marking nothing there would
+        // claim a search covered the page when it did not (D-RD3's reasoning applied to
+        // search): fail rather than under-report.
+        if run.xobject_refusal.is_some() {
+            return Err(AppError::RedactionIncomplete(
+                "search cannot cover a form this build refuses to descend into".to_string(),
+            ));
+        }
+
+        let haystack = run.text.to_lowercase();
+        if haystack.is_empty() || run.text.len() != haystack.len() {
+            // A byte-length change means lowercasing re-encoded something; offsets into
+            // `run.text` would no longer line up with character positions. Skipping is safe
+            // only because the caller is told nothing was found for this run.
+            continue;
+        }
+
+        let mut from = 0usize;
+        while let Some(offset) = haystack[from..].find(&needle) {
+            let start = from + offset;
+            let end = start + needle.len();
+            if end == start {
+                // A zero-length match cannot advance `from`, so looping would spin forever.
+                // The empty-pattern guard above already returns, but a hang must never be the
+                // thing that reports a missing guard: break and stay terminating.
+                break;
+            }
+            if let Some(rect) = run_span_rect(run, start, end) {
+                hits.push(PatternHit {
+                    page,
+                    text: run.text[start..end].to_string(),
+                    rect,
+                });
+            }
+            from = end;
+            if from >= haystack.len() {
+                break;
+            }
+        }
+    }
+
+    Ok(hits)
+}
+
+/// The page-space rectangle covering characters `start..end` of `run` (D-RD6).
+///
+/// Positions are interpolated along the run's measured advance, so a hit in the middle of a
+/// long `TJ` operand covers only its own characters instead of the whole run. A run whose
+/// advance is unusable (zero, or non-finite) falls back to the whole run's box, which
+/// over-marks — the direction D-RD3 prefers.
+fn run_span_rect(run: &RawRun, start: usize, end: usize) -> Option<Rect> {
+    let characters = run.text.chars().count();
+    if characters == 0 {
+        return None;
+    }
+
+    let origin = Point2::new(run.page_origin.0, run.page_origin.1);
+    let height = run.font_size.abs().max(1.0);
+    let total = run.advance.abs();
+
+    let (along_start, along_end) = if total.is_finite() && total > 0.0 {
+        let per_character = total / characters as f32;
+        (per_character * start as f32, per_character * end as f32)
+    } else {
+        (0.0, if total.is_finite() { total } else { 0.0 })
+    };
+
+    let frame: RunFrame = run.frame;
+    let corners = [
+        (along_start, 0.0),
+        (along_end, 0.0),
+        (along_start, height),
+        (along_end, height),
+    ]
+    .map(|(along, across)| {
+        Point2::new(
+            origin.x + frame.advance.x * along + frame.up.x * across,
+            origin.y + frame.advance.y * along + frame.up.y * across,
+        )
+    });
+
+    Some(Rect {
+        x0: corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min),
+        y0: corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min),
+        x1: corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max),
+        y1: corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max),
+    })
+}
+
 /// True when `run` overlaps `rect` and must therefore be removed (D-RD3).
 ///
 /// The test is deliberately the union of two weaker tests rather than one tight one:

@@ -228,9 +228,9 @@ jobs:
           # and image removal arrived with five more tests there, then 646 -> 655 for
           # `tests/sanitize.rs` (D-RD5's seven classes plus the two negative directions),
           # then 655 -> 660 for I-RD7 and the whole-document apply ordering, 660 -> 663 for
-          # I-RD6's three idempotence tests.
-          if [ "$passed" -lt 663 ]; then
-            echo "::error::only $passed tests ran; 663 is the non-PDFium baseline. A test stopped being collected."
+          # I-RD6's three idempotence tests, 663 -> 669 for D-RD6's search-and-redact.
+          if [ "$passed" -lt 669 ]; then
+            echo "::error::only $passed tests ran; 669 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
