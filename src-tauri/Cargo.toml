@@ -62,6 +62,17 @@ p12-keystore = "0.4.1"
 # parse a certificate's subject, validity and key algorithm. No new crate, no new `der`
 # generation: this is the same `x509-cert 0.3.0` the PFX reader already pulls.
 x509-cert = "0.3"
+# SCOPE-C signing (D-SG1). `cms 0.2.3` is the last release that builds on stable `rsa 0.9`;
+# `cms 0.3` requires `rsa 0.10.0-rc`, which is not acceptable in a shipped signer. The cost is
+# the twin `der`/`x509-cert` generations K24 predicted: `x509-cert-cms` is a second *name* for
+# 0.2 so the CMS module cannot accidentally hand a 0.2 certificate to 0.3 code. K25 still
+# holds -- nothing but raw DER crosses that edge.
+x509-cert-cms = { package = "x509-cert", version = "0.2.3", features = ["builder"] }
+cms = { version = "0.2.3", features = ["builder", "std"] }
+rsa = { version = "0.9.6", features = ["sha2"] }
+const-oid = { version = "0.9", features = ["db"] }
+spki-cms = { package = "spki", version = "0.7" }
+der-cms = { package = "der", version = "0.7", features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -72,3 +83,4 @@ tempfile = "3"
 # the shipping platform, and `signature/winstore.rs` is the only module allowed to name it.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+x509-cert-cms = { package = "x509-cert", version = "0.2.3", features = ["builder"] }

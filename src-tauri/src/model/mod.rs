@@ -395,6 +395,13 @@ pub enum AppError {
     /// never installed.
     #[error("this certificate could not be read ({0})")]
     CertificateUnreadable(String),
+    /// P3.2 D-SG1: the CMS `SignedData` could not be constructed.
+    ///
+    /// Distinct from a bad key or certificate, which have their own variants: this one means the
+    /// inputs were usable and the builder still refused, which is a defect rather than a user
+    /// mistake. Collapsing it into `Other` would lose that distinction in the frontend.
+    #[error("the signature could not be built ({0})")]
+    SignatureBuildFailed(String),
     #[error("{0}")]
     Other(String),
 }
@@ -424,6 +431,7 @@ impl AppError {
             AppError::PfxInvalid(_) => "PFX_INVALID",
             AppError::CertificateStoreUnavailable(_) => "CERTIFICATE_STORE_UNAVAILABLE",
             AppError::CertificateUnreadable(_) => "CERTIFICATE_UNREADABLE",
+            AppError::SignatureBuildFailed(_) => "SIGNATURE_BUILD_FAILED",
             AppError::Other(_) => "OTHER",
         }
     }

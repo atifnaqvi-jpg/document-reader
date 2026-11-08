@@ -239,9 +239,14 @@ jobs:
           # the key/validity filter, the stable picker order and the reported-not-swallowed
           # unreadable entry, and -- off Windows -- prove the listing refuses rather than
           # reporting an empty store. Re-measured, not incremented: the suite was run and the
-          # ignored count stayed at 106, so none of the ten is PDFium-gated.
-          if [ "$passed" -lt 707 ]; then
-            echo "::error::only $passed tests ran; 707 is the non-PDFium baseline. A test stopped being collected."
+          # ignored count stayed at 106, so none of the ten is PDFium-gated. Then 707 -> 727 for
+          # the CMS signer: `signature/cms.rs` adds 8 unit tests for the gap encoder and the
+          # delimiter/bounds refusals, and `tests/sign_pdf.rs` adds 12 end-to-end tests that sign
+          # a document and verify it with a hand-written DER walk plus `rsa`'s verifier, plus a
+          # sixth `signing_surface.rs` guard confining the CMS crates to `cms.rs`. Measured with
+          # PDFium unavailable: 728 passed, 0 ignored.
+          if [ "$passed" -lt 728 ]; then
+            echo "::error::only $passed tests ran; 728 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

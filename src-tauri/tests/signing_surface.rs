@@ -136,6 +136,42 @@ fn the_keystore_crate_is_named_only_in_the_pfx_module() {
     );
 }
 
+/// K25 for the CMS stack: `cms`, `rsa`, `x509-cert 0.2` and `der 0.7` are confined to `cms.rs`.
+///
+/// The signer sits on a second `der`/`x509-cert` generation than the rest of the crate (design
+/// K24 predicted exactly this). The boundary is honoured only if no CMS-crate type escapes the one
+/// file that builds signatures: a `der 0.7` value handed to `der 0.8` code does not compile, but
+/// the reverse mistake -- threading an `x509-cert 0.3` certificate into the CMS builder -- is
+/// caught here rather than at review.
+///
+/// `sha2` is deliberately absent from this list: the crate already uses both generations, and a
+/// digest has no cross-generation identity problem.
+#[test]
+fn the_cms_crates_are_confined_to_the_cms_module() {
+    for crate_name in ["cms", "rsa", "x509_cert_cms", "der_cms", "spki_cms"] {
+        let mut users = Vec::new();
+        for (path, text) in signing_sources() {
+            for line in text.lines() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                // Match `use cms::`, `cms::builder::...` and the aliased package names.
+                if line.contains(&format!("{crate_name}::")) {
+                    users.push(path.file_name().unwrap().to_string_lossy().to_string());
+                    break;
+                }
+            }
+        }
+        users.sort();
+        users.dedup();
+        assert_eq!(
+            users,
+            vec!["cms.rs".to_string()],
+            "{crate_name} must be confined to the CMS module (design K25); found it in {users:?}"
+        );
+    }
+}
+
 /// The PFX module's public surface is DER, not the reader's types (design K25).
 ///
 /// Written as a check on the re-export list because that is the exact place the boundary is
