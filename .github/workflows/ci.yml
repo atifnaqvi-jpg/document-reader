@@ -225,9 +225,10 @@ jobs:
           # `tests/object_gc.rs`: 627 -> 634, seven tests that build documents in memory and
           # need no library, so this floor moves and the ignored pin above does not. And again
           # for `tests/redact_content.rs`: 634 -> 641, then 641 -> 646 when D-RD2's annotation
-          # and image removal arrived with five more tests there.
-          if [ "$passed" -lt 646 ]; then
-            echo "::error::only $passed tests ran; 646 is the non-PDFium baseline. A test stopped being collected."
+          # and image removal arrived with five more tests there, then 646 -> 655 for
+          # `tests/sanitize.rs` (D-RD5's seven classes plus the two negative directions).
+          if [ "$passed" -lt 655 ]; then
+            echo "::error::only $passed tests ran; 655 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

@@ -17,6 +17,7 @@ pub mod protect;
 pub mod redact;
 pub mod reflow;
 pub mod runmetrics;
+pub mod sanitize;
 pub mod save;
 pub mod session;
 pub mod substitute;
