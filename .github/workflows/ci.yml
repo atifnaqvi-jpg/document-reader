@@ -136,8 +136,13 @@ jobs:
           # without the library, so they move this pin. Their three siblings in
           # `tests/protect_ordering.rs` read source text and need no library, so they move the
           # `passed` floor instead.
-          if [ "$ignored" -ne 101 ]; then
-            echo "::error::$ignored tests ignored; 101 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured at 103, not 101: P3.2 SCOPE-B's two `tests/redact_pdfium.rs` oracles ask
+          # PDFium what the redacted page says and how big it is, which is the whole point --
+          # a byte scan we wrote cannot tell "our writer agrees with itself" from "a reader
+          # shows nothing". They move this pin; the seven in `tests/redact_content.rs` need no
+          # library and move the `passed` floor instead.
+          if [ "$ignored" -ne 103 ]; then
+            echo "::error::$ignored tests ignored; 103 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -218,9 +223,10 @@ jobs:
           # notes-link guard written after the tag (623 -> 624), then P3.2 SCOPE-A's eight
           # protect tests (624 -> 627). Re-measured, not incremented, for SCOPE-B's
           # `tests/object_gc.rs`: 627 -> 634, seven tests that build documents in memory and
-          # need no library, so this floor moves and the ignored pin above does not.
-          if [ "$passed" -lt 634 ]; then
-            echo "::error::only $passed tests ran; 634 is the non-PDFium baseline. A test stopped being collected."
+          # need no library, so this floor moves and the ignored pin above does not. And again
+          # for `tests/redact_content.rs`: 634 -> 641, same reason.
+          if [ "$passed" -lt 641 ]; then
+            echo "::error::only $passed tests ran; 641 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

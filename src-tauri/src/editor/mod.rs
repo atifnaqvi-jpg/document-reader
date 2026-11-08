@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod object_gc;
 pub mod pages;
 pub mod protect;
+pub mod redact;
 pub mod reflow;
 pub mod runmetrics;
 pub mod save;

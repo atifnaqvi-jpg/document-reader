@@ -296,6 +296,11 @@ pub enum AppError {
     /// that does not say why is indistinguishable from a bug.
     #[error("{0}")]
     TextRunNotEditable(String),
+    /// A redaction could not be applied with the certainty D-RD3 requires, so it stopped
+    /// rather than removing less than the user marked and reporting success. The string names
+    /// the part of the document this build could not account for.
+    #[error("this redaction could not be completed: {0}")]
+    RedactionIncomplete(String),
     /// Stage 2 (T11/T13): the replacement needs glyphs that neither the run's original
     /// font nor any standard-14 substitute can supply, and the shipped bundle genuinely
     /// lacks them. Permanent within this build: changing the substitution setting will not
@@ -372,6 +377,7 @@ impl AppError {
             AppError::EncryptedReadOnly => "ENCRYPTED_READ_ONLY",
             AppError::WrongPassword => "WRONG_PASSWORD",
             AppError::TextRunNotEditable(_) => "TEXT_RUN_NOT_EDITABLE",
+            AppError::RedactionIncomplete(_) => "REDACTION_INCOMPLETE",
             AppError::GlyphsNotCoverable => "GLYPHS_NOT_COVERABLE",
             AppError::SubsetBuildFailed(_) => "SUBSET_BUILD_FAILED",
             AppError::CidMappingUnsupported(_) => "CID_MAPPING_UNSUPPORTED",
