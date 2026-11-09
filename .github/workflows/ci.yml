@@ -244,9 +244,10 @@ jobs:
           # delimiter/bounds refusals, and `tests/sign_pdf.rs` adds 12 end-to-end tests that sign
           # a document and verify it with a hand-written DER walk plus `rsa`'s verifier, plus a
           # sixth `signing_surface.rs` guard confining the CMS crates to `cms.rs`. Measured with
-          # PDFium unavailable: 728 passed, 0 ignored.
-          if [ "$passed" -lt 728 ]; then
-            echo "::error::only $passed tests ran; 728 is the non-PDFium baseline. A test stopped being collected."
+          # PDFium unavailable: 746 passed, 0 ignored. Measured after the save-path unit, which
+          # added 18 (8 sign.rs unit tests, 8 sign_save.rs integration tests, 2 cleanup tests).
+          if [ "$passed" -lt 746 ]; then
+            echo "::error::only $passed tests ran; 746 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

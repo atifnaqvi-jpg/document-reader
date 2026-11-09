@@ -155,8 +155,15 @@ fn the_cms_crates_are_confined_to_the_cms_module() {
                 if line.trim_start().starts_with("//") {
                     continue;
                 }
-                // Match `use cms::`, `cms::builder::...` and the aliased package names.
-                if line.contains(&format!("{crate_name}::")) {
+                // Match `use cms::`, `cms::builder::...` and the aliased package names, but not
+                // our own module that happens to share the name: `crate::editor::signature::cms`
+                // and `super::cms` are this crate's signer, not the `cms` package. Without this
+                // the guard fired on every sibling module that used the signer.
+                let mut own = line.to_string();
+                for prefix in ["signature::cms::", "super::cms::", "self::cms::"] {
+                    own = own.replace(prefix, "");
+                }
+                if own.contains(&format!("{crate_name}::")) {
                     users.push(path.file_name().unwrap().to_string_lossy().to_string());
                     break;
                 }
