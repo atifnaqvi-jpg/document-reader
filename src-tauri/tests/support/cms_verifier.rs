@@ -355,14 +355,80 @@ pub fn extract_signature(written: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let gap_start = start + first + 1; // past the '<'
     let gap_end = second_start - 1; // the '>'
     let hex_gap = std::str::from_utf8(&written[gap_start..gap_end]).expect("hex is ASCII");
+    (decode_contents_gap(hex_gap.as_bytes()), covered)
+}
+
+/// Decode the `/Contents` hex gap down to the exact DER it holds.
+///
+/// The real DER length comes from its own header, not from trailing zeros. The gap is zero-padded
+/// to a fixed size, but a signature may legitimately *end* in `0x00`, and a DER SEQUENCE ends with
+/// the last byte of its last element, so nothing about a zero says "padding". Stripping every
+/// trailing zero truncated such a signature by one byte and the parse then failed at
+/// "ContentInfo SEQUENCE" on a signature that was in fact well formed: measured at roughly one run
+/// in ten. Parse first, then trust the declared length.
+fn decode_contents_gap(hex_gap: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::with_capacity(hex_gap.len() / 2);
-    for pair in hex_gap.as_bytes().chunks(2) {
+    for pair in hex_gap.chunks(2) {
         decoded.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).expect("hex"));
     }
-    let der_len = decoded.len() - decoded.iter().rev().take_while(|byte| **byte == 0).count();
-    (decoded[..der_len].to_vec(), covered)
+    let (_, _, der_len) =
+        der_read(&decoded, 0).expect("the /Contents gap must begin with a DER value");
+    decoded.truncate(der_len);
+    decoded
 }
 
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+
+    /// A 4-byte DER SEQUENCE whose last content byte is `0x00`, padded with zeros as the real
+    /// `/Contents` gap is. `30 02 01 00` is the shortest shape where the zero is *data*, not
+    /// padding: a strict DER encoder is free to emit these exact bytes.
+    fn der_ending_in_zero() -> Vec<u8> {
+        let mut gap = vec![0x30, 0x02, 0x01, 0x00];
+        gap.extend(std::iter::repeat_n(0, 12));
+        gap
+    }
+
+    fn as_hex(bytes: &[u8]) -> Vec<u8> {
+        bytes
+            .iter()
+            .flat_map(|b| format!("{b:02X}").into_bytes())
+            .collect()
+    }
+
+    /// The regression this pins: a signature that legitimately ends in `0x00` must not lose it.
+    ///
+    /// The old implementation computed the DER length by trimming trailing zeros, which is
+    /// indistinguishable from trimming padding and so truncated this input to three bytes. That
+    /// surfaced as an intermittent failure of `a_signature_over_one_document_does_not_verify_
+    /// against_another`, roughly one run in ten, because whether the RSA signature happened to end
+    /// in `0x00` was luck. A real signature only hits the bad case about one run in six, so this
+    /// test states the case directly and fails every time the strip comes back.
+    #[test]
+    fn a_contents_gap_ending_in_a_zero_keeps_its_byte() {
+        let gap = der_ending_in_zero();
+        let decoded = decode_contents_gap(&as_hex(&gap));
+        assert_eq!(
+            decoded,
+            vec![0x30, 0x02, 0x01, 0x00],
+            "the declared DER length is 4 bytes; the trailing padding must not be trimmed from \
+             inside it"
+        );
+    }
+
+    /// And the padding after the DER is still dropped, or the caller would get the whole gap.
+    #[test]
+    fn padding_after_the_declared_length_is_dropped() {
+        let decoded = decode_contents_gap(&as_hex(&der_ending_in_zero()));
+        assert_eq!(
+            decoded.len(),
+            4,
+            "the twelve padding zeros must not survive"
+        );
+    }
 }
