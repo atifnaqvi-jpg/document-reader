@@ -30,6 +30,71 @@ use crate::editor::signature::cms::{
 use crate::editor::signature::pfx::ImportedIdentity;
 use crate::model::AppError;
 
+/// A certification level (DocMDP), or the absence of one.
+///
+/// The three levels are not degrees of the same thing; they are three different promises to every
+/// later reader of the file, and D-SG6 makes the choice explicit because a wrong one turns the
+/// signer's own later work into a tampering warning on their own document:
+///
+/// * `P=1` — no changes at all are permitted after this signature;
+/// * `P=2` — form filling, and further signatures, are permitted;
+/// * `P=3` — `P=2` plus annotations.
+///
+/// Constructed through [`Certification::doc_mdp`] so a value outside the defined range cannot
+/// reach the writer. The level is a `u8` in the struct because the file's `/P` is a small integer
+/// and a signed type invites writing a negative one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Certification {
+    level: u8,
+}
+
+impl Certification {
+    /// A DocMDP certification at `level`, which must be 1, 2 or 3.
+    pub fn doc_mdp(level: i64) -> Result<Self, AppError> {
+        match level {
+            1..=3 => Ok(Self { level: level as u8 }),
+            other => Err(AppError::Other(format!(
+                "certification level {other} is not defined; the levels are 1 (no changes), \
+                 2 (form filling and signatures) and 3 (annotations as well)"
+            ))),
+        }
+    }
+
+    /// The `/P` value this writes.
+    pub fn level(self) -> i64 {
+        i64::from(self.level)
+    }
+}
+
+/// What the user chose in the Sign dialog, beyond the identity itself.
+///
+/// `Default` is an **approval** signature with nothing written about why: no certification, and no
+/// `/Reason` or `/Location` strings. The absence of a certification is a deliberate default
+/// (D-SG6): an implicit `P=1` would mark every later change to the user's own file as tampering.
+#[derive(Debug, Clone, Default)]
+pub struct SignOptions {
+    pub certification: Option<Certification>,
+    /// `/Reason`. Written only when non-empty, so "the user typed nothing" stays distinguishable
+    /// from "the user typed a space".
+    pub reason: Option<String>,
+    /// `/Location`.
+    pub location: Option<String>,
+}
+
+impl SignOptions {
+    /// The text to write, or `None` when the field should be absent.
+    ///
+    /// A blank field and an absent field are not the same claim: a reader shows "reason: ''" for a
+    /// signature that stored one, and a caller that passes `Some("")` almost always meant "not
+    /// stated".
+    fn text(value: &Option<String>) -> Option<&str> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+}
+
 /// The digit string reserved in each `/ByteRange` field before the real value is known.
 ///
 /// Ten digits because [`BYTE_RANGE_FIELD_WIDTH`] is ten: the field's width cannot change after
@@ -78,10 +143,23 @@ pub fn signed_path(original: &Path, exists: impl Fn(&Path) -> bool) -> Result<Pa
 
 /// Sign `source` into a new sibling file.
 ///
-/// A certify signature (DocMDP) is deliberately **not** produced here: design D-SG6 makes the
-/// permission level an explicit choice shown before signing, so a caller that has not asked for a
-/// level must not get one by default.
+/// An **approval** signature with nothing written about why. See [`sign_save_with`] for the shape
+/// that carries a certification level; this one delegates so there is a single implementation and
+/// the two cannot drift.
 pub fn sign_save(source: &Path, identity: &ImportedIdentity) -> Result<SignOutcome, AppError> {
+    sign_save_with(source, identity, SignOptions::default())
+}
+
+/// Sign `source` into a new sibling file, with the choices the Sign dialog collected.
+///
+/// A certify signature (DocMDP) is written only when the caller asks for one: design D-SG6 makes
+/// the permission level an explicit choice shown before signing, so a caller that has not asked for
+/// a level must not get one by default.
+pub fn sign_save_with(
+    source: &Path,
+    identity: &ImportedIdentity,
+    options: SignOptions,
+) -> Result<SignOutcome, AppError> {
     if crate::editor::protect::is_encrypted(source)? {
         // Signing an encrypted document needs its password and produces a file whose encryption
         // must be re-established around the appended revision. Neither is in this unit, and
@@ -95,7 +173,7 @@ pub fn sign_save(source: &Path, identity: &ImportedIdentity) -> Result<SignOutco
     let source_bytes = std::fs::read(source)
         .map_err(|error| AppError::Other(format!("could not read PDF: {error}")))?;
 
-    let revision = build_signing_revision(&source_bytes)?;
+    let revision = build_signing_revision(&source_bytes, &options)?;
 
     let gap = locate_reserved_gap(&revision.bytes, source_bytes.len())?;
     let sealed = seal_revision(&revision.bytes, gap, identity)?;
@@ -124,7 +202,10 @@ pub(crate) struct SigningRevision {
     pub bytes: Vec<u8>,
 }
 
-fn build_signing_revision(source_bytes: &[u8]) -> Result<SigningRevision, AppError> {
+fn build_signing_revision(
+    source_bytes: &[u8],
+    options: &SignOptions,
+) -> Result<SigningRevision, AppError> {
     let previous = Document::load_mem(source_bytes)
         .map_err(|error| AppError::Other(format!("could not open PDF: {error}")))?;
 
@@ -139,9 +220,21 @@ fn build_signing_revision(source_bytes: &[u8]) -> Result<SigningRevision, AppErr
         .and_then(Object::as_reference)
         .map_err(|_| AppError::Other("this document has no catalog".to_string()))?;
 
+    // Certification must be the first signature (ISO 32000-1 §12.8.2.2). A second one produces a
+    // `/Perms` naming a signature that is not the earliest, which readers either ignore or report
+    // as invalid -- a failure the user cannot see from our own UI, so it is refused here.
+    let already_signed = count_signature_dictionaries(&previous);
+    if options.certification.is_some() && already_signed > 0 {
+        return Err(AppError::Other(
+            "a certification signature must be the document's first signature, and this document \
+             is already signed; add an ordinary signature instead, or certify the original"
+                .to_string(),
+        ));
+    }
+
     let mut incremental = IncrementalDocument::create_from(source_bytes.to_vec(), previous);
 
-    let signature_id = incremental.new_document.add_object(dictionary! {
+    let mut signature = dictionary! {
         "Type" => "Sig",
         "Filter" => "Adobe.PPKLite",
         "SubFilter" => "adbe.pkcs7.detached",
@@ -152,7 +245,43 @@ fn build_signing_revision(source_bytes: &[u8]) -> Result<SigningRevision, AppErr
             BYTE_RANGE_PLACEHOLDER.into(),
         ],
         "Contents" => Object::String(vec![0u8; CONTENTS_BYTES], StringFormat::Hexadecimal),
-    });
+    };
+
+    // `/M` is the claimed signing time, and it is a *claim*: nothing here is a trusted timestamp.
+    // Written because a reader with no `/M` shows an empty date, which users read as "undated"
+    // rather than "not asserted".
+    //
+    // `Object::string_literal`, not a bare `String`: lopdf's `From<String>`/`From<&str>` produce an
+    // `Object::Name`, so the obvious spelling writes `/M/D:2026…Z` — a name, not a string. A reader
+    // then sees a malformed date and shows nothing, which looks exactly like the field being
+    // absent. Measured: the first version wrote the name and the byte dump showed `/M/D:…`.
+    signature.set("M", Object::string_literal(signing_time_text().as_bytes()));
+
+    if let Some(reason) = SignOptions::text(&options.reason) {
+        signature.set("Reason", Object::string_literal(reason.as_bytes()));
+    }
+    if let Some(location) = SignOptions::text(&options.location) {
+        signature.set("Location", Object::string_literal(location.as_bytes()));
+    }
+    if let Some(certification) = options.certification {
+        // `/Reference` -> `/TransformParams` is what makes the level a statement rather than a
+        // comment. `V 1.2` is the current DocMDP version and `Type /TransformParams` is what
+        // readers look for before trusting `/P`.
+        signature.set(
+            "Reference",
+            Object::Array(vec![Object::Dictionary(dictionary! {
+                "Type" => "SigRef",
+                "TransformMethod" => "DocMDP",
+                "TransformParams" => dictionary! {
+                    "Type" => "TransformParams",
+                    "V" => "1.2",
+                    "P" => certification.level(),
+                },
+            })]),
+        );
+    }
+
+    let signature_id = incremental.new_document.add_object(signature);
     let annot_id = incremental.new_document.add_object(dictionary! {
         "Type" => "Annot",
         "Subtype" => "Widget",
@@ -167,30 +296,116 @@ fn build_signing_revision(source_bytes: &[u8]) -> Result<SigningRevision, AppErr
     incremental
         .opt_clone_object_to_new_document(page_id)
         .map_err(|error| AppError::Other(format!("could not copy the page: {error}")))?;
+
+    // Merge, never replace. Setting `/Annots` to `[new]` is right for the first signature and
+    // destroys every earlier one: their widgets vanish from the page, so their signatures appear in
+    // no reader's panel even though the blobs still verify. The revision is append-only, which
+    // means the earlier array is still *present* to merge with.
+    let existing_annots = incremental
+        .new_document
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .ok()
+        .and_then(|page| page.get(b"Annots").ok().cloned())
+        .map(|annots| match annots {
+            Object::Array(items) => items,
+            // An indirect `/Annots` array: resolve it rather than dropping it. A page written by
+            // another tool can carry one, and losing it would strip the user's own annotations.
+            //
+            // The array lives in the *previous* revision, not the one being built: the page was just
+            // copied here, and the object it points at was not. Reading it from `new_document` finds
+            // nothing, and the `unwrap_or_default()` that used to be here turned that into an empty
+            // array -- a silent deletion. `get_object` on `prev_documents` is the resolution that
+            // actually reaches the data.
+            Object::Reference(id) => incremental
+                .get_prev_documents()
+                .get_object(id)
+                .and_then(Object::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+
+    let mut merged_annots = existing_annots;
+    merged_annots.push(Object::Reference(annot_id));
     incremental
         .new_document
         .get_object_mut(page_id)
         .and_then(Object::as_dict_mut)
         .map_err(|_| AppError::Other("the page is not a dictionary".to_string()))?
-        .set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+        .set("Annots", Object::Array(merged_annots));
 
     incremental
         .opt_clone_object_to_new_document(catalog)
         .map_err(|error| AppError::Other(format!("could not copy the catalog: {error}")))?;
-    incremental
+
+    // Read the existing form state before taking the mutable borrow on the catalog: resolving an
+    // indirect `/AcroForm` borrows the document again, which the mutable borrow below forbids.
+    let (mut fields, existing_flags) = {
+        let form = incremental
+            .new_document
+            .get_object(catalog)
+            .and_then(Object::as_dict)
+            .ok()
+            .and_then(|catalog| catalog.get(b"AcroForm").ok())
+            .and_then(|form| match form {
+                Object::Dictionary(dict) => Some(dict.clone()),
+                // A form written by another tool can be an indirect dictionary. Resolving it rather
+                // than dropping it keeps the user's existing fields. Resolved from the *previous*
+                // revision for the same reason as `/Annots`: the catalog was copied here, but the
+                // form object it points at lives in the revision already on disk.
+                Object::Reference(id) => incremental
+                    .get_prev_documents()
+                    .get_object(*id)
+                    .and_then(Object::as_dict)
+                    .ok()
+                    .cloned(),
+                _ => None,
+            });
+
+        let fields = form
+            .as_ref()
+            .and_then(|form| form.get(b"Fields").and_then(Object::as_array).ok().cloned())
+            .unwrap_or_default();
+        let flags = form
+            .as_ref()
+            .and_then(|form| form.get(b"SigFlags").and_then(Object::as_i64).ok())
+            .unwrap_or(0);
+        (fields, flags)
+    };
+    fields.push(Object::Reference(annot_id));
+
+    let catalog_dict = incremental
         .new_document
         .get_object_mut(catalog)
         .and_then(Object::as_dict_mut)
-        .map_err(|_| AppError::Other("the catalog is not a dictionary".to_string()))?
-        // `SigFlags 3` says "this document contains a signature and the fields are append-only",
-        // which is what tells a reader that a later revision is an amendment rather than damage.
-        .set(
-            "AcroForm",
+        .map_err(|_| AppError::Other("the catalog is not a dictionary".to_string()))?;
+
+    // The same merge discipline for the form: an existing `/AcroForm` may already carry fields the
+    // user filled in, and a second signature must join them rather than replace them.
+    //
+    // `SigFlags 3` says "this document contains a signature and the fields are append-only", which
+    // is what tells a reader that a later revision is an amendment rather than damage. The OR keeps
+    // any other bits an earlier writer set.
+    catalog_dict.set(
+        "AcroForm",
+        dictionary! {
+            "SigFlags" => existing_flags | 3,
+            "Fields" => fields,
+        },
+    );
+
+    if options.certification.is_some() {
+        // The catalog's `/Perms /DocMDP` is what makes the level binding on later revisions. Without
+        // it the `/Reference` is a decoration that readers are free to ignore.
+        catalog_dict.set(
+            "Perms",
             dictionary! {
-                "SigFlags" => 3,
-                "Fields" => vec![Object::Reference(annot_id)],
+                "DocMDP" => Object::Reference(signature_id),
             },
         );
+    }
 
     let mut bytes = Vec::new();
     incremental.save_to(&mut bytes).map_err(|error| {
@@ -250,6 +465,71 @@ pub(crate) fn locate_reserved_gap(
         contents_close,
         field_offsets,
     })
+}
+
+/// How many signature dictionaries the document already carries.
+///
+/// Counted by walking the object table for `/Type /Sig` rather than by looking for a `/Perms` or a
+/// field name: a file signed by another tool need not have an `/AcroForm` at all, and the question
+/// is only "is there already a signature", which the dictionaries answer directly.
+fn count_signature_dictionaries(document: &Document) -> usize {
+    document
+        .objects
+        .values()
+        .filter(|object| {
+            object
+                .as_dict()
+                .ok()
+                .is_some_and(|dict| dict.has_type(b"Sig"))
+        })
+        .count()
+}
+
+/// The signing time for `/M`, as the PDF date string the format requires: `D:YYYYMMDDHHmmSSZ`.
+///
+/// In UTC with the trailing `Z`, because a local-time string without an offset is unreadable to a
+/// reader in another zone and a claimed timestamp that cannot be compared is worse than none.
+///
+/// Hand-formatted from the Unix epoch rather than through a date library: the format is small and
+/// fixed, the crate has no calendar dependency, and civil-date conversion from a day count is a
+/// handful of lines that a test can pin. The value is a **claim by this machine's clock** — not a
+/// trusted time — and nothing here verifies it.
+fn signing_time_text() -> String {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    pdf_date_from_unix(since_epoch)
+}
+
+/// Format a Unix timestamp as a PDF date string.
+///
+/// Split out so the calendar arithmetic is tested at chosen instants rather than at "now", which
+/// is the only way to pin a leap year or a century boundary.
+fn pdf_date_from_unix(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let remainder = seconds % 86_400;
+    let (hour, minute, second) = (remainder / 3_600, (remainder % 3_600) / 60, remainder % 60);
+
+    // Days since 1970-01-01 to a civil date. Howard Hinnant's `civil_from_days`, which is exact for
+    // the whole range this format can express and needs no table.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+
+    format!("D:{year:04}{month:02}{day:02}{hour:02}{minute:02}{second:02}Z")
 }
 
 /// Offset of the single occurrence of `marker` in `haystack`, or a refusal.
@@ -619,5 +899,44 @@ mod tests {
             error.to_string().contains("nothing to sign"),
             "unexpected refusal: {error}"
         );
+    }
+
+    /// The calendar arithmetic, pinned at chosen instants because "now" can never pin a leap year.
+    ///
+    /// Civil-date conversion from a day count is the kind of code that is right for four years and
+    /// then silently wrong, so the century rule gets its own case: 2000 is a leap year (divisible by
+    /// 400) and 2100 is not (divisible by 100 but not 400). A naive `/4` loop passes the first and
+    /// fails the second.
+    #[test]
+    fn the_pdf_date_formatter_is_exact_at_known_instants() {
+        let cases = [
+            (0_u64, "D:19700101000000Z"),
+            (86_399, "D:19700101235959Z"),
+            (951_782_400, "D:20000229000000Z"),
+            (4_107_542_400, "D:21000301000000Z"),
+            (1_700_000_000, "D:20231114221320Z"),
+        ];
+        for (seconds, expected) in cases {
+            let stamp = pdf_date_from_unix(seconds);
+            assert_eq!(stamp, expected, "unix {seconds} formatted as {stamp}");
+        }
+    }
+
+    /// The day before a non-leap 29 February, so a formatter that assumes every February has 29
+    /// days is caught and not only the century rule.
+    ///
+    /// The constants are midnight UTC, checked against an independent calendar rather than derived
+    /// from the code under test.
+    #[test]
+    fn the_pdf_date_formatter_does_not_invent_a_29_february() {
+        // 2101-02-28 00:00:00Z, and the next day must be 1 March: 2100 is not a leap year.
+        let feb_28 = 4_138_992_000_u64;
+        assert_eq!(pdf_date_from_unix(feb_28), "D:21010228000000Z");
+        assert_eq!(pdf_date_from_unix(feb_28 + 86_400), "D:21010301000000Z");
+
+        // 2024 IS a leap year, so the same addition from 28 February lands on the 29th.
+        let feb_28 = 1_709_078_400_u64;
+        assert_eq!(pdf_date_from_unix(feb_28), "D:20240228000000Z");
+        assert_eq!(pdf_date_from_unix(feb_28 + 86_400), "D:20240229000000Z");
     }
 }
