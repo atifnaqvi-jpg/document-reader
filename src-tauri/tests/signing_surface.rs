@@ -219,3 +219,190 @@ fn the_committed_test_key_is_documented_as_a_throwaway() {
          usable key material"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// D-SG3 as a *compile-surface* property, not a convention (2026-11-09).
+//
+// The scan above is a source-text test. It fails when someone runs it, it reads strings and
+// comments as if they were code, and it cannot see a type reached through a helper in another
+// module. The design calls D-SG3 "a compile-surface property we can test", so the ban also lives
+// in `clippy.toml` as `disallowed-types`, which the compiler enforces and which CI turns into a
+// build failure with `-D warnings`.
+//
+// `clippy.toml` cannot be trusted on its own, and this was measured rather than assumed: an
+// **unknown type name in `disallowed-types` is silently tolerated**. Clippy does not report a name
+// it cannot resolve, so a typo or a crate rename turns an entry into a no-op while the config still
+// *looks* like it is banning something. A list of bans that no longer bite is worse than no list,
+// because it is recorded as coverage.
+//
+// So each name is proved by compiling a probe that names it. The proof is a compile that must
+// fail, and the failure must mention the lint -- a *different* compile error would mean the probe
+// itself is broken and nothing was learned.
+// ---------------------------------------------------------------------------------------------
+
+use std::process::Command;
+
+/// Every type the sign or verify path must not be able to name, paired with a probe that uses it.
+///
+/// Kept here rather than read out of `clippy.toml` on purpose. If this list were parsed from the
+/// config, deleting an entry from the config would delete its test, and the guard would shrink
+/// silently -- the exact vacuity this file exists to prevent. The two lists are compared below, so
+/// they cannot drift apart without a failure.
+const BANNED_TYPES: [(&str, &str); 6] = [
+    (
+        "std::net::TcpStream",
+        "let _ = std::net::TcpStream::connect(\"127.0.0.1:1\");",
+    ),
+    (
+        "std::net::TcpListener",
+        "let _ = std::net::TcpListener::bind(\"127.0.0.1:0\");",
+    ),
+    (
+        "std::net::UdpSocket",
+        "let _ = std::net::UdpSocket::bind(\"127.0.0.1:0\");",
+    ),
+    (
+        "std::net::SocketAddr",
+        "let _: std::net::SocketAddr = \"127.0.0.1:0\".parse().unwrap();",
+    ),
+    (
+        "reqwest::Client",
+        "let _ = std::any::type_name::<reqwest::Client>();",
+    ),
+    (
+        "reqwest::blocking::Client",
+        "let _ = std::any::type_name::<reqwest::blocking::Client>();",
+    ),
+];
+
+/// The names `clippy.toml` claims to ban, parsed from the config the compiler actually reads.
+fn banned_types_in_config() -> Vec<String> {
+    let text = read(&repo_root().join("src-tauri/clippy.toml"));
+    // `disallowed-types` may be written across lines; collect everything inside the brackets. A
+    // bare `contains` on the whole file would also match the prose in the comment that explains
+    // the list, and would then pass with an empty array.
+    let start = text
+        .find("disallowed-types")
+        .expect("clippy.toml must declare disallowed-types");
+    let body = &text[start..];
+    let open = body.find('[').expect("the list is bracketed");
+    let close = body[open..].find(']').expect("the list is closed") + open;
+    body[open + 1..close]
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('"').trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// The two lists must name the same types, or one of them is stale.
+#[test]
+fn the_compile_surface_ban_and_its_probes_name_the_same_types() {
+    let mut config = banned_types_in_config();
+    config.sort();
+    let mut probed: Vec<String> = BANNED_TYPES
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    probed.sort();
+    assert_eq!(
+        config, probed,
+        "clippy.toml's disallowed-types and the probes in this test have drifted. An entry in the \
+         config with no probe is a ban nobody has proved still bites; a probe with no entry is a \
+         test of nothing."
+    );
+}
+
+/// Each banned type must be a build failure when named, and the failure must be *this* lint --
+/// and the same probe must compile when the ban is removed.
+///
+/// That pair is the point. A lone "the probe failed" result proves nothing: the first version of
+/// this test accepted any failure, and `reqwest::Client` in a throwaway crate fails with `E0433`
+/// (unresolved crate), which is not the ban at all. Measured, and it looked like a pass. So each
+/// probe is compiled twice against the *same* generated code:
+///
+/// 1. With `clippy.toml` as shipped, it must fail, and the error must name the lint.
+/// 2. With an empty ban list, it must succeed -- which proves the probe is otherwise valid and
+///    that the ban is what rejected it.
+///
+/// A crate that is not a dependency of a throwaway probe is not resolvable at all, so the
+/// `reqwest` probes get a three-line stub crate. A real `reqwest` would mean a ~19 s network
+/// fetch inside the gate; the stub exercises the identical lint path in under a second.
+#[test]
+fn every_banned_type_is_rejected_by_the_compiler() {
+    let shipped = read(&repo_root().join("src-tauri/clippy.toml"));
+    for (name, probe) in BANNED_TYPES {
+        let project = tempfile::tempdir().expect("temp dir");
+        let dir = project.path();
+
+        // A stub crate when the probe names one. `std::*` needs nothing.
+        let dependency = if name.starts_with("reqwest::") {
+            let stub = dir.join("reqwest_stub");
+            std::fs::create_dir_all(stub.join("src")).expect("stub dirs");
+            std::fs::write(
+                stub.join("Cargo.toml"),
+                // No `[workspace]` table: a second root inside the probe's directory makes cargo
+                // refuse with "multiple workspace roots", which the control run catches as a
+                // broken probe instead of letting it pass as a caught one.
+                "[package]\nname = \"reqwest\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+            )
+            .expect("stub manifest");
+            std::fs::write(
+                stub.join("src/lib.rs"),
+                "pub struct Client;\npub mod blocking { pub struct Client; }\n",
+            )
+            .expect("stub source");
+            "reqwest = { path = \"./reqwest_stub\" }\n"
+        } else {
+            ""
+        };
+
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n                 [dependencies]\n{dependency}\n[workspace]\n"
+            ),
+        )
+        .expect("write manifest");
+        std::fs::create_dir(dir.join("src")).expect("src dir");
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            format!("pub fn probe() {{\n    {probe}\n}}\n"),
+        )
+        .expect("write probe");
+
+        let run = |config: &str| -> (bool, String) {
+            std::fs::write(dir.join("clippy.toml"), config).expect("write config");
+            let output = Command::new("cargo")
+                .args(["clippy", "--quiet", "--", "-D", "warnings"])
+                .current_dir(dir)
+                .output()
+                .expect("cargo clippy must be on PATH; a skip here would read as a pass");
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            )
+        };
+
+        // Control first: with no ban the probe must compile, or the probe is broken and the
+        // failing run below would prove nothing.
+        let (control_ok, control_err) = run("disallowed-types = []\n");
+        assert!(
+            control_ok,
+            "the probe naming `{name}` does not compile even with the ban removed, so it cannot \
+             test the ban. Fix the probe.\nstderr:\n{control_err}"
+        );
+
+        let (ok, stderr) = run(&shipped);
+        assert!(
+            !ok,
+            "a probe naming `{name}` compiled against the shipped clippy.toml; the ban is a no-op \
+             for it. Clippy silently tolerates type names it cannot resolve, so a rotted entry \
+             looks exactly like this."
+        );
+        assert!(
+            stderr.contains("disallowed"),
+            "the probe naming `{name}` failed, but not with the disallowed-type lint, so nothing \
+             was proved about the ban.\nstderr:\n{stderr}"
+        );
+    }
+}

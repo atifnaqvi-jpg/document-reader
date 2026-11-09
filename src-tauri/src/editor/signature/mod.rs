@@ -4,6 +4,7 @@
 pub mod cms;
 pub mod identity;
 pub mod pfx;
+pub mod revocation;
 pub mod sign;
 pub mod winstore;
 

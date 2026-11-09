@@ -1,0 +1,26 @@
+# SCOPE-C D-SG3 / R3: "the document hash never leaves the machine and no network call is made
+# anywhere in the sign or verify path."
+#
+# This file is the *compiler-level* half of that ban, and it is here because the test in
+# `tests/signing_surface.rs` is a source-text scan. A scan is a convention: it fails when someone
+# remembers to run it, it reads comments and strings as if they were code, and it cannot see a
+# type reached through a helper in another module. `disallowed-types` is checked by the compiler
+# and, under the CI's `clippy --all-targets -- -D warnings`, turns a network type anywhere in the
+# crate into a build failure.
+#
+# Measured, not assumed (2026-11-09):
+#   * `std::net::TcpStream` in a type position -> warned.
+#   * `std::net::TcpStream::connect(url)` with the path at the call site -> warned.
+#   * `use std::net::TcpStream as Stream;` then `Stream::connect(url)` -> warned at BOTH lines,
+#     so an import alias does not evade it.
+#   * an unknown type name in this list is silently tolerated -- clippy does not report it. The
+#     list can therefore rot into a no-op without anyone noticing, which is why
+#     `tests/signing_surface.rs` proves each name still bites rather than trusting this file.
+disallowed-types = [
+    "std::net::TcpStream",
+    "std::net::TcpListener",
+    "std::net::UdpSocket",
+    "std::net::SocketAddr",
+    "reqwest::Client",
+    "reqwest::blocking::Client",
+]
