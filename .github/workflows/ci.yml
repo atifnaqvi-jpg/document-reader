@@ -264,8 +264,8 @@ jobs:
           # seam (+1). Re-measured, not incremented: 878 passed with PDFIUM_LIBRARY_PATH set and
           # 878 with it pointed at a nonexistent path, 106 ignored in both, so the whole delta is
           # PDFium-independent and the ignored pin above correctly does not move.
-          if [ "$passed" -lt 878 ]; then
-            echo "::error::only $passed tests ran; 878 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 879 ]; then
+            echo "::error::only $passed tests ran; 879 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

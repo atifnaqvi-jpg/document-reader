@@ -135,10 +135,14 @@ fi
 #
 # 2026-11-10 (I-SG5 / D-SG7 later-revision seam): +1 in `tests/trust_store.rs` for
 # `an_anchored_clean_signature_stops_being_valid_when_a_revision_is_appended`. It moves both shapes
-# by one, is not PDFium-gated, and leaves the ignored count at 106. Now 878/106 and 984/0.
-PIN_PLAIN_PASSED=878
+# by one, is not PDFium-gated, and leaves the ignored count at 106. That unit: 878/106 and 984/0.
+#
+# 2026-11-10 (D-SG7 revocation detail): +1 unit test in `signature/badge.rs` for
+# `every_revocation_answer_gets_a_line_including_we_did_not_check`. Moves both shapes by one.
+# Now 879/106 and 985/0.
+PIN_PLAIN_PASSED=879
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=984
+PIN_IGNORED_PASSED=985
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

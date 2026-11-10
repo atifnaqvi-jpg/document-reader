@@ -30,7 +30,7 @@
 //! independent implementation in `tests/support/cms_verifier.rs` still exists, because I-SG1 asks
 //! for one that is *not* ours -- a symmetric bug would otherwise pass both sides.)
 
-use super::revocation::Revocation;
+use super::revocation::{NotCheckedReason, Revocation, RevocationSource};
 
 /// The four states D-SG7 allows, and nothing else.
 ///
@@ -176,9 +176,17 @@ pub struct Detail {
     /// True only when a digest was actually recomputed.
     pub integrity_checked: bool,
     pub chain_anchored: bool,
-    /// True when the signer was found on a revocation list. **The badge cannot say this**: see
-    /// [`Badge::severity`]. A `true` here overrides the neutral reading of an `unknown` badge.
-    pub revoked: bool,
+    /// The revocation finding *with its provenance*, not a flattened boolean.
+    ///
+    /// This was a `bool` and that lost two things the design asks to be shown. §6 requires the
+    /// detail view to say "revocation: not checked (offline)" -- with a boolean, "not checked" and
+    /// "checked and clean" are both `false`, so the one sentence that stops a neutral badge being
+    /// read as a quiet pass could not be rendered at all. It also discarded
+    /// [`RevocationSource`], which `is_self_asserted` exists specifically to distinguish: a CRL the
+    /// signer put in their own document is not the same evidence as one the user imported.
+    ///
+    /// Carried whole rather than re-derived so the detail cannot disagree with the decision above it.
+    pub revocation: Revocation,
     pub certification_level: Option<u8>,
 }
 
@@ -188,12 +196,20 @@ pub fn explain(evidence: &SignatureEvidence) -> Detail {
         badge: decide(evidence),
         integrity_checked: evidence.integrity != Integrity::NotChecked,
         chain_anchored: evidence.anchored,
-        revoked: matches!(evidence.revocation, Revocation::Revoked { source: _ }),
+        revocation: evidence.revocation,
         certification_level: evidence.certification_level,
     }
 }
 
 impl Detail {
+    /// Whether the signer was found on a revocation list.
+    ///
+    /// A method rather than a stored `bool`, because a field and the `revocation` it summarises
+    /// could drift apart. Callers that only need the yes/no can still ask for it.
+    pub fn revoked(&self) -> bool {
+        matches!(self.revocation, Revocation::Revoked { source: _ })
+    }
+
     /// One line per fact, in the order a reader should weigh them.
     ///
     /// Prose lives here rather than in [`Badge::code`] because these sentences are the *explanation*
@@ -214,9 +230,38 @@ impl Detail {
             true => "certificate chain: anchored in a local trust store",
             false => "certificate chain: not anchored in any local trust store",
         });
-        if self.revoked {
-            lines.push("revocation: REVOKED by the available data");
-        }
+        // D-SG7/§6: revocation gets a line *whatever* the answer, including the answer "we did not
+        // check". A line that appears only for `Revoked` leaves the common offline case silent, and
+        // silence beside a neutral badge reads as a quiet pass. `Revocation` already carries the
+        // provenance, so the evidence is stated as well as the verdict.
+        lines.push(match self.revocation {
+            Revocation::Revoked { source } => match source {
+                RevocationSource::Document => {
+                    "revocation: REVOKED by a list embedded in this document"
+                }
+                RevocationSource::ImportedStore => "revocation: REVOKED by a list you imported",
+            },
+            Revocation::NotRevoked { source } => match source {
+                RevocationSource::Document => {
+                    "revocation: not revoked, per a list embedded in this document (the signer's \
+                     own claim, not an authority you chose)"
+                }
+                RevocationSource::ImportedStore => {
+                    "revocation: not revoked, per a list you imported"
+                }
+            },
+            // The three reasons are different operational problems and the UI can act on each, so
+            // they are not collapsed into one "could not check".
+            Revocation::NotChecked { reason } => match reason {
+                NotCheckedReason::NoData => "revocation: not checked (offline, no data)",
+                NotCheckedReason::Expired => {
+                    "revocation: not checked (the revocation data had expired)"
+                }
+                NotCheckedReason::DoesNotApply => {
+                    "revocation: not checked (the revocation data names a different certificate)"
+                }
+            },
+        });
         if let Some(level) = self.certification_level {
             lines.push(match level {
                 1 => "certification: no changes permitted after this signature",
@@ -314,13 +359,86 @@ mod tests {
         assert_ne!(decide(&evidence), Badge::Valid);
         let detail = explain(&evidence);
         assert!(
-            detail.revoked,
+            detail.revoked(),
             "the detail must carry the finding the badge cannot express"
+        );
+        assert_eq!(
+            detail.revocation,
+            Revocation::Revoked {
+                source: RevocationSource::ImportedStore
+            },
+            "the detail must keep the provenance too: 'revoked by a list I imported' and 'revoked \
+             by a list the signer embedded' are different claims, and §6 asks for that to show"
         );
         assert!(
             detail.lines().iter().any(|line| line.contains("REVOKED")),
             "a revoked signer must be stated, not left to be inferred from a neutral badge"
         );
+    }
+
+    #[test]
+    fn every_revocation_answer_gets_a_line_including_we_did_not_check() {
+        // The design's own wording: clicking the badge must be able to show "revocation: not
+        // checked (offline)". This is the sentence that stops a neutral `unknown` badge from being
+        // read as a quiet pass, and it was unrenderable while the finding was a `bool` -- "not
+        // checked" and "checked, clean" were both `false`, so no line could tell them apart.
+        let cases = [
+            Revocation::Revoked {
+                source: RevocationSource::Document,
+            },
+            Revocation::Revoked {
+                source: RevocationSource::ImportedStore,
+            },
+            Revocation::NotRevoked {
+                source: RevocationSource::Document,
+            },
+            Revocation::NotRevoked {
+                source: RevocationSource::ImportedStore,
+            },
+            Revocation::NotChecked {
+                reason: NotCheckedReason::NoData,
+            },
+            Revocation::NotChecked {
+                reason: NotCheckedReason::Expired,
+            },
+            Revocation::NotChecked {
+                reason: NotCheckedReason::DoesNotApply,
+            },
+        ];
+
+        let mut seen: Vec<&'static str> = Vec::new();
+        for revocation in cases {
+            let mut evidence = good();
+            evidence.revocation = revocation;
+            let detail = explain(&evidence);
+            let line = detail
+                .lines()
+                .into_iter()
+                .find(|line| line.starts_with("revocation:"))
+                .unwrap_or_else(|| panic!("no revocation line for {revocation:?}"));
+            assert!(
+                !seen.contains(&line),
+                "two different findings rendered the same sentence ({line:?}); the detail would \\
+                 then say nothing about which evidence it rests on"
+            );
+            seen.push(line);
+            // Provenance must be legible: the signer's own embedded list is not an authority the
+            // user chose, and `is_self_asserted` exists only if something surfaces the difference.
+            if let Revocation::NotRevoked { source } | Revocation::Revoked { source } = revocation {
+                if source.is_self_asserted() {
+                    assert!(
+                        line.contains("embedded in this document"),
+                        "a signer-asserted finding must say so; got {line:?}"
+                    );
+                } else {
+                    assert!(
+                        line.contains("imported"),
+                        "a user-imported finding must say so; got {line:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(seen.len(), 7, "every finding has its own sentence");
     }
 
     #[test]
