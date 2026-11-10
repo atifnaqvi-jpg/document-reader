@@ -221,9 +221,10 @@ fn an_encrypted_document_is_refused_rather_than_signed() {
     )
     .expect("protect the document");
 
+    // `expect_err` rather than `.err().expect()`: `SignOutcome` is `Debug` now that it crosses the
+    // IPC boundary, so clippy's `err_expect` applies here.
     let error = sign_save(std::path::Path::new(&protected.path), &fixture_identity())
-        .err()
-        .expect("signing an encrypted document must be refused");
+        .expect_err("signing an encrypted document must be refused");
     assert!(
         error.to_string().contains("password-protected"),
         "the refusal does not explain itself: {error}"

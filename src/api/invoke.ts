@@ -18,6 +18,8 @@ import type {
   RenderedPage,
   SearchHit,
   SignatureBadge,
+  SignOutcome,
+  SignRequest,
   TextEditResult,
   TextRunFragmentRef,
   TextRunId,
@@ -392,6 +394,26 @@ export const revertPageText = (
  */
 export const decryptCopy = (documentId: string, password: string) =>
   invoke<DecryptOutcome>("decrypt_copy", { documentId, password });
+
+/**
+ * Signs a document's saved file with a PKCS#12 identity (P3.2 SCOPE-C).
+ *
+ * The password travels with the request and is not remembered by the app: unlike a document
+ * password, it unlocks a private key, so keeping it would let a later action sign as the user
+ * without asking. The call writes a sibling `"{stem} (signed).pdf"` and never the original.
+ *
+ * `sign_document` refuses an encrypted source and an ambiguous PKCS#12 container rather than
+ * guessing, so those arrive here as rejected promises with a sentence meant for the user.
+ */
+export const signDocument = (request: SignRequest) =>
+  invoke<SignOutcome>("sign_document", {
+    documentId: request.documentId,
+    pfxPath: request.pfxPath,
+    pfxPassword: request.pfxPassword,
+    certificationLevel: request.certificationLevel ?? null,
+    reason: request.reason ?? null,
+    location: request.location ?? null,
+  });
 
 /**
  * Reports the signature badge for a document's saved file (P3.2 SCOPE-C, D-SG7).

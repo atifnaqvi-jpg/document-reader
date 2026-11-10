@@ -478,6 +478,37 @@ export const ENCRYPTED_READ_ONLY = "ENCRYPTED_READ_ONLY";
 export const WRONG_PASSWORD = "WRONG_PASSWORD";
 
 /**
+ * The result of signing: where the signed copy went, and what was signed.
+ *
+ * `contentDigest` is lower-case hex, not a byte array -- the backend serialises it that way so a
+ * person can compare it with a value someone else reported.
+ */
+export interface SignOutcome {
+  /** The sibling copy that was written. The original is never overwritten. */
+  path: string;
+  /** The four integers written into the file's `/ByteRange`. */
+  byteRange: [number, number, number, number];
+  /** SHA-256 of the bytes the signature covers, as 64 hex characters. */
+  contentDigest: string;
+}
+
+/** What the Sign dialog collected, beyond the identity (P3.2, D-SG6). */
+export interface SignRequest {
+  documentId: string;
+  pfxPath: string;
+  pfxPassword: string;
+  /**
+   * A DocMDP certification level, 1-3. Omitted for an approval signature.
+   *
+   * Absence is not 0 and not "no protection": it is the deliberate default, because an implicit
+   * `P=1` would mark every later edit to the user's own file as tampering.
+   */
+  certificationLevel?: number;
+  reason?: string;
+  location?: string;
+}
+
+/**
  * The signature badge, as `signature_badge` reports it (P3.2 SCOPE-C, D-SG7).
  *
  * `badge` is one of exactly four states. `isGreen` is separate from the string on purpose: the

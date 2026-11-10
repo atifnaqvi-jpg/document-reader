@@ -1345,6 +1345,72 @@ pub async fn signature_badge(
     })
 }
 
+/// Sign a document's saved file with a PKCS#12 identity (P3.2 SCOPE-C).
+///
+/// Inputs are the PFX path and its password, not a stored identity: nothing about a private key is
+/// kept between calls, so a later command cannot sign as the user without asking again. The
+/// password is used to unlock the PFX for this call and is not remembered -- unlike
+/// `protect_document`, the secret here protects a *key*, not a document the user will reopen.
+///
+/// The original is never written: `sign_save_with` produces a sibling `"{stem} (signed).pdf"`.
+/// A certification level is only written when the caller passes one (D-SG6); omitting it is an
+/// approval signature, because an implicit `P=1` would mark every later edit as tampering.
+#[tauri::command]
+pub async fn sign_document(
+    db: State<'_, Db>,
+    document_id: String,
+    pfx_path: String,
+    pfx_password: String,
+    certification_level: Option<i64>,
+    reason: Option<String>,
+    location: Option<String>,
+) -> Result<crate::editor::signature::sign::SignOutcome, AppError> {
+    let source = document_path(&db, &document_id)?;
+
+    let certification = match certification_level {
+        Some(level) => Some(crate::editor::signature::sign::Certification::doc_mdp(
+            level,
+        )?),
+        None => None,
+    };
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let imported = crate::editor::signature::pfx::import_bytes(
+            &std::fs::read(&pfx_path)
+                .map_err(|error| AppError::Other(format!("could not read {pfx_path}: {error}")))?,
+            &pfx_password,
+        )?;
+        // The PFX reader keeps every identity it linked a key to. Signing with "the first one" would
+        // be a silent choice on the user's behalf, so an ambiguous container is refused and named
+        // rather than guessed at.
+        let identity = match imported.identities.as_slice() {
+            [only] => only,
+            [] => {
+                return Err(AppError::Other(
+                    "this PKCS#12 file carries no certificate with a private key".to_string(),
+                ))
+            }
+            many => {
+                return Err(AppError::Other(format!(
+                    "this PKCS#12 file carries {} usable identities; signing with a chosen one is \
+                     not supported yet",
+                    many.len()
+                )))
+            }
+        };
+        let options = crate::editor::signature::sign::SignOptions {
+            certification,
+            reason,
+            location,
+        };
+        crate::editor::signature::sign::sign_save_with(Path::new(&source), identity, options)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("sign task failed: {error}")))??;
+
+    Ok(outcome)
+}
+
 /// Drops a document's remembered password (P2.4 T10), called when the document closes.
 #[tauri::command]
 pub fn forget_password(passwords: State<'_, PasswordStore>, path: String) -> Result<(), AppError> {

@@ -104,12 +104,31 @@ impl SignOptions {
 const BYTE_RANGE_PLACEHOLDER: i64 = 9_999_999_999;
 
 /// A signed copy: the new path, plus what was signed and where it went.
+///
+/// `Serialize` because this crosses the IPC boundary to the UI. The digest is sent as lower-case hex
+/// rather than a 32-element array of numbers: the only consumer is a person comparing it against a
+/// value someone else reported, and a JSON number array is unreadable for that.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SignOutcome {
     pub path: String,
     /// The four integers actually written into the file's `/ByteRange`.
     pub byte_range: [i64; 4],
     /// SHA-256 of the bytes the signature covers, for the caller to display or compare.
+    #[serde(serialize_with = "hex_lower")]
     pub content_digest: [u8; 32],
+}
+
+/// Serialise a 32-byte digest as lower-case hex.
+fn hex_lower<S: serde::Serializer>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(64);
+    for byte in bytes {
+        // Writing into a `String` cannot fail, so the result is discarded rather than unwrapped in a
+        // serializer, where a panic would surface as a poisoned IPC call.
+        let _ = write!(text, "{byte:02x}");
+    }
+    serializer.serialize_str(&text)
 }
 
 /// `"{stem} (signed).pdf"`, then `(signed 2)`, … — a name alongside the original, never over it.
@@ -683,6 +702,36 @@ fn read_byte_range(bytes: &[u8], from: usize) -> Result<[i64; 4], AppError> {
 
 #[cfg(test)]
 mod tests {
+    /// The digest crosses the IPC boundary as hex, and the UI reads it as a string. A change back to
+    /// a number array would still compile and still "work" in Rust, so the shape is asserted here
+    /// rather than left to the frontend typings to notice.
+    #[test]
+    fn the_outcome_serialises_the_digest_as_hex() {
+        let outcome = SignOutcome {
+            path: "/tmp/a (signed).pdf".to_string(),
+            byte_range: [0, 100, 200, 50],
+            content_digest: [0x00, 0x0f, 0xff, 0xa5].repeat(8).try_into().unwrap(),
+        };
+        let json = serde_json::to_value(&outcome).expect("serialise");
+        let digest = json["contentDigest"]
+            .as_str()
+            .expect("digest must be a string");
+        assert_eq!(
+            digest.len(),
+            64,
+            "a SHA-256 digest is 64 hex characters: {digest}"
+        );
+        assert!(
+            digest.starts_with("000fffa5"),
+            "lower-case hex, no separators, in order: {digest}"
+        );
+        assert_eq!(
+            json["byteRange"].as_array().map(Vec::len),
+            Some(4),
+            "the byte range stays four integers"
+        );
+    }
+
     use super::*;
 
     /// A minimal well-formed signed-looking file: a "source" prefix, a gap, a trailer.

@@ -704,8 +704,7 @@ fn certifying_an_already_signed_document_is_refused() {
             ..SignOptions::default()
         },
     )
-    .err()
-    .expect("certifying an already-signed document must be refused");
+    .expect_err("certifying an already-signed document must be refused");
 
     let message = error.to_string();
     assert!(
