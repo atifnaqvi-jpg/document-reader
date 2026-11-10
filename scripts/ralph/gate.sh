@@ -139,10 +139,19 @@ fi
 #
 # 2026-11-10 (D-SG7 revocation detail): +1 unit test in `signature/badge.rs` for
 # `every_revocation_answer_gets_a_line_including_we_did_not_check`. Moves both shapes by one.
-# Now 879/106 and 985/0.
-PIN_PLAIN_PASSED=879
+#
+# 2026-11-10 (I-SG4 unsigned badge): +4, all PDFium-independent, so both shapes move by four and
+# the ignored count stays at 106: two unit tests in `signature/badge.rs`
+# (`an_unsigned_document_renders_unsigned_and_says_nothing_was_checked`,
+# `the_unsigned_detail_agrees_with_the_aggregate_decision`), one in `commands/mod.rs`
+# (`no_assessment_is_rendered_as_unsigned_not_unknown`) and one new source guard in
+# `tests/badge_evidence_source.rs` (`the_command_hands_the_store_assessment_to_the_mapping_unmodified`).
+# Measured, not incremented: 883 passed with PDFIUM_LIBRARY_PATH unset and 883 with it pointed at a
+# nonexistent path, 106 ignored in both.
+# Now 883/106 and 989/0.
+PIN_PLAIN_PASSED=883
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=985
+PIN_IGNORED_PASSED=989
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

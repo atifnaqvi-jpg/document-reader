@@ -61,6 +61,34 @@ fn code_only(body: &str) -> String {
         .join("\n")
 }
 
+/// The body of `fn badge_for`, which owns the unsigned-document branch.
+fn badge_for_body(source: &str) -> String {
+    let start = source
+        .find("pub fn badge_for(")
+        .expect("badge_for must exist; if it was renamed, update this guard");
+    let mut depth = 0isize;
+    let mut began = false;
+    let mut body = String::new();
+    for character in source[start..].chars() {
+        match character {
+            '{' => {
+                depth += 1;
+                began = true;
+            }
+            '}' => {
+                depth -= 1;
+                if began && depth == 0 {
+                    body.push(character);
+                    return body;
+                }
+            }
+            _ => {}
+        }
+        body.push(character);
+    }
+    body
+}
+
 #[test]
 fn the_command_assesses_through_the_store_rather_than_hardcoding_inputs() {
     let body = code_only(&signature_badge_body(&commands_source()));
@@ -72,8 +100,19 @@ fn the_command_assesses_through_the_store_rather_than_hardcoding_inputs() {
 }
 
 #[test]
-fn the_command_does_not_pass_a_constant_anchored_flag_for_a_signed_file() {
+fn the_command_hands_the_store_assessment_to_the_mapping_unmodified() {
     let body = code_only(&signature_badge_body(&commands_source()));
+    assert!(
+        body.contains("badge_for(assessment)"),
+        "`signature_badge` must hand the assessment straight to `badge_for`. Rebuilding a \
+         `SignatureEvidence` here is what let an unsigned document render `unknown`, and a guard \
+         that only read `badge_for` would not notice the command going its own way again."
+    );
+}
+
+#[test]
+fn the_command_does_not_pass_a_constant_anchored_flag_for_a_signed_file() {
+    let body = code_only(&badge_for_body(&commands_source()));
     // The unsigned-document branch legitimately hardcodes `anchored: false`: there is no signature,
     // so nothing can anchor. Everything *after* that branch is about a signed file, so the cut is
     // taken at the `};` that closes the `else` block -- not at the `let`, which would leave the
@@ -83,10 +122,14 @@ fn the_command_does_not_pass_a_constant_anchored_flag_for_a_signed_file() {
     // which meant a renamed or removed early-return turned this guard into a silent pass. A mutant
     // that replaced the whole tail with the historical literals then survived this guard while
     // failing the other two -- a vacuous pass is exactly what AGENTS.md calls worse than no guard.
+    //
+    // The branch moved from `signature_badge` to `badge_for` when the mapping was extracted to be
+    // callable from a test; this guard moved with it rather than being dropped, and it fired loudly
+    // when the anchor went stale instead of passing over an empty slice.
     let after_early_return = match body.find("let Some(assessment) = assessment else") {
         Some(at) => &body[at..],
         None => panic!(
-            "`signature_badge` no longer has the `let Some(assessment) = assessment else` \
+            "`badge_for` no longer has the `let Some(assessment) = assessment else` \
              early-return this guard cuts at. Re-anchor the guard rather than letting it pass \
              without checking anything."
         ),

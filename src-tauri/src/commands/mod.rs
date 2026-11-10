@@ -1285,6 +1285,40 @@ pub struct SignatureBadge {
     pub certification_level: Option<u8>,
 }
 
+/// Turn a store assessment into the wire shape, or report `unsigned` when there is no signature.
+///
+/// Separate from the command so the mapping is testable without a database handle: the command is
+/// only I/O, and a guard that could not call the mapping would have to grep the source instead of
+/// running it, which is how a wrong branch stayed green before.
+pub fn badge_for(
+    assessment: Option<crate::editor::signature::store::Assessment>,
+) -> SignatureBadge {
+    let Some(assessment) = assessment else {
+        // No signature at all is `unsigned`, not `unknown`. `explain` on an invented evidence
+        // struct answers `unknown` -- integrity is `NotChecked` there -- and that is a different
+        // claim: `unknown` means "there is a signature and it could not be confirmed", which is
+        // false for a file with none. `badge::unsigned()` derives the badge from
+        // `decide_document(&[])`, the same function the aggregate path uses, so they cannot
+        // disagree.
+        let detail = crate::editor::signature::badge::unsigned();
+        return SignatureBadge {
+            badge: detail.badge.code(),
+            lines: detail.lines(),
+            reason: String::new(),
+            is_green: detail.badge.is_green(),
+            certification_level: None,
+        };
+    };
+
+    SignatureBadge {
+        badge: assessment.badge.code(),
+        lines: assessment.lines,
+        reason: assessment.reason,
+        is_green: assessment.badge.is_green(),
+        certification_level: assessment.certification_level,
+    }
+}
+
 /// Report the signature badge for a document (P3.2 SCOPE-C, D-SG7).
 ///
 /// Reads the saved file, never the in-memory edits: the badge answers "does the signature attest to
@@ -1312,33 +1346,7 @@ pub async fn signature_badge(
     let assessment = db
         .with(|connection| crate::editor::signature::store::assess(connection, &bytes, now_unix))?;
 
-    let Some(assessment) = assessment else {
-        let evidence = crate::editor::signature::badge::SignatureEvidence {
-            integrity: crate::editor::signature::badge::Integrity::NotChecked,
-            later_revision: false,
-            anchored: false,
-            revocation: crate::editor::signature::revocation::Revocation::NotChecked {
-                reason: crate::editor::signature::revocation::NotCheckedReason::NoData,
-            },
-            certification_level: None,
-        };
-        let detail = crate::editor::signature::badge::explain(&evidence);
-        return Ok(SignatureBadge {
-            badge: detail.badge.code(),
-            lines: detail.lines(),
-            reason: String::new(),
-            is_green: detail.badge.is_green(),
-            certification_level: None,
-        });
-    };
-
-    Ok(SignatureBadge {
-        badge: assessment.badge.code(),
-        lines: assessment.lines,
-        reason: assessment.reason,
-        is_green: assessment.badge.is_green(),
-        certification_level: assessment.certification_level,
-    })
+    Ok(badge_for(assessment))
 }
 
 /// One selectable signing certificate, as the picker needs it (P3.2 D-SG5).
@@ -1540,4 +1548,22 @@ pub async fn sign_document(
 pub fn forget_password(passwords: State<'_, PasswordStore>, path: String) -> Result<(), AppError> {
     passwords.forget(&path);
     Ok(())
+}
+
+#[cfg(test)]
+mod badge_for_tests {
+    use super::*;
+
+    /// I-SG4: a document with no signature is `unsigned`, and that is what the command hands the
+    /// UI. The earlier shape built a fabricated evidence struct and asked `explain`, which answered
+    /// `unknown` -- a claim that a signature exists and could not be confirmed. This test calls the
+    /// mapping the command calls, so a regression cannot hide behind a well-tested `badge::unsigned`.
+    #[test]
+    fn no_assessment_is_rendered_as_unsigned_not_unknown() {
+        let rendered = badge_for(None);
+        assert_eq!(rendered.badge, "unsigned");
+        assert!(!rendered.is_green, "`unsigned` must never be green");
+        assert_eq!(rendered.lines, vec!["this document carries no signature"]);
+        assert!(rendered.certification_level.is_none());
+    }
 }

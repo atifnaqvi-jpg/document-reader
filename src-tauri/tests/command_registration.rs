@@ -146,26 +146,66 @@ fn every_registered_command_is_declared() {
     );
 }
 
+/// The text from `marker` up to the first `end`, or a panic naming the stale marker.
+///
+/// Panics rather than returning an empty slice: a guard that silently checked nothing would pass on
+/// any code at all, which is the vacuous green AGENTS.md forbids.
+fn bounded_body(text: &str, marker: &str, end: &str) -> String {
+    let start = text
+        .find(marker)
+        .unwrap_or_else(|| panic!("no `{marker}` in commands/mod.rs; re-anchor this guard"));
+    let rest = &text[start..];
+    let stop = rest
+        .find(end)
+        .unwrap_or_else(|| panic!("no `{end}` after `{marker}`; this guard's bound is stale"));
+    rest[..stop].to_string()
+}
+
+/// Strip `//` comments so a guard cannot be satisfied by prose that merely names the identifier.
+fn code_only(body: &str) -> String {
+    body.lines()
+        .map(|line| match line.find("//") {
+            Some(at) => &line[..at],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// D-SG7's four states are the whole vocabulary of the badge, and `is_green` is true for exactly
 /// one of them. Checked here rather than in the badge's own tests because the failure this guards
 /// against is a *fifth* state being added to the command's serialised surface.
 #[test]
 fn the_badge_command_reports_only_the_four_documented_states() {
     let text = read(&src_root().join("commands/mod.rs"));
-    let start = text
-        .find("pub async fn signature_badge")
-        .expect("the badge command must exist");
-    let body = &text[start..];
-    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
-    for forbidden in ["Badge::Valid", "\"valid\""] {
-        assert!(
-            !body.contains(forbidden),
-            "the command must not construct a badge itself; `badge::explain` is the one place that \
-             decides, and a second copy is how a green badge outlives the check behind it"
-        );
+    // The mapping moved out of the command into `badge_for` so a test can call it; the badge must
+    // still be produced in exactly one place, so both halves are checked here rather than neither.
+    let command = bounded_body(&text, "pub async fn signature_badge", "\n}\n");
+    let mapping = bounded_body(&text, "pub fn badge_for(", "\n}\n");
+
+    for (name, body) in [("signature_badge", &command), ("badge_for", &mapping)] {
+        for forbidden in ["Badge::Valid", "\"valid\""] {
+            assert!(
+                !body.contains(forbidden),
+                "`{name}` must not construct a badge itself; the deciding functions are the only \
+                 place that decides, and a second copy is how a green badge outlives the check \
+                 behind it"
+            );
+        }
     }
+
     assert!(
-        body.contains("badge::explain"),
-        "the command must report through `badge::explain` so the wording has one source"
+        command.contains("badge_for("),
+        "the command must report through `badge_for`, which owns the wording for the unsigned case"
+    );
+    // Comments are stripped before this check. Without that, the doc comment above the branch --
+    // which names `badge::unsigned()` while explaining why it is used -- satisfies the guard all on
+    // its own, and reverting the code to the fabricated-evidence shape leaves it green. Measured:
+    // that mutant survived until the prose was excluded.
+    assert!(
+        code_only(&mapping).contains("badge::unsigned()"),
+        "the unsigned-document branch must come from `badge::unsigned()`, which derives the badge \
+         from `decide_document(&[])`. Rebuilding a fabricated evidence struct here is what made an \
+         unsigned file render `unknown`."
     );
 }

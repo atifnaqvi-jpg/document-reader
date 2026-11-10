@@ -201,6 +201,26 @@ pub fn explain(evidence: &SignatureEvidence) -> Detail {
     }
 }
 
+/// The detail for a document that carries no signature at all.
+///
+/// A constructor rather than `explain(&fabricated_evidence)`. `explain` would answer `unknown`,
+/// because the only honest evidence for a file with no signature has `NotChecked` integrity, and
+/// `unknown` is a *different claim*: "there is a signature and it could not be confirmed". For a
+/// file with none, that is false -- and I-SG4 names all four states precisely so they are not
+/// conflated. Built here, next to `decide_document`, so the badge and the headline line that
+/// describes it are produced from the same variant.
+pub fn unsigned() -> Detail {
+    Detail {
+        badge: decide_document(&[]),
+        integrity_checked: false,
+        chain_anchored: false,
+        revocation: Revocation::NotChecked {
+            reason: NotCheckedReason::NoData,
+        },
+        certification_level: None,
+    }
+}
+
 impl Detail {
     /// Whether the signer was found on a revocation list.
     ///
@@ -215,6 +235,13 @@ impl Detail {
     /// Prose lives here rather than in [`Badge::code`] because these sentences are the *explanation*
     /// the design asks for, not a machine-readable state.
     pub fn lines(&self) -> Vec<&'static str> {
+        // A file with no signature has nothing to have checked, so it gets one line and no
+        // "not checked" rows. Emitting them here would say we looked for a revocation answer on a
+        // document that carries no signature at all, which is the same conflation of `unsigned`
+        // with `unknown` that `unsigned()` exists to prevent.
+        if self.badge == Badge::Unsigned {
+            return vec!["this document carries no signature"];
+        }
         let mut lines = Vec::with_capacity(4);
         lines.push(match self.badge {
             Badge::Unsigned => "this document carries no signature",
@@ -289,6 +316,36 @@ mod tests {
             },
             certification_level: None,
         }
+    }
+
+    #[test]
+    fn an_unsigned_document_renders_unsigned_and_says_nothing_was_checked() {
+        let detail = unsigned();
+        assert_eq!(
+            detail.badge,
+            Badge::Unsigned,
+            "I-SG4: a file with no signature is `unsigned`. `unknown` is a claim about a \
+             signature that could not be confirmed, and there is none here"
+        );
+        assert!(
+            !detail.badge.is_green(),
+            "`unsigned` must never paint a badge green"
+        );
+        // Exactly one line, and it is about the absence. Any "integrity: not checked" or
+        // "revocation: not checked" rows would describe checks performed on a signature that does
+        // not exist, which is the `unsigned`/`unknown` conflation in a different costume.
+        assert_eq!(
+            detail.lines(),
+            vec!["this document carries no signature"],
+            "an unsigned document must not report revocation or integrity rows"
+        );
+    }
+
+    #[test]
+    fn the_unsigned_detail_agrees_with_the_aggregate_decision() {
+        // Both paths must answer the same thing for "no signatures", because a caller that reaches
+        // one and not the other should not get a different badge.
+        assert_eq!(unsigned().badge, decide_document(&[]));
     }
 
     #[test]
