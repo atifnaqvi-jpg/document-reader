@@ -478,6 +478,39 @@ export const ENCRYPTED_READ_ONLY = "ENCRYPTED_READ_ONLY";
 export const WRONG_PASSWORD = "WRONG_PASSWORD";
 
 /**
+ * One certificate from the Windows store, as the picker lists it (P3.2 D-SG5).
+ *
+ * `canSign` is false when the store has no private key for it or the validity window has closed.
+ * Such a certificate is listed rather than filtered: an absent row is indistinguishable from "not
+ * installed", which sends a user off to import a certificate they already have.
+ */
+export interface SigningCertificate {
+  derHex: string;
+  subject: string;
+  issuer: string;
+  serialHex: string;
+  keyAlgorithm: string;
+  /** RFC 3339, or a sentence saying the clock is unusable. Never a fabricated date. */
+  notBefore: string;
+  notAfter: string;
+  canSign: boolean;
+  expired: boolean;
+}
+
+/** A certificate the store held but that could not be described, with the reason kept. */
+export interface SkippedCertificate {
+  derPrefixHex: string;
+  reason: string;
+}
+
+/** What `list_signing_certificates` returns. */
+export interface SigningCertificates {
+  certificates: SigningCertificate[];
+  /** Counted and shown so a short list can be told apart from a broken store. */
+  skipped: SkippedCertificate[];
+}
+
+/**
  * The result of signing: where the signed copy went, and what was signed.
  *
  * `contentDigest` is lower-case hex, not a byte array -- the backend serialises it that way so a

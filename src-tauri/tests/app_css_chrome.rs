@@ -244,3 +244,77 @@ fn the_badge_colour_comes_from_the_backend_boolean() {
         "the state string may label the badge but must not choose its colour: {decision}"
     );
 }
+
+/// The same defect class that hid `sign_save`: a surface that exists, is tested, and is never
+/// mounted. The badge guard next to this one was written after an unreachable command was found; this
+/// is the same question asked about the surface that *creates* signatures.
+///
+/// The trigger and the dialog are checked separately because they are the two halves that can drift:
+/// a button with no dialog, or a dialog nothing opens.
+#[test]
+fn the_sign_dialog_is_mounted_in_the_app_not_only_imported() {
+    let app = frontend_file("src/App.tsx");
+    let without_imports: String = app
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("import "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        without_imports.contains("<SignAction"),
+        "App.tsx imports the sign action but never renders it, so a user has no way to sign a \
+         document -- the same unreachable-surface defect `sign_save` had"
+    );
+    assert!(
+        !without_imports.contains("<SignDialog") || without_imports.contains("<SignAction"),
+        "SignDialog is mounted directly, bypassing the trigger that owns it"
+    );
+}
+
+/// `sign_document` is the command the dialog calls. It takes a PKCS#12 **path**; the certificate
+/// listing reports **DER hex**. Passing the hex where the path belongs type-checks and fails only at
+/// runtime, so the dialog must not send a certificate's `derHex` as `pfxPath`.
+#[test]
+fn the_sign_dialog_sends_a_certificate_file_path_not_a_certificate_blob() {
+    let dialog = frontend_file("src/components/SignDialog.tsx");
+    let without_comments: String = dialog
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//") && !line.trim_start().starts_with("*"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        without_comments.contains("pfxPath,"),
+        "the dialog must pass a `pfxPath` to sign_document"
+    );
+    // Every `pfxPath` assignment is inspected, not one spelling of the defect. The first version of
+    // this guard matched `pfxPath: chosen.derHex` exactly and missed `pfxPath: chosen?.derHex ?? ""`,
+    // which is the same bug with optional chaining -- a guard that only knows one spelling is a guard
+    // that a refactor walks straight past.
+    for line in without_comments.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("pfxPath:") {
+            assert!(
+                !rest.contains("derHex"),
+                "a certificate's DER blob is not a file path; sending it as `pfxPath` compiles and \
+                 fails only at the point of use: {line}"
+            );
+        }
+    }
+    // And the store must be described as not yet usable, rather than offered as a working source.
+    assert!(
+        dialog.contains("not available yet"),
+        "the store listing cannot sign yet; the dialog must say so instead of offering it"
+    );
+}
+
+/// D-SG6: the level is an explicit choice, so the dialog must not default to a certification level.
+/// `useState<number | null>(null)` is the approval default; a `0` or a `1` there would make every
+/// signature a certification and silently restrict the user's own later edits.
+#[test]
+fn the_sign_dialog_defaults_to_an_approval_signature_not_to_a_level() {
+    let dialog = frontend_file("src/components/SignDialog.tsx");
+    assert!(
+        dialog.contains("useState<number | null>(null)"),
+        "the certification level must default to `null` (an approval signature); a numeric default \
+         is an implicit DocMDP level, which D-SG6 forbids"
+    );
+}

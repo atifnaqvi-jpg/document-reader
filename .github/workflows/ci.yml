@@ -247,7 +247,7 @@ jobs:
           # PDFium unavailable: 746 passed, 0 ignored. Measured after the save-path unit, which
           # added 18 (8 sign.rs unit tests, 8 sign_save.rs integration tests, 2 cleanup tests).
           #
-          # Measured at 835, not 746: the floor had drifted 34 below the tree by the time SCOPE-C's
+          # Measured at 838, not 746: the floor had drifted 34 below the tree by the time SCOPE-C's
           # badge unit landed (CI reported 780 passed while this said 746), so a test stopping
           # being collected would have taken 34 deletions to notice. Re-measured from the tree on
           # 2026-11-10: 808 passed with PDFium unavailable, 106 ignored -- the ignored pin above,
@@ -259,8 +259,8 @@ jobs:
           # module is compiled into each binary that declares it, and those three live in a module
           # four test binaries include, so three tests move the count by nine. That multiplication is
           # why this number is measured rather than reasoned about.
-          if [ "$passed" -lt 835 ]; then
-            echo "::error::only $passed tests ran; 835 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 838 ]; then
+            echo "::error::only $passed tests ran; 838 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

@@ -12,6 +12,7 @@ import { IndexingIndicator, SearchPane } from "./components/SearchPane";
 import { Toolbar } from "./components/Toolbar";
 import { ViewerPane } from "./components/ViewerPane";
 import { SignatureBadgeChip } from "./components/SignatureBadge";
+import { SignAction } from "./components/SignDialog";
 import type { JumpRequest, ViewerHandle } from "./components/ViewerPane";
 import type { NavigationTarget } from "./components/Menu";
 import { EditorProvider } from "./state/EditorProvider";
@@ -25,6 +26,8 @@ const OPEN_FILTERS = [
 function Workspace() {
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
   const [selected, setSelected] = useState<LibraryEntry | null>(null);
+  // Bumped after a successful sign so the badge re-reads the file it describes.
+  const [signedTick, setSignedTick] = useState(0);
   const [error, setError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
   const [jump, setJump] = useState<JumpRequest | null>(null);
@@ -184,6 +187,18 @@ function Workspace() {
                 than inside a pane so it is never conditional on which pane is open: a signature
                 the user cannot see is a check they cannot benefit from. */}
             {selected && <SignatureBadgeChip documentId={selected.id} />}
+            {/* The badge reports; this is how a signature gets there in the first place. Placed
+                beside the badge so the state and the action that produces it are found together,
+                and outside any pane for the same reason the badge is. */}
+            {selected && (
+              <SignAction
+                documentId={selected.id}
+                // Re-read the badge after signing: the file is now signed, so leaving the old
+                // verdict on screen would show `unsigned` for a document the user just signed.
+                onSigned={() => setSignedTick((tick) => tick + 1)}
+                signedTick={signedTick}
+              />
+            )}
           </EditorProvider>
         </section>
       </main>

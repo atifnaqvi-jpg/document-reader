@@ -18,6 +18,7 @@ import type {
   RenderedPage,
   SearchHit,
   SignatureBadge,
+  SigningCertificates,
   SignOutcome,
   SignRequest,
   TextEditResult,
@@ -394,6 +395,16 @@ export const revertPageText = (
  */
 export const decryptCopy = (documentId: string, password: string) =>
   invoke<DecryptOutcome>("decrypt_copy", { documentId, password });
+
+/**
+ * Lists the signing certificates installed for the current user (P3.2 D-SG5).
+ *
+ * Rejects on a platform with no Windows certificate store, rather than resolving to an empty list.
+ * An empty list would render as "you have no signing certificates", which is a false statement about
+ * the user's machine.
+ */
+export const listSigningCertificates = () =>
+  invoke<SigningCertificates>("list_signing_certificates");
 
 /**
  * Signs a document's saved file with a PKCS#12 identity (P3.2 SCOPE-C).
