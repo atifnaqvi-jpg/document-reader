@@ -341,8 +341,10 @@ fn a_signed_document_carries_a_detached_cms_over_its_byte_range() {
         let text = std::str::from_utf8(pair).unwrap();
         decoded.push(u8::from_str_radix(text, 16).expect("hex digits"));
     }
-    let trailing_zeros = decoded.iter().rev().take_while(|byte| **byte == 0).count();
-    let der_len = decoded.len() - trailing_zeros;
+    let der_len = cms_verifier::der_encoded_length(&decoded);
+    // Padding still has to be there: the gap is reserved before the signature is known, and a
+    // signature that filled it exactly would leave nothing for the writer to have reserved.
+    let trailing_zeros = decoded.len() - der_len;
     let signature_der = &decoded[..der_len];
 
     assert!(
@@ -446,7 +448,7 @@ fn the_declared_byte_range_matches_the_gap_in_the_written_file() {
     for pair in hex_gap.as_bytes().chunks(2) {
         decoded.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
     }
-    let der_len = decoded.len() - decoded.iter().rev().take_while(|b| **b == 0).count();
+    let der_len = cms_verifier::der_encoded_length(&decoded);
 
     verify_independently(&decoded[..der_len], &covered, &fixture_public_key())
         .expect("the signature verifies over the ranges the file declares");

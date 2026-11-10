@@ -377,6 +377,27 @@ fn decode_contents_gap(hex_gap: &[u8]) -> Vec<u8> {
     decoded
 }
 
+/// The length the outermost DER element declares, read from its own header.
+///
+/// **The only implementation of this in the test suite, deliberately.** The `/Contents` gap is
+/// zero-padded to a fixed size, so the decoded bytes run past the signature. Deciding where it ends
+/// by counting trailing zeros is wrong: a DER SEQUENCE ends at the last byte of its last element, and
+/// that byte is `0x00` roughly one run in 256. Four copies of that mistake existed here; one was
+/// fixed and the other three kept failing intermittently, which read as "the fix did not work"
+/// rather than "three more copies are wrong". Everything now calls this.
+pub fn der_encoded_length(bytes: &[u8]) -> usize {
+    let first = *bytes.get(1).expect("a DER element has a length byte");
+    if first & 0x80 == 0 {
+        return 2 + first as usize;
+    }
+    let count = (first & 0x7F) as usize;
+    let mut length = 0usize;
+    for index in 0..count {
+        length = (length << 8) | bytes[2 + index] as usize;
+    }
+    2 + count + length
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -384,6 +405,75 @@ pub fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod gap_tests {
     use super::*;
+
+    /// The length must come from the header even when the DER ends in zeros **and** the padding
+    /// that follows is itself zeros. This is the deterministic form of an intermittent failure:
+    /// counting trailing zeros cannot tell the two apart, so it truncates a well-formed signature.
+    #[test]
+    fn the_declared_length_survives_zero_bytes_at_the_end_and_after() {
+        // Contents `01 00`, so the DER's last two bytes are zeros and the padding is zeros too.
+        let der = vec![0x30, 0x02, 0x01, 0x00];
+        let mut padded = der.clone();
+        padded.extend_from_slice(&[0u8; 20]);
+
+        assert_eq!(
+            der_encoded_length(&padded),
+            4,
+            "the header says four bytes; trailing zeros are padding and data alike"
+        );
+        assert_eq!(&padded[..der_encoded_length(&padded)], der.as_slice());
+    }
+
+    /// A long-form length, which is what a real signature uses: 0x82 with two length bytes.
+    #[test]
+    fn a_long_form_length_is_read_from_the_header_not_counted() {
+        // 0x82 0x01 0x00 => 256 bytes of body, none of which need be non-zero.
+        let mut der = vec![0x30, 0x82, 0x01, 0x00];
+        der.extend(std::iter::repeat_n(0xAAu8, 256));
+        der.extend(std::iter::repeat_n(0u8, 8));
+        assert_eq!(der_encoded_length(&der), 4 + 256);
+    }
+
+    /// The guard against a fifth copy: every place that trims a decoded `/Contents` gap must call
+    /// the one implementation. A source scan because the bug is a *repetition* mistake -- the fix is
+    /// correct everywhere it was applied, and what fails is somewhere it was not.
+    #[test]
+    fn no_test_file_derives_a_signature_length_from_trailing_zeros() {
+        let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let mut offenders = Vec::new();
+        let mut stack = vec![tests];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("tests directory") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                for (number, line) in text.lines().enumerate() {
+                    if line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    // Match the shape of the defect -- a reverse walk taking zero bytes -- rather
+                    // than the word `take_while`, which also appears in this scan itself.
+                    let reversed_walk = line.contains(".rev()") || line.contains(".reverse()");
+                    let takes_zeros = line.contains("take_while") && line.contains("0");
+                    if reversed_walk && takes_zeros {
+                        offenders.push(format!("{}:{}", path.display(), number + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a test derives a DER length by counting trailing zeros, which truncates a \
+             signature whose last byte is 0x00; call `der_encoded_length` instead:\n{}",
+            offenders.join("\n")
+        );
+    }
 
     /// A 4-byte DER SEQUENCE whose last content byte is `0x00`, padded with zeros as the real
     /// `/Contents` gap is. `30 02 01 00` is the shortest shape where the zero is *data*, not

@@ -364,6 +364,11 @@ fn the_render_smoke_step_actually_runs_the_ignored_memory_tests() {
 ///
 /// Mutation-verified: `-lt 433` -> `-lt 434` fails this test; restoring it passes. It was
 /// raised here from 432 by the B-1 boundary guard, which adds one test.
+///
+/// Raised from 746 to 808 with SCOPE-C's badge unit: the workflow floor had drifted 34 below the
+/// tree (CI reported 780 passed against a floor of 746), which is precisely the drift this guard
+/// exists to make visible -- and it did not, because this guard pinned the same stale number that
+/// the workflow held. Two copies of a stale value agree with each other and with nothing else.
 #[test]
 fn the_linux_job_pins_the_measured_passed_floor() {
     let text = ci_workflow();
@@ -374,8 +379,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 746 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 746. \
+        tests_step.contains(r#"if [ "$passed" -lt 817 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 817. \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }

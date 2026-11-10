@@ -136,19 +136,64 @@ fn the_keystore_crate_is_named_only_in_the_pfx_module() {
     );
 }
 
-/// K25 for the CMS stack: `cms`, `rsa`, `x509-cert 0.2` and `der 0.7` are confined to `cms.rs`.
+/// Whether `line` names the package `crate_name` as a path prefix.
+///
+/// A plain substring test is wrong here and was wrong for as long as every CMS crate lived in one
+/// file: `"cms::"` occurs inside `x509_cert_cms::`, `der_cms::` and `spki_cms::`, so asking whether
+/// `cms` is used answered yes for the aliased generations. The match therefore requires that the
+/// character before the name is not part of an identifier -- no `_x509_cert_` before the `cms`.
+fn names_crate(line: &str, crate_name: &str) -> bool {
+    let needle = format!("{crate_name}::");
+    let bytes = line.as_bytes();
+    line.match_indices(&needle).any(|(at, _)| {
+        at == 0
+            || !matches!(
+                bytes[at - 1],
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'
+            )
+    })
+}
+
+/// K25 for the CMS stack: `cms`, `rsa`, `x509-cert 0.2` and `der 0.7` are confined to the two files
+/// that form the CMS boundary.
 ///
 /// The signer sits on a second `der`/`x509-cert` generation than the rest of the crate (design
-/// K24 predicted exactly this). The boundary is honoured only if no CMS-crate type escapes the one
-/// file that builds signatures: a `der 0.7` value handed to `der 0.8` code does not compile, but
-/// the reverse mistake -- threading an `x509-cert 0.3` certificate into the CMS builder -- is
-/// caught here rather than at review.
+/// K24 predicted exactly this). The boundary is honoured only if no CMS-crate type escapes those
+/// files: a `der 0.7` value handed to `der 0.8` code does not compile, but the reverse mistake --
+/// threading an `x509-cert 0.3` certificate into the CMS builder -- is caught here rather than at
+/// review.
+///
+/// **Two files, not one.** `cms.rs` builds a signature and `verify.rs` reads one back. Design §4
+/// plans verification as its own module for I-SG1..I-SG5, and D-SG7's badges cannot report
+/// `Integrity` at all unless production can compute it, so the verifier cannot live in a test file.
+/// What must stay confined is the *generation boundary*, and both files are on the far side of it:
+/// `x509-cert 0.2`'s `subject_public_key_info` field is an `spki 0.7` type, so a verifier that reads a
+/// certificate's key is unavoidably a `der 0.7` consumer.
+///
+/// Widening this list is a real cost and is bounded by the second half of the test: neither file may
+/// publicly expose a CMS-generation type. That is what stops the boundary creeping outward one
+/// return type at a time.
 ///
 /// `sha2` is deliberately absent from this list: the crate already uses both generations, and a
 /// digest has no cross-generation identity problem.
 #[test]
-fn the_cms_crates_are_confined_to_the_cms_module() {
-    for crate_name in ["cms", "rsa", "x509_cert_cms", "der_cms", "spki_cms"] {
+fn the_cms_crates_are_confined_to_the_cms_and_verify_modules() {
+    // Per-crate expectations rather than one list. The two boundary files do not import the same
+    // packages, and a shared list would either hide a leak or fail on a correct tree: `verify.rs`
+    // reaches `der 0.7` through `x509_cert_cms::der` (that crate's own re-export) rather than the
+    // `der_cms` alias, and reads no `spki_cms` type by name.
+    //
+    // `cms` itself is expected only in `cms.rs`: reading a signature does not need the builder, and
+    // if `verify.rs` ever starts using it that is a design change worth seeing in this diff.
+    let expected: [(&str, &[&str]); 5] = [
+        ("cms", &["cms.rs"]),
+        ("rsa", &["cms.rs", "verify.rs"]),
+        ("x509_cert_cms", &["cms.rs", "verify.rs"]),
+        ("der_cms", &["cms.rs"]),
+        ("spki_cms", &["cms.rs"]),
+    ];
+
+    for (crate_name, allowed) in expected {
         let mut users = Vec::new();
         for (path, text) in signing_sources() {
             for line in text.lines() {
@@ -163,7 +208,7 @@ fn the_cms_crates_are_confined_to_the_cms_module() {
                 for prefix in ["signature::cms::", "super::cms::", "self::cms::"] {
                     own = own.replace(prefix, "");
                 }
-                if own.contains(&format!("{crate_name}::")) {
+                if names_crate(&own, crate_name) {
                     users.push(path.file_name().unwrap().to_string_lossy().to_string());
                     break;
                 }
@@ -171,12 +216,59 @@ fn the_cms_crates_are_confined_to_the_cms_module() {
         }
         users.sort();
         users.dedup();
+        let allowed: Vec<String> = allowed.iter().map(|name| (*name).to_string()).collect();
         assert_eq!(
-            users,
-            vec!["cms.rs".to_string()],
-            "{crate_name} must be confined to the CMS module (design K25); found it in {users:?}"
+            users, allowed,
+            "{crate_name} must be confined to {allowed:?} (design K25); found it in {users:?}"
         );
     }
+}
+
+/// The other half of K25: neither CMS-boundary file may **publicly** hand out a CMS-crate type.
+///
+/// Confinement by file would be satisfied by a `pub fn` returning a `der 0.7` value to the rest of
+/// the crate, which is the leak the file check is trying to prevent. `pub(super)` is refused along
+/// with `pub` because `signature::verify` is reachable from anywhere in the crate through
+/// `editor::signature`.
+///
+/// Return types only, and that is a deliberate limit rather than an oversight: an argument of a
+/// CMS type can only be supplied by code already inside the boundary, so it is not an escape.
+#[test]
+fn no_cms_type_escapes_the_boundary_files() {
+    const CMS_CRATES: [&str; 5] = [
+        "cms::",
+        "rsa::",
+        "x509_cert_cms::",
+        "der_cms::",
+        "spki_cms::",
+    ];
+    let mut offenders = Vec::new();
+    for (path, text) in signing_sources() {
+        if !matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("cms.rs" | "verify.rs")
+        ) {
+            continue;
+        }
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || !trimmed.starts_with("pub") {
+                continue;
+            }
+            // A `pub struct`/`pub enum`/`pub type` names its own type; only an `fn` hands one out.
+            let Some(signature) = trimmed.split("->").nth(1) else {
+                continue;
+            };
+            if CMS_CRATES.iter().any(|name| signature.contains(name)) {
+                offenders.push(format!("{}: {trimmed}", path.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a public function returns a CMS-generation type, which lets the boundary escape:\n{}",
+        offenders.join("\n")
+    );
 }
 
 /// The PFX module's public surface is DER, not the reader's types (design K25).

@@ -246,8 +246,21 @@ jobs:
           # sixth `signing_surface.rs` guard confining the CMS crates to `cms.rs`. Measured with
           # PDFium unavailable: 746 passed, 0 ignored. Measured after the save-path unit, which
           # added 18 (8 sign.rs unit tests, 8 sign_save.rs integration tests, 2 cleanup tests).
-          if [ "$passed" -lt 746 ]; then
-            echo "::error::only $passed tests ran; 746 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # Measured at 817, not 746: the floor had drifted 34 below the tree by the time SCOPE-C's
+          # badge unit landed (CI reported 780 passed while this said 746), so a test stopping
+          # being collected would have taken 34 deletions to notice. Re-measured from the tree on
+          # 2026-11-10: 808 passed with PDFium unavailable, 106 ignored -- the ignored pin above,
+          # unchanged, which is why none of the added tests is PDFium-gated. The 28 that this unit
+          # added are 13 in `signature/badge.rs`, 8 in `signature/verify.rs`, 6 in
+          # `tests/sign_verify.rs` and one new K25 guard in `tests/signing_surface.rs`; the other
+          # six were already in the tree and simply unaccounted for by the old number. Then 808 -> 817
+          # for the three `cms_verifier::gap_tests` that pin the DER-length rule: a `tests/support`
+          # module is compiled into each binary that declares it, and those three live in a module
+          # four test binaries include, so three tests move the count by nine. That multiplication is
+          # why this number is measured rather than reasoned about.
+          if [ "$passed" -lt 817 ]; then
+            echo "::error::only $passed tests ran; 817 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

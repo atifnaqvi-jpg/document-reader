@@ -228,7 +228,12 @@ fn read_signatures(bytes: &[u8]) -> Vec<ReadSignature> {
             .and_then(Object::as_str)
             .expect("/Contents is a string")
             .to_vec();
-        let der_len = der.len() - der.iter().rev().take_while(|byte| **byte == 0).count();
+        // The length comes from the DER's own header, never from trailing zeros: a signature may
+        // legitimately end in `0x00` and stripping every trailing zero truncated it by one byte,
+        // failing the parse on a well-formed signature (measured ~1 run in 10). This is the same
+        // defect `cms_verifier::decode_contents_gap` had; it survived here because the fix went to
+        // the other decoder. One bug, two copies, one fixed.
+        let der_len = cms_verifier::der_encoded_length(&der);
 
         let (doc_mdp_p, doc_mdp_v) = match dict.get(b"Reference").and_then(Object::as_array) {
             Ok(references) => {
