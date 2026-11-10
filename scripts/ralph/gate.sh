@@ -148,10 +148,15 @@ fi
 # `tests/badge_evidence_source.rs` (`the_command_hands_the_store_assessment_to_the_mapping_unmodified`).
 # Measured, not incremented: 883 passed with PDFIUM_LIBRARY_PATH unset and 883 with it pointed at a
 # nonexistent path, 106 ignored in both.
-# Now 883/106 and 989/0.
-PIN_PLAIN_PASSED=883
+#
+# 2026-11-10 (+1, CRLF guard regression): `bounded_body_finds_its_bound_in_a_crlf_checkout` in
+# `tests/command_registration.rs`. That test exists because a `"\n}\n"` bound passed on Linux and
+# failed on the Windows runner's CRLF checkout, so the guard was red only on the shipping target.
+# +1 PDFium-independent; ignored count stays 106.
+# Now 884/106 and 990/0.
+PIN_PLAIN_PASSED=884
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=989
+PIN_IGNORED_PASSED=990
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

@@ -267,9 +267,10 @@ jobs:
           #
           # 883 for the I-SG4 unsigned badge: +4, all PDFium-independent (three unit tests and one
           # source guard), so the ignored pin above stays at 106. Measured with the PDFium path
-          # unset and pointed at a nonexistent path, 883 in both.
-          if [ "$passed" -lt 883 ]; then
-            echo "::error::only $passed tests ran; 883 is the non-PDFium baseline. A test stopped being collected."
+          # unset and pointed at a nonexistent path, 883 in both. Then 884 for the CRLF regression
+          # test in `tests/command_registration.rs`, also PDFium-independent.
+          if [ "$passed" -lt 884 ]; then
+            echo "::error::only $passed tests ran; 884 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

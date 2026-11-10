@@ -150,7 +150,14 @@ fn every_registered_command_is_declared() {
 ///
 /// Panics rather than returning an empty slice: a guard that silently checked nothing would pass on
 /// any code at all, which is the vacuous green AGENTS.md forbids.
+///
+/// Line endings are normalised first. The Windows CI runner checks out with CRLF, so a bound of
+/// `"\n}\n"` matched on Linux and never matched there -- the guard failed only on the shipping
+/// target, which is the half of CI that runs the real PDFium suite. Measured: this exact guard was
+/// green locally and on the Linux job and red on Windows for that reason alone. The regression test
+/// below keeps it that way.
 fn bounded_body(text: &str, marker: &str, end: &str) -> String {
+    let text = text.replace("\r\n", "\n");
     let start = text
         .find(marker)
         .unwrap_or_else(|| panic!("no `{marker}` in commands/mod.rs; re-anchor this guard"));
@@ -159,6 +166,15 @@ fn bounded_body(text: &str, marker: &str, end: &str) -> String {
         .find(end)
         .unwrap_or_else(|| panic!("no `{end}` after `{marker}`; this guard's bound is stale"));
     rest[..stop].to_string()
+}
+
+#[test]
+fn bounded_body_finds_its_bound_in_a_crlf_checkout() {
+    // The Windows runner hands these tests CRLF. Before the normalisation this returned the panic
+    // path, so every guard built on it failed on the shipping target while passing on Linux.
+    let crlf = "pub fn badge_for(x: u8) {\r\n    let y = x;\r\n}\r\n";
+    let body = bounded_body(crlf, "pub fn badge_for(", "\n}\n");
+    assert!(body.contains("let y = x;"), "body was {body:?}");
 }
 
 /// Strip `//` comments so a guard cannot be satisfied by prose that merely names the identifier.
