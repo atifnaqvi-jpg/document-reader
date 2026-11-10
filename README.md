@@ -34,7 +34,12 @@ read only from the document itself or from certificates the user imports.
   nothing dangles (in flight for v1.2.0).
 - **Sign:** offline PFX/PKCS#12 import, CMS/PKCS#7 detached signatures, DocMDP
   certification, and signature badges — strictly no network (in flight for
-  v1.2.0).
+  v1.2.0). Signing writes a new file beside the original and never rewrites it.
+  The badge reports `valid` / `modified` / `unknown` / `unsigned` and is
+  deliberately conservative: there is no trust store yet, so a sound signature
+  reads `unknown` rather than `valid`, and revocation is never fetched. Signing
+  with a certificate from the Windows store is not available yet; import the
+  certificate's `.pfx` instead.
 - **Not in v1:** OCR of scanned PDFs (planned as P3.5), EPUB/DOCX, any form of
   sync or cloud.
 
