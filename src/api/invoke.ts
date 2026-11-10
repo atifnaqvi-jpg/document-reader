@@ -17,6 +17,7 @@ import type {
   PageTextRun,
   RenderedPage,
   SearchHit,
+  SignatureBadge,
   TextEditResult,
   TextRunFragmentRef,
   TextRunId,
@@ -391,6 +392,16 @@ export const revertPageText = (
  */
 export const decryptCopy = (documentId: string, password: string) =>
   invoke<DecryptOutcome>("decrypt_copy", { documentId, password });
+
+/**
+ * Reports the signature badge for a document's saved file (P3.2 SCOPE-C, D-SG7).
+ *
+ * Reads the file on disk, not the editor buffer: the badge answers what the signature attests to,
+ * and unsaved edits are not in the file. A document with no signature returns `unsigned`, not an
+ * error -- "there is no signature" is an answer, and an error would render as a fault.
+ */
+export const getSignatureBadge = (documentId: string) =>
+  invoke<SignatureBadge>("signature_badge", { documentId });
 
 /** Drops a document's remembered password when it closes (P2.4 T10). */
 export const forgetPassword = (path: string) =>

@@ -967,3 +967,58 @@ button:disabled {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/* The signature badge (P3.2 SCOPE-C, D-SG7).
+
+   `--neutral` is the style for `unknown` and `unsigned`, and it is deliberately quiet rather than
+   alarming. `unknown` is the correct answer on a machine with no trust store, so it has to look
+   like a fact, not a fault: a badge that cries wolf teaches the user to ignore the one state that
+   matters, which is `modified`. Only `--valid` is green, and the component derives that class from
+   the backend's boolean rather than from the state string. */
+.sig-badge-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.sig-badge {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+}
+
+.sig-badge--neutral {
+  border-color: #9aa0a6;
+  color: #5f6368;
+}
+
+.sig-badge--valid {
+  border-color: #1e7f43;
+  color: #1e7f43;
+  background: #e8f5ec;
+}
+
+.sig-badge--error {
+  border-color: #b3261e;
+  color: #b3261e;
+}
+
+.sig-badge__detail {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 10;
+  min-width: 260px;
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  list-style: none;
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid #dadce0;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 15%);
+}

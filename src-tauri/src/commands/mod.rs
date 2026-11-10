@@ -1259,6 +1259,92 @@ pub async fn protect_document(
     Ok(outcome)
 }
 
+/// What the UI renders for a document's signature (D-SG7).
+///
+/// Shaped for rendering, not for reuse: the badge, one line explaining it, and the list of things
+/// that were and were not checked. Every string here is produced by `badge::explain`, which is the
+/// single place that turns evidence into user-facing wording; duplicating the sentences in the
+/// frontend would be a second place for a green badge to say something the logic never established.
+#[derive(serde::Serialize)]
+pub struct SignatureBadge {
+    /// One of `valid`, `modified`, `unknown`, `unsigned` (D-SG7's four, and only these four).
+    pub badge: &'static str,
+    pub lines: Vec<&'static str>,
+    /// True only for `valid`. The frontend colours on this rather than on the string, so a new
+    /// variant cannot become green by being added to a list somewhere else.
+    pub is_green: bool,
+    /// The declared DocMDP level, when this is a certification signature.
+    pub certification_level: Option<u8>,
+}
+
+/// Report the signature badge for a document (P3.2 SCOPE-C, D-SG7).
+///
+/// Reads the saved file, never the in-memory edits: the badge answers "does the signature attest to
+/// the bytes in this file", and unsaved edits are not in it. A signature over a file the user has
+/// since edited in the editor is reported on the file, and the edit is still unsaved -- which is
+/// why this does not claim anything about the editor's buffer.
+///
+/// `anchored` is `false` because no local trust store exists yet (D-SG4 leaves trust to a store the
+/// user chooses, and that store is a later unit). The consequence is that a perfectly good
+/// signature reports `unknown`, which is the honest answer rather than a defect: D-SG7 says a
+/// certificate that chains to nothing local is `unknown`, never `valid`.
+#[tauri::command]
+pub async fn signature_badge(
+    db: State<'_, Db>,
+    document_id: String,
+) -> Result<SignatureBadge, AppError> {
+    let path = document_path(&db, &document_id)?;
+    let bytes = std::fs::read(&path)
+        .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
+
+    let reading = tauri::async_runtime::spawn_blocking(move || {
+        crate::editor::signature::verify::inspect(&bytes)
+    })
+    .await
+    .map_err(|error| AppError::Other(format!("verify task failed: {error}")))??;
+
+    let Some(reading) = reading else {
+        let evidence = crate::editor::signature::badge::SignatureEvidence {
+            integrity: crate::editor::signature::badge::Integrity::NotChecked,
+            later_revision: false,
+            anchored: false,
+            revocation: crate::editor::signature::revocation::Revocation::NotChecked {
+                reason: crate::editor::signature::revocation::NotCheckedReason::NoData,
+            },
+            certification_level: None,
+        };
+        let detail = crate::editor::signature::badge::explain(&evidence);
+        return Ok(SignatureBadge {
+            badge: detail.badge.code(),
+            lines: detail.lines(),
+            is_green: detail.badge.is_green(),
+            certification_level: None,
+        });
+    };
+
+    // No revocation parser has landed, so no data was read. `decide(None, None, now)` is the honest
+    // call and returns `NotChecked`, which cannot support `valid` -- the reason a signature over an
+    // untouched file still reports `unknown` today.
+    let revocation = crate::editor::signature::revocation::decide(None, None, 0);
+    let evidence = crate::editor::signature::badge::SignatureEvidence {
+        integrity: reading.integrity,
+        // `inspect` reads the newest signature only, so a later revision is not representable from
+        // here: a second signature that is newest is the one being judged, and if it is intact its
+        // tail runs to the end of the file. An edit appended after it would move the end.
+        later_revision: false,
+        anchored: false,
+        revocation,
+        certification_level: reading.certification_level,
+    };
+    let detail = crate::editor::signature::badge::explain(&evidence);
+    Ok(SignatureBadge {
+        badge: detail.badge.code(),
+        lines: detail.lines(),
+        is_green: detail.badge.is_green(),
+        certification_level: reading.certification_level,
+    })
+}
+
 /// Drops a document's remembered password (P2.4 T10), called when the document closes.
 #[tauri::command]
 pub fn forget_password(passwords: State<'_, PasswordStore>, path: String) -> Result<(), AppError> {

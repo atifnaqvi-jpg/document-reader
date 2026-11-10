@@ -159,3 +159,88 @@ fn the_free_text_preview_keeps_its_metrics_out_of_the_stylesheet() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The signature badge (P3.2 SCOPE-C, D-SG7)
+// ---------------------------------------------------------------------------------------------
+
+fn frontend_file(relative: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri must have a parent directory")
+        .join(relative);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+/// D-SG7 requires the four states to be the *rendered* badge, not merely a computed enum. A
+/// component that exists, is tested, and is never mounted satisfies nothing -- and that is not a
+/// hypothetical failure mode here: `sign_save` was fully built, fully tested, and unreachable from
+/// any UI for a whole unit because no test asked whether anything invoked it. This asks.
+#[test]
+fn the_signature_badge_is_mounted_in_the_app_not_only_imported() {
+    let app = frontend_file("src/App.tsx");
+    let without_imports: String = app
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("import "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        without_imports.contains("<SignatureBadgeChip"),
+        "App.tsx imports the badge but never renders it, so no user can see a signature state"
+    );
+}
+
+/// `unknown` is the honest answer offline, so it must not be styled as a fault. The quiet style is
+/// `.sig-badge--neutral`, and only `.sig-badge--valid` may be green.
+#[test]
+fn only_the_valid_badge_is_green() {
+    let css = app_css();
+    // `rule_containing` returns a default empty rule when nothing matches, so the selectors are
+    // checked too: without that, a deleted `.sig-badge--valid` rule would satisfy every assertion
+    // below by having nothing to fail on.
+    let (valid_selectors, valid) = rule_containing(&css, ".sig-badge--valid");
+    assert!(
+        valid_selectors.contains(".sig-badge--valid"),
+        "the green badge rule is missing from App.css; `valid` would render unstyled"
+    );
+    assert!(
+        valid
+            .iter()
+            .any(|(prop, _)| prop == "background" || prop == "color"),
+        "the valid badge must be visually distinct or the state is invisible"
+    );
+    let (neutral_selectors, neutral) = rule_containing(&css, ".sig-badge--neutral");
+    assert!(
+        neutral_selectors.contains(".sig-badge--neutral"),
+        "the quiet badge rule is missing from App.css; `unknown` would render unstyled"
+    );
+    assert!(
+        !neutral
+            .iter()
+            .any(|(prop, value)| prop == "background" && value.contains("#e8f5ec")),
+        "the neutral badge must not share the green background: `unknown` is a fact, not a pass"
+    );
+}
+
+/// The component must take the green class from the backend's boolean, never from the state string.
+/// Interpolating the string was a real defect during development: a response saying `valid` with
+/// `isGreen: false` still rendered the green class, which is the one thing D-SG7 forbids.
+#[test]
+fn the_badge_colour_comes_from_the_backend_boolean() {
+    let source = frontend_file("src/components/SignatureBadge.tsx");
+    let start = source
+        .find("const modifier")
+        .expect("the colour decision must be a single named binding");
+    let end = source[start..]
+        .find(';')
+        .expect("the binding must end in a semicolon");
+    let decision = &source[start..start + end];
+    assert!(
+        decision.contains("badge.isGreen"),
+        "the colour must be decided by `isGreen`, not by the state string: {decision}"
+    );
+    assert!(
+        !decision.contains("badge.badge"),
+        "the state string may label the badge but must not choose its colour: {decision}"
+    );
+}

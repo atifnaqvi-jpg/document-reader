@@ -11,6 +11,7 @@ import { ErrorBanner, LibraryPane } from "./components/LibraryPane";
 import { IndexingIndicator, SearchPane } from "./components/SearchPane";
 import { Toolbar } from "./components/Toolbar";
 import { ViewerPane } from "./components/ViewerPane";
+import { SignatureBadgeChip } from "./components/SignatureBadge";
 import type { JumpRequest, ViewerHandle } from "./components/ViewerPane";
 import type { NavigationTarget } from "./components/Menu";
 import { EditorProvider } from "./state/EditorProvider";
@@ -179,6 +180,10 @@ function Workspace() {
               onJumpToPage={(page) => handleOpenHitPage(page)}
               documentId={selected?.id ?? null}
             />
+            {/* D-SG7 requires the badge to be *rendered*, not merely computed. Mounted here rather
+                than inside a pane so it is never conditional on which pane is open: a signature
+                the user cannot see is a check they cannot benefit from. */}
+            {selected && <SignatureBadgeChip documentId={selected.id} />}
           </EditorProvider>
         </section>
       </main>

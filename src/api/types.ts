@@ -478,6 +478,23 @@ export const ENCRYPTED_READ_ONLY = "ENCRYPTED_READ_ONLY";
 export const WRONG_PASSWORD = "WRONG_PASSWORD";
 
 /**
+ * The signature badge, as `signature_badge` reports it (P3.2 SCOPE-C, D-SG7).
+ *
+ * `badge` is one of exactly four states. `isGreen` is separate from the string on purpose: the
+ * component colours on the boolean, so adding a fifth state to the union cannot accidentally render
+ * green. The backend computes it from evidence; the UI never decides.
+ */
+export interface SignatureBadge {
+  badge: "valid" | "modified" | "unknown" | "unsigned";
+  /** One line per thing checked or not checked, already worded by the backend. */
+  lines: string[];
+  /** True only for `valid`. The single source of colour. */
+  isGreen: boolean;
+  /** The declared DocMDP level (1..3) when this is a certification signature. */
+  certificationLevel: number | null;
+}
+
+/**
  * A stable string for a run address, for React keys and identity checks (P2.7.3 X1).
  *
  * The `opIndex`/`operandPath` pair alone is no longer unique: a page run at op 3 and a run at

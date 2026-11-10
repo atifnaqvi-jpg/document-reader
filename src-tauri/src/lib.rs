@@ -98,6 +98,7 @@ pub fn run() {
             commands::decrypt_copy,
             commands::protect_document,
             commands::forget_password,
+            commands::signature_badge,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");
