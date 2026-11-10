@@ -17,7 +17,9 @@
 use document_reader_lib::editor::signature::badge::Integrity;
 use document_reader_lib::editor::signature::pfx::{import_bytes, ImportedIdentity};
 use document_reader_lib::editor::signature::sign::sign_save;
-use document_reader_lib::editor::signature::verify::{inspect, newest_byte_range};
+use document_reader_lib::editor::signature::verify::{
+    inspect, later_revision_after_signing, newest_byte_range,
+};
 use lopdf::{dictionary, Document, Object};
 
 const PFX_PASSWORD: &str = "correct-horse";
@@ -275,4 +277,91 @@ fn the_verifier_reports_the_range_it_actually_checked() {
         "the file and the outcome must agree"
     );
     assert_eq!(observed[0], 0, "a PDF /ByteRange always starts at zero");
+}
+
+// ---------------------------------------------------------------------------------------------
+// A later revision (D-SG7: `modified`, even though the signed bytes are untouched)
+// ---------------------------------------------------------------------------------------------
+
+/// The badge must be able to say `modified` for a file that had something appended to it *after*
+/// signing. Before this change, `signature_badge` passed `later_revision: false` as a constant while
+/// its comment described the check that would have detected it, so an unsigned appendix -- the
+/// ordinary shape of "someone edited this after it was signed" -- could never report `modified`.
+/// The check existed in prose and not in code.
+#[test]
+fn bytes_appended_after_signing_are_reported_as_a_later_revision() {
+    let (_dir, written) = signed_bytes("append target");
+
+    let reading = inspect(&written)
+        .expect("the signed file parses")
+        .expect("the file carries a signature dictionary");
+    assert!(
+        !reading.later_revision,
+        "a freshly signed file has nothing after its signature; if this fails the check is \
+         measuring the wrong end of the file"
+    );
+    assert_eq!(reading.integrity, Integrity::Intact);
+
+    let range = newest_byte_range(&written).expect("a /ByteRange");
+    let signed_end = usize::try_from(range[2] + range[3]).expect("a non-negative tail");
+
+    let mut appended = written.clone();
+    appended.extend_from_slice(
+        b"\n% appended after signing: an ordinary incremental update, not part of any signature\n",
+    );
+    assert!(appended.len() > signed_end);
+
+    let reading = inspect(&appended)
+        .expect("the appended file still parses")
+        .expect("the signature dictionary is still there");
+
+    assert_eq!(
+        reading.integrity,
+        Integrity::Intact,
+        "the signed range is untouched, so integrity must still verify -- which is exactly why \
+         `later_revision` is reported separately rather than folded into integrity"
+    );
+    assert!(
+        reading.later_revision,
+        "bytes past the covered tail are a later revision; reporting `false` here is the false \
+         green D-SG7 forbids"
+    );
+
+    // The decision, not just the reading: this is the badge a user sees.
+    let evidence = document_reader_lib::editor::signature::badge::SignatureEvidence {
+        integrity: reading.integrity,
+        later_revision: reading.later_revision,
+        anchored: false,
+        revocation: document_reader_lib::editor::signature::revocation::Revocation::NotChecked {
+            reason: document_reader_lib::editor::signature::revocation::NotCheckedReason::NoData,
+        },
+        certification_level: reading.certification_level,
+    };
+    assert_eq!(
+        document_reader_lib::editor::signature::badge::decide(&evidence),
+        document_reader_lib::editor::signature::badge::Badge::Modified,
+        "an appended revision must make the document `modified`, not merely unanchored"
+    );
+}
+
+/// The boundary: ending exactly at the signed tail is not a later revision. An off-by-one here would
+/// report every signed document as modified, which would make the badge useless in the other
+/// direction.
+#[test]
+fn the_signed_tail_exactly_at_eof_is_not_a_later_revision() {
+    let (_dir, written) = signed_bytes("exact end");
+    let range = newest_byte_range(&written).expect("a /ByteRange");
+    let signed_end = usize::try_from(range[2] + range[3]).expect("a non-negative tail");
+
+    assert_eq!(
+        written.len(),
+        signed_end,
+        "sign_save must leave the covered tail at EOF; if it does not, `later_revision` would be \
+         true for every file this product signs"
+    );
+    assert!(!later_revision_after_signing(&written, range));
+    assert!(later_revision_after_signing(
+        &[written.clone(), vec![0]].concat(),
+        range
+    ));
 }

@@ -467,6 +467,12 @@ pub fn inspect(written: &[u8]) -> Result<Option<SealedReading>, AppError> {
                     integrity: Integrity::Damaged,
                     revoked_hint: None,
                     certification_level: None,
+                    // Knowable from the bytes even though the xref would not parse, and `Damaged`
+                    // already outranks it in `decide`, so this is reported for completeness rather
+                    // than to change the badge.
+                    later_revision: find_byte_range(written)
+                        .map(|range| later_revision_after_signing(written, range))
+                        .unwrap_or(false),
                 }))
             } else {
                 Err(AppError::SignatureBuildFailed(format!(
@@ -494,15 +500,20 @@ pub fn inspect(written: &[u8]) -> Result<Option<SealedReading>, AppError> {
                 integrity: Integrity::Damaged,
                 revoked_hint: None,
                 certification_level,
-            }))
+                // Unrecoverable range: whether anything was appended cannot be established, and
+                // `Damaged` already decides the badge.
+                later_revision: false,
+            }));
         }
     };
 
     let integrity = verify(&sealed);
+    let later_revision = later_revision_after_signing(written, sealed.byte_range);
     Ok(Some(SealedReading {
         integrity,
         revoked_hint: None,
         certification_level,
+        later_revision,
     }))
 }
 
@@ -516,6 +527,9 @@ pub struct SealedReading {
     pub revoked_hint: Option<bool>,
     /// The `/P` from the signature's `/Reference -> /TransformParams`, when it declares one.
     pub certification_level: Option<u8>,
+    /// True when bytes were appended after the revision this signature covers. D-SG7 reads that as
+    /// `modified`: the signed range is intact, but the file is not the file that was signed.
+    pub later_revision: bool,
 }
 
 /// Read the declared DocMDP level, if the signature declares one.
@@ -606,6 +620,37 @@ fn public_key(certificate_der: &[u8]) -> Option<RsaPublicKey> {
 /// The `/ByteRange` of the newest signature, for a caller that wants to show what was covered.
 pub fn newest_byte_range(written: &[u8]) -> Option<[i64; 4]> {
     recover(written).ok().map(|sealed| sealed.byte_range)
+}
+
+/// Whether a revision was appended after the one the newest signature covers.
+///
+/// A signature's `/ByteRange` is `[0, a, b, c]`: the two pieces it hashed, which between them leave a
+/// gap for the signature's own `/Contents` but must otherwise run to the end of the file that was
+/// signed. If the file the reader holds is longer than `b + c`, bytes were appended afterwards. That
+/// is a **later revision**, and D-SG7 counts it as `modified` even though the signed bytes are
+/// untouched -- the file is no longer the file that was signed.
+///
+/// Deliberately arithmetic on one range, not an object comparison. Parsing both revisions and
+/// comparing them would report *what* changed, which this badge does not claim to know, and would
+/// fail closed for a file whose older cross-reference table no longer parses. The question the badge
+/// answers is only "is anything there that was not signed".
+///
+/// Known limit, stated rather than papered over: a file *truncated* after signing also ends before
+/// the signed tail, and this returns `false` for it. Truncation that leaves the covered range
+/// intact does not change the byte count the signature hashed, so the signature still verifies; the
+/// missing bytes are past what it attested to. Detection of that case is not implemented.
+pub fn later_revision_after_signing(written: &[u8], byte_range: [i64; 4]) -> bool {
+    let [_, _, second_start, second_len] = byte_range;
+    match (usize::try_from(second_start), usize::try_from(second_len)) {
+        (Ok(start), Ok(len)) => match start.checked_add(len) {
+            Some(signed_end) => written.len() > signed_end,
+            // An offset that overflows `usize` cannot describe a real tail in this file.
+            None => false,
+        },
+        // A negative offset or length is a malformed range, and `recover` already refused it before
+        // this could be asked. Reported as "no later revision" rather than guessed either way.
+        _ => false,
+    }
 }
 
 #[cfg(test)]

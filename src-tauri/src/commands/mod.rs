@@ -1328,10 +1328,10 @@ pub async fn signature_badge(
     let revocation = crate::editor::signature::revocation::decide(None, None, 0);
     let evidence = crate::editor::signature::badge::SignatureEvidence {
         integrity: reading.integrity,
-        // `inspect` reads the newest signature only, so a later revision is not representable from
-        // here: a second signature that is newest is the one being judged, and if it is intact its
-        // tail runs to the end of the file. An edit appended after it would move the end.
-        later_revision: false,
+        // Measured from the bytes: `inspect` reports whether anything follows the newest signature's
+        // covered tail. This was hardcoded `false` while the check was described in a comment -- a
+        // badge that cannot say `modified` for a file with an unsigned appendix appended to it.
+        later_revision: reading.later_revision,
         anchored: false,
         revocation,
         certification_level: reading.certification_level,
