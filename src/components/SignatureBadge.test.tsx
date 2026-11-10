@@ -66,6 +66,30 @@ describe("the signature badge", () => {
     expect(chip.className).not.toContain("sig-badge--valid");
   });
 
+  it("renders `modified` as a warning, the one state the whole check exists for", async () => {
+    // D-SG7 names four states and this one was the only one with no render test: `unsigned` and
+    // `unknown` were covered, `valid` was covered by the two colour tests, and `modified` -- the
+    // verdict that tells a user their signed document changed after signing -- was never rendered by
+    // any test. It is also the state the `later_revision` measurement exists to produce, so a
+    // regression there would have had no frontend net under it.
+    withBadge({
+      badge: "modified",
+      lines: [
+        "the document changed after it was signed",
+        "integrity: the signed range was hashed and did not match",
+      ],
+      isGreen: false,
+      certificationLevel: null,
+    });
+    render(<SignatureBadgeChip documentId="doc-1" />);
+    const chip = await screen.findByRole("button", { name: "modified" });
+    expect(chip.getAttribute("data-state")).toBe("modified");
+    // Alarming, and never green: a changed signed document is the one thing the badge must not
+    // soften.
+    expect(chip.className).toContain("sig-badge--neutral");
+    expect(chip.className).not.toContain("sig-badge--valid");
+  });
+
   it("colours `valid` from isGreen, not from the badge string", async () => {
     // A badge that says "valid" but is not green is the exact false-green this guards: the boolean
     // is the backend's decision and the string is only a label, so a mismatch must not paint green.
