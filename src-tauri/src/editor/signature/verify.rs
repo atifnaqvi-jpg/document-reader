@@ -39,19 +39,25 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
 use rsa::RsaPublicKey;
 use sha2::{Digest, Sha256};
+use x509_cert::der::Decode as X509Decode;
 use x509_cert_cms::der::Decode;
 
 use crate::model::AppError;
 
 use super::badge::Integrity;
+use super::trust::CertFacts;
 
 /// The DER tag numbers this walk needs to tell apart.
 const TAG_OCTET_STRING: u8 = 0x04;
 const TAG_OID: u8 = 0x06;
 const TAG_SEQUENCE: u8 = 0x30;
 const TAG_SET: u8 = 0x31;
+/// INTEGER: the `SignerInfo` serial number is the only one this walk reads.
+const TAG_INTEGER: u8 = 0x02;
 /// `[0]` context-specific, constructed: the `SignedData` wrapper and, later, `signedAttrs`.
 const TAG_CONTEXT_0: u8 = 0xA0;
+/// `[1]` context-specific, constructed: the `SignedData` `crls` field.
+const TAG_CONTEXT_1: u8 = 0xA1;
 
 /// `1.2.840.113549.1.7.2` -- `id-signedData`.
 const OID_SIGNED_DATA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
@@ -268,8 +274,105 @@ struct Reading {
     signed_attributes: Vec<u8>,
     digest_oid: Vec<u8>,
     signature_oid: Vec<u8>,
-    /// The first X.509 certificate carried in the blob.
-    certificate: Option<Vec<u8>>,
+    /// Every X.509 certificate carried in the blob, in the order they appear.
+    ///
+    /// All of them, not just the first: the rest are the chain the signer chose to ship, and a
+    /// trust path needs those to reach an anchor.
+    certificates: Vec<Vec<u8>>,
+    /// Which of `certificates` is the signer, resolved from the `SignerInfo`'s own identifier.
+    ///
+    /// **Position is not an answer.** A CMS `CertificateSet` is a `SET OF`, which DER sorts, so a
+    /// blob carrying a leaf and its CA has an arbitrary first element. Taking `[0]` meant a
+    /// signature made with a chain shipped by a PKCS#12 verified against whichever certificate
+    /// happened to sort first -- usually the CA -- and read as `Damaged`. Found by the trust-store
+    /// fixture, which is the first fixture in the tree whose PFX carries a chain.
+    signer_index: Option<usize>,
+    /// DER elements of the `[1] crls` field, when the blob carries revocation data.
+    crls: Vec<Vec<u8>>,
+}
+
+impl Reading {
+    /// The signing certificate, resolved by identifier rather than by position.
+    fn signer(&self) -> Option<&Vec<u8>> {
+        self.signer_index
+            .and_then(|index| self.certificates.get(index))
+    }
+}
+
+/// Find the certificate a `SignerInfo` identifies, by issuer and serial number.
+///
+/// RFC 5652 §5.3 gives `sid` two forms. `IssuerAndSerialNumber` is what this product writes and
+/// what every mainstream signer writes, and it is matched exactly. The `[0] subjectKeyIdentifier`
+/// form is not matched here, so it yields `None` and the caller falls back to position -- a
+/// fallback that is now visible at the call site rather than being the only behaviour.
+fn find_signer(certificates: &[Vec<u8>], sid: &[u8]) -> Option<usize> {
+    let (sid_tag, sid_contents, _) = der_read(sid, 0)?;
+    if sid_tag != TAG_SEQUENCE {
+        return None;
+    }
+    let sid_fields = der_children(sid_contents);
+
+    // Both fields are taken as raw DER from the sid's own bytes. A `Name` has no canonical string
+    // form, and comparing rendered text would treat differently-encoded but equal names as
+    // different issuers.
+    let (issuer_tag, _) = *sid_fields.first()?;
+    if issuer_tag != TAG_SEQUENCE {
+        return None;
+    }
+    let issuer_at = locate_child(sid_contents, 0)?;
+    let (_, _, issuer_len) = der_read(sid_contents, issuer_at)?;
+    let issuer_bytes = &sid_contents[issuer_at..issuer_at + issuer_len];
+
+    let (serial_tag, _) = *sid_fields.get(1)?;
+    if serial_tag != TAG_INTEGER {
+        return None;
+    }
+    let serial_at = locate_child(sid_contents, 1)?;
+    let (_, _, serial_len) = der_read(sid_contents, serial_at)?;
+    // An INTEGER's value is its contents, so the tag and length are stripped before comparing
+    // against a certificate's serial.
+    let serial_bytes = strip_header(&sid_contents[serial_at..serial_at + serial_len]);
+
+    certificates.iter().position(|der| {
+        let Ok(certificate) = x509_cert::Certificate::from_der(der) else {
+            return false;
+        };
+        let tbs = certificate.tbs_certificate();
+        // The issuer is compared as a *decoded* `Name`, not as re-encoded bytes. Two producers can
+        // encode the same name with different string types (`PrintableString` vs `UTF8String`), and
+        // RFC 5280 name comparison is structural; a byte comparison would miss a match that a
+        // conforming verifier finds, which is what happened here first.
+        let Ok(sid_issuer) = x509_cert::name::Name::from_der(issuer_bytes) else {
+            return false;
+        };
+        sid_issuer == *tbs.issuer() && tbs.serial_number().as_bytes() == serial_bytes
+    })
+}
+
+/// The contents of one DER element: everything after its tag and length.
+fn strip_header(element: &[u8]) -> &[u8] {
+    let Some((_, contents, _)) = der_read(element, 0) else {
+        return element;
+    };
+    contents
+}
+
+/// Byte offset of the `index`th child inside `contents`.
+fn locate_child(contents: &[u8], index: usize) -> Option<usize> {
+    let mut at = 0usize;
+    let mut seen = 0usize;
+    while at < contents.len() {
+        let (_, _, consumed) = der_read(contents, at)?;
+        if consumed == 0 {
+            return None;
+        }
+        if seen == index {
+            return Some(at);
+        }
+        at += consumed;
+        seen += 1;
+    }
+    None
 }
 
 /// Walk a detached CMS `ContentInfo` to the signer's parts.
@@ -319,15 +422,18 @@ fn read_cms(der: &[u8]) -> Result<Reading, AppError> {
         return Err(fail("the signature is not detached: it carries eContent"));
     }
 
-    // The first plain SEQUENCE inside `[0] certificates` is an X.509 certificate.
-    let mut certificate = None;
+    // Every plain SEQUENCE inside `[0] certificates` is an X.509 certificate. The tag is checked
+    // rather than assumed: the same field may carry a `[0] extendedCertificate`, a `[1] attribute
+    // certificate` or an `[2] other`, and handing any of those to the path walk would make an
+    // unrelated structure look like an issuer.
+    let mut certificates = Vec::new();
     if let Some((_, body)) = sd.iter().find(|(tag, _)| *tag == TAG_CONTEXT_0) {
         let mut at = 0usize;
         while at < body.len() {
             match der_read(body, at) {
                 Some((child_tag, _, consumed)) if consumed > 0 => {
-                    if child_tag == TAG_SEQUENCE && certificate.is_none() {
-                        certificate = Some(body[at..at + consumed].to_vec());
+                    if child_tag == TAG_SEQUENCE {
+                        certificates.push(body[at..at + consumed].to_vec());
                     }
                     at += consumed;
                 }
@@ -342,12 +448,41 @@ fn read_cms(der: &[u8]) -> Result<Reading, AppError> {
         .find(|(tag, _)| *tag == TAG_SET)
         .ok_or_else(|| fail("no signerInfos SET"))?
         .1;
+
+    // `[1] crls IMPLICIT RevocationInfoChoices`. Only CRLs are read; an OCSP response is a different
+    // `RevocationInfoChoice` choice and is not parsed by this build. Reading it as a CRL would fail
+    // and be reported as "no data", which is why the tag is checked and the distinction is stated
+    // in `RevocationEvidence`'s contract rather than being left implicit.
+    let mut crls = Vec::new();
+    if let Some((_, body)) = sd.iter().find(|(tag, _)| *tag == TAG_CONTEXT_1) {
+        let mut at = 0usize;
+        while at < body.len() {
+            match der_read(body, at) {
+                Some((TAG_SEQUENCE, _, consumed)) if consumed > 0 => {
+                    crls.push(body[at..at + consumed].to_vec());
+                    at += consumed;
+                }
+                // A `[0] other` entry, or anything unreadable, ends the scan. Stopping is safer
+                // than guessing: a misread element would become a CRL that asserts nothing.
+                _ => break,
+            }
+        }
+    }
+
     let (si_tag, si_contents, _) =
         der_read(signer_infos, 0).ok_or_else(|| fail("truncated SignerInfo"))?;
     if si_tag != TAG_SEQUENCE {
         return Err(fail("SignerInfo is not a SEQUENCE"));
     }
     let si = der_children(si_contents);
+
+    // `sid` is the *second* child: `SignerInfo ::= SEQUENCE { version, sid, digestAlgorithm,
+    // signedAttrs?, signatureAlgorithm, signature, unsignedAttrs? }`. The digest algorithm is read
+    // from index 2 a few lines below, which is the same layout confirming this index.
+    let signer_index = locate_child(si_contents, 1).and_then(|at| {
+        let (_, _, sid_len) = der_read(si_contents, at)?;
+        find_signer(&certificates, &si_contents[at..at + sid_len])
+    });
 
     let digest_oid = si
         .get(2)
@@ -396,7 +531,11 @@ fn read_cms(der: &[u8]) -> Result<Reading, AppError> {
         signed_attributes: retag_as_set(signed_attrs),
         digest_oid,
         signature_oid,
-        certificate,
+        // The signer is identified by the `SignerInfo`'s own `sid`, never by position: a CMS
+        // `CertificateSet` is DER-sorted, so `[0]` is whichever certificate sorts first.
+        signer_index,
+        certificates,
+        crls,
     })
 }
 
@@ -465,7 +604,6 @@ pub fn inspect(written: &[u8]) -> Result<Option<SealedReading>, AppError> {
             return if written.windows(11).any(|window| window == b"/ByteRange[") {
                 Ok(Some(SealedReading {
                     integrity: Integrity::Damaged,
-                    revoked_hint: None,
                     certification_level: None,
                     // Knowable from the bytes even though the xref would not parse, and `Damaged`
                     // already outranks it in `decide`, so this is reported for completeness rather
@@ -473,6 +611,9 @@ pub fn inspect(written: &[u8]) -> Result<Option<SealedReading>, AppError> {
                     later_revision: find_byte_range(written)
                         .map(|range| later_revision_after_signing(written, range))
                         .unwrap_or(false),
+                    signer: None,
+                    embedded_chain: Vec::new(),
+                    embedded_crls: Vec::new(),
                 }))
             } else {
                 Err(AppError::SignatureBuildFailed(format!(
@@ -498,38 +639,72 @@ pub fn inspect(written: &[u8]) -> Result<Option<SealedReading>, AppError> {
         Err(_) => {
             return Ok(Some(SealedReading {
                 integrity: Integrity::Damaged,
-                revoked_hint: None,
                 certification_level,
                 // Unrecoverable range: whether anything was appended cannot be established, and
                 // `Damaged` already decides the badge.
                 later_revision: false,
+                signer: None,
+                embedded_chain: Vec::new(),
+                embedded_crls: Vec::new(),
             }));
         }
     };
 
     let integrity = verify(&sealed);
     let later_revision = later_revision_after_signing(written, sealed.byte_range);
+
+    // The certificates and CRLs ride along with the badged reading: a caller deciding trust needs
+    // them, and re-reading the blob to get them would parse the same bytes twice and risk the two
+    // readings disagreeing. A blob that will not parse yields empty lists rather than failing the
+    // whole reading -- integrity has already said `Damaged`, and losing the badge over a chain we
+    // could not list would hide the damage itself.
+    let (signer, embedded_chain, embedded_crls) = match read_cms(&sealed.cms) {
+        Ok(reading) => (
+            reading.signer().cloned(),
+            reading.certificates,
+            reading.crls,
+        ),
+        Err(_) => (None, Vec::new(), Vec::new()),
+    };
+
     Ok(Some(SealedReading {
         integrity,
-        revoked_hint: None,
         certification_level,
         later_revision,
+        signer,
+        embedded_chain,
+        embedded_crls,
     }))
 }
 
 /// What `inspect` established about one signed file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SealedReading {
     pub integrity: Integrity,
-    /// Reserved for the revocation parser landing; always `None` today so a caller cannot mistake
-    /// "no data" for "not revoked". `revocation::decide(None, None, now)` is the honest call and
-    /// this field exists to make that explicit rather than to imply a check happened.
-    pub revoked_hint: Option<bool>,
     /// The `/P` from the signature's `/Reference -> /TransformParams`, when it declares one.
     pub certification_level: Option<u8>,
     /// True when bytes were appended after the revision this signature covers. D-SG7 reads that as
     /// `modified`: the signed range is intact, but the file is not the file that was signed.
     pub later_revision: bool,
+    /// The signing certificate's DER, when the blob carried one.
+    ///
+    /// `None` is meaningful rather than merely empty: a `SignerInfo` may identify its certificate by
+    /// issuer and serial without shipping it, and a reader holding no certificate cannot build a
+    /// path to any anchor. Reporting `None` rather than an empty `Vec` keeps "no certificate here"
+    /// distinguishable from "a certificate that did not parse".
+    pub signer: Option<Vec<u8>>,
+    /// Every certificate the signature carried, signer first when the producer ordered it so.
+    ///
+    /// This is the *document's* claim about its own chain. It is an input to the path walk and
+    /// never evidence of trust: D-SG4 makes an unimported certificate worth nothing, whoever put it
+    /// in the file.
+    pub embedded_chain: Vec<Vec<u8>>,
+    /// DER CRLs carried in the signature's `[1] crls` field.
+    ///
+    /// Document-supplied revocation data. [`super::revocation::RevocationSource::Document`] marks it
+    /// as the signer's own assertion, which is weaker than a list the user imported and must not be
+    /// presented with equal weight.
+    pub embedded_crls: Vec<Vec<u8>>,
 }
 
 /// Read the declared DocMDP level, if the signature declares one.
@@ -589,7 +764,7 @@ fn verify(sealed: &Sealed) -> Integrity {
     }
 
     // (2) The RSA signature must verify over the attributes as DER.
-    let Some(certificate) = reading.certificate else {
+    let Some(certificate) = reading.signer().cloned() else {
         return Integrity::NotChecked;
     };
     let Some(public_key) = public_key(&certificate) else {
@@ -615,6 +790,60 @@ fn public_key(certificate_der: &[u8]) -> Option<RsaPublicKey> {
         x509_cert_cms::der::Encode::to_der(&certificate.tbs_certificate.subject_public_key_info)
             .ok()?;
     RsaPublicKey::from_public_key_der(&spki).ok()
+}
+
+/// The real [`LinkVerifier`]: does the issuing certificate's key verify the edge?
+///
+/// **This is the only place a certificate signature is checked**, and it lives here rather than in
+/// `trust.rs` for one reason: design K25 confines `rsa` and the `0.2` certificate generation to
+/// `cms.rs` and this file. Putting the cryptography behind the trait keeps every branch of the path
+/// walk provable on Linux, and keeps the crate that knows how to verify a signature named in
+/// exactly two files.
+///
+/// It verifies the signature **on the certificate**, which is the fact a trust path needs: the
+/// issuer's key must have produced the signature whose `tbsCertificate` is the subject's. That is a
+/// different check from `verify`, which covers the CMS attributes; neither substitutes for the
+/// other, and a path built on the second alone would be a path built on names.
+pub struct CertificateLinkVerifier;
+
+impl crate::editor::signature::trust::LinkVerifier for CertificateLinkVerifier {
+    fn issued(&self, issuer: &CertFacts, subject: &CertFacts) -> bool {
+        // Re-parse rather than reading the cached `CertFacts`: the walk needs the bytes that were
+        // signed, and `CertFacts.der` is exactly those bytes, so this costs a parse and buys the
+        // guarantee that the verified bytes and the walked bytes are the same ones.
+        let Ok(_issuer_cert) = x509_cert_cms::Certificate::from_der(&issuer.der) else {
+            return false;
+        };
+        let Ok(subject_cert) = x509_cert_cms::Certificate::from_der(&subject.der) else {
+            return false;
+        };
+
+        // Only SHA-256 with RSA is implemented. An unsupported algorithm returns `false`, which
+        // means "could not anchor", never "anchored anyway": the distinction is the whole point of
+        // returning a bool rather than an Option.
+        let algorithm = &subject_cert.signature_algorithm;
+        if !oid_is(algorithm.oid.as_bytes(), OID_SHA256_WITH_RSA)
+            && !oid_is(algorithm.oid.as_bytes(), OID_RSA_ENCRYPTION)
+        {
+            return false;
+        }
+
+        let Some(key) = public_key(&issuer.der) else {
+            return false;
+        };
+        // The signature is over the DER of `tbsCertificate`, re-encoded. `Encode` on the `0.2`
+        // generation reproduces the original bytes for a certificate that parsed, which is what
+        // makes this comparable at all.
+        let Ok(signed) = x509_cert_cms::der::Encode::to_der(&subject_cert.tbs_certificate) else {
+            return false;
+        };
+        let Ok(signature) = Signature::try_from(subject_cert.signature.raw_bytes()) else {
+            return false;
+        };
+        VerifyingKey::<Sha256>::new(key)
+            .verify(&signed, &signature)
+            .is_ok()
+    }
 }
 
 /// The `/ByteRange` of the newest signature, for a caller that wants to show what was covered.

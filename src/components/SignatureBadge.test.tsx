@@ -131,6 +131,36 @@ describe("the signature badge", () => {
     }
   });
 
+  it("renders the reason after the lines, so the user learns why the badge is not better", async () => {
+    // `unknown` is the state this field exists for: the badge cannot say more, and the reason is
+    // the only thing that tells the user an anchor import would help. Without it the honest
+    // `unknown` is indistinguishable from a broken verifier.
+    const lines = ["the signature could not be confirmed"];
+    const reason = "no trust anchors are imported, so this signature cannot be confirmed";
+    withBadge({ badge: "unknown", lines, reason, isGreen: false, certificationLevel: null });
+    render(<SignatureBadgeChip documentId="doc-1" />);
+    const chip = await screen.findByRole("button", { name: "unknown" });
+    chip.click();
+    expect(await screen.findByText(reason)).toBeTruthy();
+    // And the fixed lines are still there: the reason adds to them, never replaces them.
+    expect(await screen.findByText(lines[0])).toBeTruthy();
+  });
+
+  it("renders nothing extra when the reason is empty or absent", async () => {
+    withBadge({
+      badge: "valid",
+      lines: ["the signature verifies against the bytes as shipped"],
+      reason: "",
+      isGreen: true,
+      certificationLevel: null,
+    });
+    const { container } = render(<SignatureBadgeChip documentId="doc-1" />);
+    const chip = await screen.findByRole("button", { name: "valid" });
+    chip.click();
+    await screen.findByText("the signature verifies against the bytes as shipped");
+    expect(container.querySelector(".sig-badge__reason")).toBeNull();
+  });
+
   it("reports a failed read as a read failure, never as a verdict", async () => {
     backend = installFakeBackend();
     backend.on("signature_badge", () => {

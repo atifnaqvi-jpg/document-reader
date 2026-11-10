@@ -70,6 +70,27 @@ CREATE TABLE IF NOT EXISTS AppState (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- P3.2 D-SG4: the certificates the user has chosen to trust. DER, base64-encoded so the column
+-- stays TEXT like every other table here. `subject` and `not_after` are denormalised out of the
+-- DER so the picker can list anchors without re-parsing each one; they are display data and are
+-- re-derived on import, never trusted as the authority for a path decision.
+CREATE TABLE IF NOT EXISTS TrustAnchor (
+  der        TEXT PRIMARY KEY,
+  subject    TEXT NOT NULL,
+  not_after  INTEGER NOT NULL,
+  added_at   INTEGER NOT NULL
+);
+
+-- Revocation lists the user imported. Keyed by the CRL's own DER so re-importing one is a no-op
+-- rather than a duplicate row.
+CREATE TABLE IF NOT EXISTS TrustCrl (
+  der         TEXT PRIMARY KEY,
+  issuer      TEXT NOT NULL,
+  this_update INTEGER NOT NULL,
+  next_update INTEGER,
+  added_at    INTEGER NOT NULL
+);
 "#;
 
 pub fn apply(connection: &Connection) -> Result<(), AppError> {

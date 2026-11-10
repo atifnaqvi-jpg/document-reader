@@ -117,9 +117,24 @@ fi
 # release-body guards in `tests/release_workflow.rs`. Measured: 623/96 and 719/0.
 # Then +1 more each (623 -> 624, 719 -> 720) for `the_notes_link_points_at_the_tag_not_a_branch`,
 # written after v1.1.0 published a notes link pointing at a branch 67 commits stale.
-PIN_PLAIN_PASSED=624
-PIN_PLAIN_IGNORED=96
-PIN_IGNORED_PASSED=720
+#
+# 2026-11-10 (P3.2 SCOPE-C trust store): pins were STALE by 214/10 before this unit and had been
+# since 2cbca07 (2026-11-07). 27 test-touching commits landed after that one without moving them,
+# so `bash scripts/ralph/gate.sh` reported red on `2cbca07..16dd068` for arithmetic, not for a
+# defect. Re-measured from the tree rather than incremented, per the rule that says so: at
+# HEAD 16dd068 the plain shape was 838/106 and include-ignored 944/0. The ignored count had also
+# moved 96 -> 106 without this pin following it; `ci.yml` was already correct at 106, which is
+# why CI stayed green while the local gate did not. Re-measured HEAD: 838/106 and 944/0.
+# The ignored count is unchanged by this unit, so the new numbers are 838/106 and 944/0 plus
+# this unit's own +39:
+#   +12 `tests/trust_store.rs`  (the end-to-end trust-store cases)
+#   +3  `tests/badge_evidence_source.rs` (the command still calls `assess`)
+#   +24 `signature/trust.rs` `#[cfg(test)]` (path walk: cycles, shortest path, expiry, pathLen)
+# 39 = 12 + 3 + 24, and it moves BOTH shapes by the same amount because none of the three is
+# PDFium-gated. Expected after this unit: 877/106 and 983/0.
+PIN_PLAIN_PASSED=877
+PIN_PLAIN_IGNORED=106
+PIN_IGNORED_PASSED=983
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

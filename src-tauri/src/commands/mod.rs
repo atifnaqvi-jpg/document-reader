@@ -1270,6 +1270,14 @@ pub struct SignatureBadge {
     /// One of `valid`, `modified`, `unknown`, `unsigned` (D-SG7's four, and only these four).
     pub badge: &'static str,
     pub lines: Vec<&'static str>,
+    /// Why the badge is not better than it is, when that depends on this document.
+    ///
+    /// The one field here that is not `'static`, and deliberately a separate one: `lines` is
+    /// compiled-in wording from `badge::explain`, so keeping it `'static` means a badge can never
+    /// say something the deciding logic did not establish. This sentence names a runtime condition
+    /// -- no anchors imported, a chain that reaches none, a stale list -- and so cannot be static.
+    /// Empty when there is nothing to add.
+    pub reason: String,
     /// True only for `valid`. The frontend colours on this rather than on the string, so a new
     /// variant cannot become green by being added to a list somewhere else.
     pub is_green: bool,
@@ -1284,10 +1292,10 @@ pub struct SignatureBadge {
 /// since edited in the editor is reported on the file, and the edit is still unsaved -- which is
 /// why this does not claim anything about the editor's buffer.
 ///
-/// `anchored` is `false` because no local trust store exists yet (D-SG4 leaves trust to a store the
-/// user chooses, and that store is a later unit). The consequence is that a perfectly good
-/// signature reports `unknown`, which is the honest answer rather than a defect: D-SG7 says a
-/// certificate that chains to nothing local is `unknown`, never `valid`.
+/// Every input to the decision comes from [`store::assess`]: the anchor set from the user's own
+/// trust store, and revocation from the document plus the CRLs the user imported. This function is
+/// now only I/O and formatting. Before, `anchored` and the revocation finding were literals here,
+/// which made `valid` unreachable however good the deciding logic was.
 #[tauri::command]
 pub async fn signature_badge(
     db: State<'_, Db>,
@@ -1297,13 +1305,14 @@ pub async fn signature_badge(
     let bytes = std::fs::read(&path)
         .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
 
-    let reading = tauri::async_runtime::spawn_blocking(move || {
-        crate::editor::signature::verify::inspect(&bytes)
-    })
-    .await
-    .map_err(|error| AppError::Other(format!("verify task failed: {error}")))??;
+    let now_unix = now();
 
-    let Some(reading) = reading else {
+    // The database handle is not `Send` across the await, so the assessment runs on the current
+    // thread inside `with` and only the plain result crosses back.
+    let assessment = db
+        .with(|connection| crate::editor::signature::store::assess(connection, &bytes, now_unix))?;
+
+    let Some(assessment) = assessment else {
         let evidence = crate::editor::signature::badge::SignatureEvidence {
             integrity: crate::editor::signature::badge::Integrity::NotChecked,
             later_revision: false,
@@ -1317,31 +1326,18 @@ pub async fn signature_badge(
         return Ok(SignatureBadge {
             badge: detail.badge.code(),
             lines: detail.lines(),
+            reason: String::new(),
             is_green: detail.badge.is_green(),
             certification_level: None,
         });
     };
 
-    // No revocation parser has landed, so no data was read. `decide(None, None, now)` is the honest
-    // call and returns `NotChecked`, which cannot support `valid` -- the reason a signature over an
-    // untouched file still reports `unknown` today.
-    let revocation = crate::editor::signature::revocation::decide(None, None, 0);
-    let evidence = crate::editor::signature::badge::SignatureEvidence {
-        integrity: reading.integrity,
-        // Measured from the bytes: `inspect` reports whether anything follows the newest signature's
-        // covered tail. This was hardcoded `false` while the check was described in a comment -- a
-        // badge that cannot say `modified` for a file with an unsigned appendix appended to it.
-        later_revision: reading.later_revision,
-        anchored: false,
-        revocation,
-        certification_level: reading.certification_level,
-    };
-    let detail = crate::editor::signature::badge::explain(&evidence);
     Ok(SignatureBadge {
-        badge: detail.badge.code(),
-        lines: detail.lines(),
-        is_green: detail.badge.is_green(),
-        certification_level: reading.certification_level,
+        badge: assessment.badge.code(),
+        lines: assessment.lines,
+        reason: assessment.reason,
+        is_green: assessment.badge.is_green(),
+        certification_level: assessment.certification_level,
     })
 }
 

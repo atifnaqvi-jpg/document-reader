@@ -552,6 +552,17 @@ export interface SignatureBadge {
   badge: "valid" | "modified" | "unknown" | "unsigned";
   /** One line per thing checked or not checked, already worded by the backend. */
   lines: string[];
+  /**
+   * Why the badge is not better than it is, or absent/empty when there is nothing to add.
+   *
+   * Separate from `lines` because its content depends on this document: no anchor imported, a
+   * chain that reaches none, a stale list. `lines` is fixed wording the backend can vouch for; this
+   * names a runtime condition. The UI shows it after the lines, never instead of them.
+   *
+   * Optional as well as possibly empty: a payload from a build before this field existed must still
+   * render, and treating a missing field as a runtime error would make an older backend look broken.
+   */
+  reason?: string;
   /** True only for `valid`. The single source of colour. */
   isGreen: boolean;
   /** The declared DocMDP level (1..3) when this is a certification signature. */

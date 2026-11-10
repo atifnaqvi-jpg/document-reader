@@ -89,6 +89,12 @@ export function SignatureBadgeChip({ documentId }: { documentId: string }) {
           {badge.lines.map((line) => (
             <li key={line}>{line}</li>
           ))}
+          {/* The document-specific sentence, when the backend has one. Rendered as its own item
+              after the fixed lines rather than instead of them: the lines say what was checked,
+              and this says what this particular document lacked. */}
+          {badge.reason !== undefined && badge.reason !== "" && (
+            <li className="sig-badge__reason">{badge.reason}</li>
+          )}
         </ul>
       )}
     </span>

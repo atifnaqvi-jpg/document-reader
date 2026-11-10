@@ -7,6 +7,8 @@ pub mod identity;
 pub mod pfx;
 pub mod revocation;
 pub mod sign;
+pub mod store;
+pub mod trust;
 pub mod verify;
 pub mod winstore;
 
