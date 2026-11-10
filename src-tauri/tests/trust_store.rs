@@ -258,6 +258,67 @@ fn a_tampered_document_is_modified_even_with_the_anchor_imported() {
     );
 }
 
+/// An otherwise-`valid` file stops being `valid` when something is appended after the signature.
+///
+/// This is the combination the existing tests each held still but never crossed. `sign_verify` shows
+/// that appended bytes are reported as a later revision -- but with `anchored: false`, so the badge
+/// ends up `unknown` there whether or not `later_revision` was consulted. The test above shows
+/// damage outranks trust, but it *changes a signed byte*, which sets `Damaged` and short-circuits the
+/// same `if` in `badge::decide`. So in every test that existed, a `store::assess` that dropped
+/// `later_revision` on the way in would still have passed all of them.
+///
+/// Here the file is anchored, the CRL is current and clean, and the signed range is untouched: the
+/// only thing between this file and a green badge is the appendix. That makes `valid` observable
+/// immediately before the append and `modified` immediately after, on one file, with one variable.
+#[test]
+fn an_anchored_clean_signature_stops_being_valid_when_a_revision_is_appended() {
+    let (_dir, written) = signed_with(&leaf_identity(), "appendix target");
+    let connection = store_db();
+    let now = 1_800_000_000;
+    store::add_anchor(&connection, &fixture("ca.der"), now).expect("anchor imports");
+    store::add_crl(&connection, &fixture("crl-empty.der"), now).expect("crl imports");
+
+    // The control. Without this half, the assertion below would pass on a file that was never
+    // `valid` in the first place, and the test would prove nothing about the append.
+    let before = store::assess(&connection, &written, now)
+        .expect("the signed file parses")
+        .expect("the file carries a signature");
+    assert_eq!(
+        before.badge,
+        Badge::Valid,
+        "the control must start green, or the append is not what changed the badge"
+    );
+
+    // An ordinary incremental update -- the shape of "someone saved this document again", which is
+    // what actually happens to a signed file in the wild. It appends bytes and leaves the signed
+    // range exactly as it was.
+    let mut appended = written.clone();
+    appended.extend_from_slice(
+        b"\n% appended after signing: an ordinary incremental update, not part of any signature\n",
+    );
+
+    let after = store::assess(&connection, &appended, now)
+        .expect("the appended file still parses")
+        .expect("the signature dictionary is still there");
+
+    assert_eq!(
+        after.integrity,
+        Integrity::Intact,
+        "the signed range was not touched, so integrity must still verify: this is precisely why \
+         `later_revision` cannot be folded into it"
+    );
+    assert!(
+        after.anchored,
+        "the appended bytes do not disturb the chain, so the anchor still holds"
+    );
+    assert_eq!(
+        after.badge,
+        Badge::Modified,
+        "an anchored, cryptographically intact signature over a file that has since grown is \
+         `modified`, not `valid`: the file the reader holds is no longer the file that was signed"
+    );
+}
+
 #[test]
 fn revocation_with_no_data_anywhere_is_not_checked_rather_than_clean() {
     // The offline default, through the shipped path. `NotChecked` is what makes the badge

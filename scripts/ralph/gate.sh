@@ -131,10 +131,14 @@ fi
 #   +3  `tests/badge_evidence_source.rs` (the command still calls `assess`)
 #   +24 `signature/trust.rs` `#[cfg(test)]` (path walk: cycles, shortest path, expiry, pathLen)
 # 39 = 12 + 3 + 24, and it moves BOTH shapes by the same amount because none of the three is
-# PDFium-gated. Expected after this unit: 877/106 and 983/0.
-PIN_PLAIN_PASSED=877
+# PDFium-gated. That unit: 877/106 and 983/0.
+#
+# 2026-11-10 (I-SG5 / D-SG7 later-revision seam): +1 in `tests/trust_store.rs` for
+# `an_anchored_clean_signature_stops_being_valid_when_a_revision_is_appended`. It moves both shapes
+# by one, is not PDFium-gated, and leaves the ignored count at 106. Now 878/106 and 984/0.
+PIN_PLAIN_PASSED=878
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=983
+PIN_IGNORED_PASSED=984
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

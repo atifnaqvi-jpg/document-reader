@@ -19,10 +19,16 @@
 //!   are intact but the signer was revoked"; see [`Detail::revoked`] and the note on
 //!   [`Badge::severity`].
 //!
-//! **This module does not verify a signature cryptographically.** Production has no asymmetric
-//! verifier; the test harness owns the independent one. `Integrity` is therefore supplied by the
+//! **This module does not verify a signature cryptographically.** `Integrity` is supplied by the
 //! caller, and `Integrity::NotChecked` -- the honest value when nothing computed a digest -- can
 //! never produce `valid`.
+//!
+//! In production that caller is `store::assess`, and the value comes from `verify::verify`, which
+//! does recompute the SHA-256 over `/ByteRange` and check the RSA signature over the signed
+//! attributes. (An earlier revision of this note said production had no asymmetric verifier at all;
+//! that was true when it was written and stopped being true when the verifier landed. The separate
+//! independent implementation in `tests/support/cms_verifier.rs` still exists, because I-SG1 asks
+//! for one that is *not* ours -- a symmetric bug would otherwise pass both sides.)
 
 use super::revocation::Revocation;
 

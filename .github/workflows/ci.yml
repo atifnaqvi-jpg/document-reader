@@ -259,8 +259,13 @@ jobs:
           # module is compiled into each binary that declares it, and those three live in a module
           # four test binaries include, so three tests move the count by nine. That multiplication is
           # why this number is measured rather than reasoned about.
-          if [ "$passed" -lt 838 ]; then
-            echo "::error::only $passed tests ran; 838 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # 838 -> 878 for P3.2 SCOPE-C's trust-store unit (+39) and the I-SG5/D-SG7 later-revision
+          # seam (+1). Re-measured, not incremented: 878 passed with PDFIUM_LIBRARY_PATH set and
+          # 878 with it pointed at a nonexistent path, 106 ignored in both, so the whole delta is
+          # PDFium-independent and the ignored pin above correctly does not move.
+          if [ "$passed" -lt 878 ]; then
+            echo "::error::only $passed tests ran; 878 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
