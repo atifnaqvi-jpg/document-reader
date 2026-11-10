@@ -1345,6 +1345,134 @@ pub async fn signature_badge(
     })
 }
 
+/// One selectable signing certificate, as the picker needs it (P3.2 D-SG5).
+///
+/// A view type rather than a tagged domain struct: `CertificateSummary` carries `SystemTime` and a
+/// DER blob, and neither belongs in a JSON payload the UI renders. Dates become RFC 3339 strings so
+/// the frontend does not have to know how Rust counts a `Duration` from 1970.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SigningCertificate {
+    /// The DER, hex-encoded: the signer hands it back verbatim, so it is carried rather than lost.
+    pub der_hex: String,
+    pub subject: String,
+    pub issuer: String,
+    pub serial_hex: String,
+    pub key_algorithm: String,
+    pub not_before: String,
+    pub not_after: String,
+    /// False when the store holds a certificate with no matching private key. Shown, not hidden:
+    /// omitting it would look like the certificate is not installed.
+    pub can_sign: bool,
+    /// Whether the validity window has closed at the time of the call.
+    pub expired: bool,
+}
+
+/// One certificate that could not be described, with the reason.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedCertificate {
+    /// The first bytes of the DER, hex: identifies an unparseable entry in a support report
+    /// without dumping a whole certificate.
+    pub der_prefix_hex: String,
+    pub reason: String,
+}
+
+/// What the certificate picker lists (P3.2 D-SG5).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SigningCertificates {
+    pub certificates: Vec<SigningCertificate>,
+    /// Entries that would not parse. Reported rather than dropped, so a short list can be told apart
+    /// from a broken store.
+    pub skipped: Vec<SkippedCertificate>,
+}
+
+/// Seconds since the Unix epoch as RFC 3339, or a stated absence rather than a fake date.
+///
+/// `SystemTime` can be before the epoch on a badly set clock, which `duration_since` reports as an
+/// error. Printing `1970-01-01` for it would be a lie a user could act on, so the absence is spelled
+/// out.
+pub fn rfc3339(when: std::time::SystemTime) -> String {
+    match when.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => {
+            let total = since.as_secs();
+            let (days, second_of_day) = (total / 86_400, total % 86_400);
+            let (hour, minute, second) = (
+                second_of_day / 3600,
+                (second_of_day % 3600) / 60,
+                second_of_day % 60,
+            );
+            // Civil-from-days (Howard Hinnant's algorithm), so no `chrono` dependency is added for
+            // one date conversion. 719_468 is the number of days from 0000-03-01 to 1970-01-01.
+            let shifted = days + 719_468;
+            let era = shifted / 146_097;
+            let day_of_era = shifted % 146_097;
+            let year_of_era =
+                (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+            let year = year_of_era + era * 400;
+            let day_of_year =
+                day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+            let mp = (5 * day_of_year + 2) / 153;
+            let day = day_of_year - (153 * mp + 2) / 5 + 1;
+            let month = if mp < 10 { mp + 3 } else { mp - 9 };
+            let year = if month <= 2 { year + 1 } else { year };
+            format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+        }
+        Err(_) => "unknown (the system clock is set before 1970)".to_string(),
+    }
+}
+
+/// List the certificates available for signing (P3.2 D-SG5).
+///
+/// On Windows this reads the current user's `MY` store. On every other platform it returns
+/// `CertificateStoreUnavailable` rather than an empty list: an empty list would render as "you have
+/// no signing certificates", which is false and sends the user looking for one they already have.
+#[tauri::command]
+pub async fn list_signing_certificates() -> Result<SigningCertificates, AppError> {
+    let listing =
+        tauri::async_runtime::spawn_blocking(crate::editor::signature::winstore::list_user_store)
+            .await
+            .map_err(|error| {
+                AppError::Other(format!("certificate store task failed: {error}"))
+            })??;
+
+    let now = std::time::SystemTime::now();
+    Ok(SigningCertificates {
+        certificates: listing
+            .certificates
+            .into_iter()
+            .map(|summary| {
+                // Computed before the struct literal moves fields out of `summary`.
+                let expired = summary.expired_at(now);
+                SigningCertificate {
+                    der_hex: summary
+                        .der
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                    subject: summary.subject,
+                    issuer: summary.issuer,
+                    serial_hex: summary.serial_hex,
+                    key_algorithm: summary.key_algorithm,
+                    not_before: rfc3339(summary.not_before),
+                    not_after: rfc3339(summary.not_after),
+                    can_sign: summary.has_private_key && !expired,
+                    expired,
+                }
+            })
+            .collect(),
+        skipped: listing
+            .skipped
+            .into_iter()
+            .map(|skipped| SkippedCertificate {
+                der_prefix_hex: skipped.der_prefix_hex,
+                reason: skipped.reason,
+            })
+            .collect(),
+    })
+}
+
 /// Sign a document's saved file with a PKCS#12 identity (P3.2 SCOPE-C).
 ///
 /// Inputs are the PFX path and its password, not a stored identity: nothing about a private key is

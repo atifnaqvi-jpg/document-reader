@@ -99,6 +99,7 @@ pub fn run() {
             commands::protect_document,
             commands::forget_password,
             commands::signature_badge,
+            commands::list_signing_certificates,
             commands::sign_document,
         ])
         .run(tauri::generate_context!())
