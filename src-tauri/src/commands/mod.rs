@@ -5,14 +5,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 use tauri::{AppHandle, State};
 
-use crate::db::{annotations, app_state, bookmarks, documents, search, Db};
+use crate::db::{annotations, app_state, bookmarks, documents, redactions, search, Db};
+use crate::editor::redact::Rect;
 use crate::editor::session::{PasswordStore, SessionPassword};
 use crate::editor::xfdf;
 use crate::index::{IndexService, IndexStatus, IndexSummary};
 use crate::library;
 use crate::model::{
     Annotation, AnnotationKind, AnnotationStatus, AppError, Bookmark, DocumentMeta, Format,
-    LibraryEntry, RenderedPage, SearchHit,
+    LibraryEntry, RedactionKind, RedactionMark, RenderedPage, SearchHit,
 };
 use crate::provider::ReaderProvider;
 use crate::render::RenderService;
@@ -1791,6 +1792,233 @@ pub fn import_trust_crl(db: State<'_, Db>, der_path: String) -> Result<TrustImpo
     let bytes = read_import_file(&der_path)?;
     let now_unix = now();
     db.with(|connection| import_crl_bytes(connection, &bytes, now_unix))
+}
+
+// --- P3.2 SCOPE-B: redaction -------------------------------------------------
+//
+// Marking and applying are separate commands because they are separate user actions with different
+// consequences (D-RD1). A mark writes a row in our DB and touches no file; apply rewrites the
+// document and writes a NEW file, leaving the source untouched. Collapsing them into one command
+// would put a destructive rewrite behind a single click that also has a harmless-looking twin.
+
+/// Records one dragged rectangle as a pending redaction mark (P3.2 D-RD1).
+///
+/// Writes no file. The rectangle arrives in page points from the overlay's own conversion, which is
+/// the same space `editor::redact::Rect` uses, so no reinterpretation happens here.
+///
+/// The rectangle's corners are ordered by `Rect::to_storage`, which owns the stored form and
+/// normalises there. That is deliberately not repeated here: a second copy of the normalisation is a
+/// second thing to keep in step, and it was measured dead — removing it left every test passing,
+/// because storage already ordered the corners.
+///
+/// Gated at `EditKind::Redaction`: applying it would rewrite the content stream, and the gate is
+/// checked when the *mark* is made rather than only when it is applied so the user is told before
+/// they draw a page's worth of marks on a document that forbids the operation.
+#[tauri::command]
+pub fn redact_mark(
+    db: State<'_, Db>,
+    document_id: String,
+    page: u32,
+    rect: Rect,
+) -> Result<RedactionMark, AppError> {
+    redact_mark_with(&db, &document_id, page, rect)
+}
+
+/// [`redact_mark`]'s body, taking the database by reference so a test can drive it.
+///
+/// The command is a `State` unwrapper and nothing else. Every decision lives here, which is what
+/// makes the reachability test in `tests/redact_command.rs` a test of the shipped path rather than
+/// of a copy of it: `invoke("redact_mark")` from the frontend and the test call the same function.
+pub fn redact_mark_with(
+    db: &Db,
+    document_id: &str,
+    page: u32,
+    rect: Rect,
+) -> Result<RedactionMark, AppError> {
+    let path = document_path(db, document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Redaction,
+    )?;
+    db.with(|connection| {
+        redactions::add(
+            connection,
+            document_id,
+            page,
+            RedactionKind::Rect,
+            rect,
+            None,
+            now(),
+        )
+    })
+}
+
+/// The document's pending marks, oldest first (P3.2 D-RD1).
+///
+/// Read back on mount rather than cached in the frontend: the marks outlive a restart by design, so
+/// the DB is the only honest source for what is pending.
+#[tauri::command]
+pub fn redact_marks(
+    db: State<'_, Db>,
+    document_id: String,
+) -> Result<Vec<RedactionMark>, AppError> {
+    redact_marks_with(&db, &document_id)
+}
+
+/// [`redact_marks`]'s body, by reference. See [`redact_mark_with`] for why this split exists.
+pub fn redact_marks_with(db: &Db, document_id: &str) -> Result<Vec<RedactionMark>, AppError> {
+    db.with(|connection| redactions::list_for_document(connection, document_id))
+}
+
+/// Removes one pending mark by id (P3.2 D-RD1). Deleting a mark is not destructive to the document.
+#[tauri::command]
+pub fn redact_unmark(db: State<'_, Db>, mark_id: String) -> Result<bool, AppError> {
+    redact_unmark_with(&db, &mark_id)
+}
+
+/// [`redact_unmark`]'s body, by reference.
+///
+/// Not certification-gated, and that asymmetry is deliberate: a mark is our own working state and
+/// lives only in the DB, so removing one changes no byte of a certified file. The gate belongs on
+/// the operation that writes the document — [`redact_apply`] — not on bookkeeping about it.
+pub fn redact_unmark_with(db: &Db, mark_id: &str) -> Result<bool, AppError> {
+    db.with(|connection| redactions::remove(connection, mark_id))
+}
+
+/// Search-and-redact: finds `pattern` across the document and records a mark per hit (D-RD6).
+///
+/// Matching is `redact::find_and_mark`, the locator the product already uses, so "where is this
+/// word" has one answer (K14). Pages are walked in order and the walk **stops at the first page it
+/// cannot search**: `find_and_mark` refuses a page containing a form this build does not descend
+/// into, and continuing past that would let the caller report a search that covered less than it
+/// claimed (D-RD3's reasoning applied to search).
+///
+/// Returns the marks written. An empty result means the pattern genuinely does not occur, which the
+/// UI says out loud rather than rendering as a failure.
+#[tauri::command]
+pub fn redact_search(
+    db: State<'_, Db>,
+    document_id: String,
+    pattern: String,
+) -> Result<Vec<RedactionMark>, AppError> {
+    redact_search_with(&db, &document_id, &pattern)
+}
+
+/// [`redact_search`]'s body, by reference. See [`redact_mark_with`] for why this split exists.
+pub fn redact_search_with(
+    db: &Db,
+    document_id: &str,
+    pattern: &str,
+) -> Result<Vec<RedactionMark>, AppError> {
+    let path = document_path(db, document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Redaction,
+    )?;
+
+    let document = load_document(db, document_id)?;
+    let page_count = document.get_pages().len() as u32;
+
+    let mut hits: Vec<(u32, Rect)> = Vec::new();
+    for page in 0..page_count {
+        for hit in crate::editor::redact::find_and_mark(&document, page, pattern)? {
+            hits.push((hit.page, hit.rect));
+        }
+    }
+
+    if hits.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    db.with_mut(|connection| {
+        redactions::add_many(
+            connection,
+            document_id,
+            &hits,
+            RedactionKind::Pattern,
+            Some(pattern.to_string()),
+            now(),
+        )
+    })
+}
+
+/// What an apply did, in the shape the UI reports and the tests assert on (I-RD1/I-RD6).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactOutcome {
+    /// The new file. Never the source.
+    pub path: String,
+    /// Text-showing operations deleted, across every page and every form.
+    pub runs_removed: usize,
+    /// Annotations deleted because their box intersected a mark (D-RD2).
+    pub annotations_removed: usize,
+    /// Images deleted whole because they intersected a mark (D-RD2/D-RD7).
+    pub images_removed: usize,
+    /// Objects dropped by the reachability sweep afterwards (D-RD4).
+    pub objects_dropped: usize,
+    /// Marks cleared from the DB after the write succeeded.
+    pub marks_cleared: u64,
+}
+
+/// Applies every pending mark, writes a **new** file, and clears the marks (P3.2 D-RD1, D-RD2).
+///
+/// Three properties this command is responsible for, none of which the editor module can enforce:
+///
+/// 1. **The source is never written.** The output goes to a derived sibling name, exactly as the
+///    page tools do, so `I-RD5`'s "the original is intact" holds by construction.
+/// 2. **Marks are cleared only after the write.** Clearing first would lose the user's marks if the
+///    write failed, and they would have to redraw them to discover that it had.
+/// 3. **"Nothing to apply" is reported, not silently written.** `nothing_to_apply` (I-RD6) means the
+///    second run of the same marks found nothing; writing a byte-identical file would look like
+///    success and leave the user with two copies and no way to tell which was redacted.
+#[tauri::command]
+pub fn redact_apply(db: State<'_, Db>, document_id: String) -> Result<RedactOutcome, AppError> {
+    redact_apply_with(&db, &document_id)
+}
+
+/// [`redact_apply`]'s body, by reference. See [`redact_mark_with`] for why this split exists.
+pub fn redact_apply_with(db: &Db, document_id: &str) -> Result<RedactOutcome, AppError> {
+    let path = document_path(db, document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Redaction,
+    )?;
+
+    let marks = db.with(|connection| redactions::marks_by_page(connection, document_id))?;
+    if marks.is_empty() {
+        return Err(AppError::RedactionIncomplete(
+            "there are no pending redaction marks to apply".to_string(),
+        ));
+    }
+
+    let mut document = load_document(db, document_id)?;
+    let report = crate::editor::redact::apply_redactions(&mut document, &marks)?;
+
+    if report.nothing_to_apply() {
+        // The marks are still cleared: they describe content the file no longer has, and leaving
+        // them would make a subsequent apply look meaningful when it is not.
+        let cleared = db.with(|connection| redactions::clear(connection, document_id))?;
+        return Err(AppError::RedactionIncomplete(format!(
+            "nothing was left to remove: this document has already been redacted at these marks \
+             ({cleared} mark(s) cleared)"
+        )));
+    }
+
+    let path = write_derived(db, document_id, "redacted", &serialize(&document)?)?;
+    let marks_cleared = db.with(|connection| redactions::clear(connection, document_id))?;
+
+    Ok(RedactOutcome {
+        path,
+        runs_removed: report.runs_removed(),
+        annotations_removed: report
+            .pages
+            .iter()
+            .map(|page| page.annotations_removed)
+            .sum(),
+        images_removed: report.pages.iter().map(|page| page.images_removed).sum(),
+        objects_dropped: report.pages.iter().map(|page| page.objects_dropped).sum(),
+        marks_cleared,
+    })
 }
 
 #[cfg(test)]

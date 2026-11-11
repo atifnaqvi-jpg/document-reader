@@ -184,10 +184,20 @@ fi
 # the UI can read, a CRL reporting the `nextUpdate` that decides when it stops being evidence, a CRL
 # naming the signer suppressing `valid`, and the size cap refusing with the size named).
 # Measured, not incremented: 913 passed with PDFIUM_LIBRARY_PATH unset, 1019 with --include-ignored.
-# Now 913/106 and 1019/0.
-PIN_PLAIN_PASSED=913
+#
+# 2026-11-11 (P3.2 SCOPE-B command layer): +22, all PDFium-independent, so both shapes move by
+# twenty-two and the ignored count stays at 106. Twelve unit tests in `db/redactions.rs` (the
+# round trip, a mark that survives reopen, ordering by page, the NaN and non-finite refusals, the
+# unparseable stored rect refused rather than defaulted, `add_many` writing one batch including the
+# pattern it was given, clearing by document, and removing one mark by id) and ten in
+# `tests/redact_command.rs` (marking touches no file, apply writes a new file and the text is gone,
+# marks cleared after apply, a repeat apply reports nothing to apply, and the certification refusal
+# on both the mark and the apply path).
+# Measured, not incremented: 935 passed with PDFIUM_LIBRARY_PATH unset, 1041 with --include-ignored.
+# Now 935/106 and 1041/0.
+PIN_PLAIN_PASSED=935
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=1019
+PIN_IGNORED_PASSED=1041
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

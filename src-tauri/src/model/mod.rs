@@ -253,6 +253,68 @@ pub struct Annotation {
     pub modified_at: i64,
 }
 
+/// How a redaction mark came to exist (P3.2 D-RD1/D-RD6).
+///
+/// Kept distinct rather than folded into one "mark" because the two are read back differently: a
+/// `rect` mark is exactly the rectangle the user dragged, while a `pattern` mark exists only so the
+/// mark list can say *what text* it was looking for. The rectangle is authoritative in both cases;
+/// `pattern` is display data and is never re-run at apply time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedactionKind {
+    /// Dragged by the user.
+    Rect,
+    /// Produced by search-and-redact.
+    Pattern,
+}
+
+impl RedactionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RedactionKind::Rect => "rect",
+            RedactionKind::Pattern => "pattern",
+        }
+    }
+}
+
+impl std::str::FromStr for RedactionKind {
+    type Err = String;
+
+    /// The stored spelling back to a variant. An unknown value is an error rather than a default:
+    /// falling back to `Rect` would silently relabel a pattern mark and lose the user's own record
+    /// of what they searched for.
+    ///
+    /// Written as the trait rather than an inherent `from_str` so the call site cannot be confused
+    /// with `str::parse`, and so the conversion is discoverable where Rust users look for one.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "rect" => Ok(RedactionKind::Rect),
+            "pattern" => Ok(RedactionKind::Pattern),
+            other => Err(format!("unknown redaction kind {other:?}")),
+        }
+    }
+}
+
+/// One pending redaction mark (P3.2 D-RD1).
+///
+/// Working state, not document content: it lives in the DB and is cleared when apply writes the
+/// output. `rect` is stored as the normalised `x0,y0,x1,y1` string the design's §5 names, in page
+/// points with the origin bottom-left — the same space `editor::redact::Rect` uses, so the value
+/// read back here is the value handed to `apply_redactions` with no conversion in between.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactionMark {
+    pub id: String,
+    pub document_id: String,
+    pub page: u32,
+    pub kind: RedactionKind,
+    /// Normalised `x0,y0,x1,y1`, page points.
+    pub rect: String,
+    /// The search text, for `pattern` marks only. Display data.
+    pub pattern: Option<String>,
+    pub created_at: i64,
+}
+
 /// A rendered page as it crosses to the frontend (P1-D2): encoded pixel bytes plus
 /// dimensions, so the UI can size its container without a second round trip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -103,6 +103,11 @@ pub fn run() {
             commands::sign_document,
             commands::import_trust_anchor,
             commands::import_trust_crl,
+            commands::redact_mark,
+            commands::redact_marks,
+            commands::redact_unmark,
+            commands::redact_search,
+            commands::redact_apply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

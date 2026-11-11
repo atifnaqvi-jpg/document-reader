@@ -120,6 +120,17 @@ const GOVERNED: &[(&str, &str)] = &[
     ("add_watermark", "Content"),
     ("edit_page_text", "Content"),
     ("revert_page_text", "Content"),
+    // Redaction, with its own kind. `EditKind::Redaction` exists for this and `permits` refuses it at
+    // every level including `P=3`, so it is the precise kind to name rather than the broader
+    // `Content`. All three commands that can lead to a rewrite are listed, not just the applier:
+    // marking and searching are the two ways a user starts, and a document that forbids the operation
+    // should say so when they start rather than after they have drawn a page of rectangles.
+    //
+    // The bodies live in the `_with` cores because the Tauri commands are `State` unwrappers and
+    // nothing else; that split is what lets `tests/redact_command.rs` drive the shipped path.
+    ("redact_mark_with", "Redaction"),
+    ("redact_search_with", "Redaction"),
+    ("redact_apply_with", "Redaction"),
 ];
 
 #[test]
@@ -255,6 +266,11 @@ fn the_gate_runs_before_the_mutation_in_each_command() {
         ("add_watermark", "editor::export::watermark("),
         ("edit_page_text", "editor::textedit::edit("),
         ("revert_page_text", "editor::textedit::revert("),
+        // The gate lives in the `_with` core, so the anchors are the writes those cores reach:
+        // a mark row, a batch of marks, and the redacted output file.
+        ("redact_mark_with", "redactions::add("),
+        ("redact_search_with", "redactions::add_many("),
+        ("redact_apply_with", "write_derived("),
     ];
 
     for (command, write) in first_write {

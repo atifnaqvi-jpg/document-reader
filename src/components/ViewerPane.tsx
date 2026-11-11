@@ -7,6 +7,7 @@ import {
 } from "../api/invoke";
 import type { AppError, LibraryEntry, RenderedPage } from "../api/types";
 import { AnnotationOverlay } from "./AnnotationOverlay";
+import { RedactionOverlay } from "./RedactionOverlay";
 import type { PageMetrics } from "./AnnotationOverlay";
 import { TextRunOverlay, EncryptedBanner } from "./TextEdit";
 import { useEditor } from "../state/EditorProvider";
@@ -56,7 +57,15 @@ export const ViewerPane = forwardRef<ViewerHandle, {
   const [rendered, setRendered] = useState<RenderedPage | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [rendering, setRendering] = useState(false);
-  const { annotations, textEditMode, setTextEditMode, pageRuns } = useEditor();
+  const {
+    annotations,
+    textEditMode,
+    setTextEditMode,
+    pageRuns,
+    redactMode,
+    redactionMarks,
+    addRedactionMark,
+  } = useEditor();
 
   // Renders are async and can be superseded by a newer page/zoom request. Tracking the
   // in-flight request lets a stale response be dropped instead of flashing over the
@@ -317,7 +326,16 @@ export const ViewerPane = forwardRef<ViewerHandle, {
             {/* The text picker replaces the annotation overlay rather than stacking on it:
                 both are full-surface pointer targets, and two live layers would make what a
                 click means depend on z-order. Leaving edit mode restores the overlay. */}
-            {textEditMode ? (
+            {redactMode ? (
+              // Redaction outranks the other two layers: it is the only one whose next action is
+              // irreversible, so a click meant to mark must never land on an annotation instead.
+              <RedactionOverlay
+                metrics={pageMetrics(rendered, page, zoom)}
+                marks={redactionMarks.filter((mark) => mark.page === page)}
+                onMark={(rect) => addRedactionMark(page, rect)}
+                enabled
+              />
+            ) : textEditMode ? (
               <TextRunOverlay metrics={pageMetrics(rendered, page, zoom)} runs={pageRuns} />
             ) : annotationsVisible ? (
               <AnnotationOverlay

@@ -91,6 +91,26 @@ CREATE TABLE IF NOT EXISTS TrustCrl (
   next_update INTEGER,
   added_at    INTEGER NOT NULL
 );
+
+-- P3.2 D-RD1: redaction *marks*, and only marks. A mark is working state that has to survive a
+-- crash, so it lives here rather than in the PDF; applying writes a new file and clears these rows.
+--
+-- Deliberately not an `Annotation` row: annotations are renderable state that ships inside the PDF
+-- (P2-D3), and a redaction mark must never ship at all (I-RD7). Storing one as an annotation would
+-- mean the file the user is about to redact already discloses, in its own bytes, exactly what they
+-- are about to hide.
+CREATE TABLE IF NOT EXISTS Redaction (
+  id          TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES Document(id) ON DELETE CASCADE,
+  page        INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  rect        TEXT NOT NULL,
+  pattern     TEXT,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_redaction_document ON Redaction(document_id);
+CREATE INDEX IF NOT EXISTS idx_redaction_document_page ON Redaction(document_id, page);
 "#;
 
 pub fn apply(connection: &Connection) -> Result<(), AppError> {

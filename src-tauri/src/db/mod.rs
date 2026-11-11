@@ -8,6 +8,7 @@ pub mod annotations;
 pub mod app_state;
 pub mod bookmarks;
 pub mod documents;
+pub mod redactions;
 pub mod schema;
 pub mod search;
 

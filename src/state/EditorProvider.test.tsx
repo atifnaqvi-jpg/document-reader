@@ -80,6 +80,11 @@ function mountEditor(initial: Annotation[] = [], page = 0) {
   });
   backend.on("get_app_state", () => null);
   backend.on("set_app_state", () => null);
+  // The provider reads pending redaction marks on every document change (P3.2 D-RD1), because an
+  // unapplied mark must survive a restart and stay visible whatever tool is active. These tests are
+  // about annotation bookkeeping, so an empty list is the honest default -- a missing handler would
+  // surface here as an unrelated provider error.
+  backend.on("redact_marks", () => []);
 
   const view = renderHook(() => useEditor(), {
     wrapper: ({ children }) => (
@@ -498,6 +503,11 @@ async function mountWithRuns(runs: PageTextRun[]) {
   backend.on("list_annotations", () => []);
   backend.on("get_app_state", () => null);
   backend.on("set_app_state", () => null);
+  // The provider reads pending redaction marks on every document change (P3.2 D-RD1), because an
+  // unapplied mark must survive a restart and stay visible whatever tool is active. These tests are
+  // about annotation bookkeeping, so an empty list is the honest default -- a missing handler would
+  // surface here as an unrelated provider error.
+  backend.on("redact_marks", () => []);
   backend.on("get_page_text_runs", () => runs);
   backend.on("edit_page_text", () => ({
     documentId: "doc-2",

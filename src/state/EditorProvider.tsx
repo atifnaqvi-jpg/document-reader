@@ -16,6 +16,8 @@ import {
   getPageTextRuns,
   listAnnotations,
   onAnnotationChanged,
+  redactMark,
+  redactMarks,
   removeAnnotation,
   restoreAnnotation,
   revertPageText,
@@ -33,6 +35,7 @@ import type {
   NoteData,
   DecryptOutcome,
   PageTextRun,
+  RedactionMark,
   TextRunFragmentRef,
   TextRunId,
   ToolStyle,
@@ -164,6 +167,23 @@ interface EditorContextValue {
   /** Whether the in-viewer text picker is active. */
   textEditMode: boolean;
   setTextEditMode: (on: boolean) => void;
+  /**
+   * Whether the redaction tool is active (P3.2 D-RD1).
+   *
+   * Mutually exclusive with `textEditMode` in practice: both are full-surface pointer layers over
+   * the page, and two live captures would make what a drag means depend on z-order.
+   */
+  redactMode: boolean;
+  setRedactMode: (on: boolean) => void;
+  /** Pending redaction marks for the open document, from the database. */
+  redactionMarks: RedactionMark[];
+  /** Re-reads the marks. Called after anything that can change them. */
+  refreshRedactionMarks: () => Promise<void>;
+  /** Records one dragged rectangle as a mark, then refreshes the list. */
+  addRedactionMark: (
+    page: number,
+    rect: { x0: number; y0: number; x1: number; y1: number },
+  ) => Promise<void>;
   /** The run the user picked, by reference identity within `pageRuns`. */
   selectedRun: PageTextRun | null;
   /**
@@ -285,6 +305,8 @@ export function EditorProvider({
   const [pageRuns, setPageRuns] = useState<PageTextRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [textEditMode, setTextEditMode] = useState(false);
+  const [redactMode, setRedactModeState] = useState(false);
+  const [redactionMarks, setRedactionMarks] = useState<RedactionMark[]>([]);
   const [selectedRun, setSelectedRun] = useState<PageTextRun | null>(null);
   const [selection, setSelection] = useState<PageTextRun[]>([]);
   // Stage 2: the O-ST2-4 toggle (default on) and the T10 disclosure from the last edit.
@@ -370,6 +392,54 @@ export function EditorProvider({
       cancelled = true;
     };
   }, [textEditMode, documentId, page]);
+
+  /**
+   * Turns the redaction tool on and the text picker off.
+   *
+   * Both are full-surface pointer layers over the page. Leaving both on would make what a drag
+   * means depend on which div received it, so turning one on turns the other off rather than
+   * leaving the user to discover the ordering.
+   */
+  const setRedactMode = useCallback((on: boolean) => {
+    setRedactModeState(on);
+    if (on) setTextEditMode(false);
+  }, []);
+
+  const refreshRedactionMarks = useCallback(async () => {
+    if (!documentId) {
+      setRedactionMarks([]);
+      return;
+    }
+    try {
+      setRedactionMarks(await redactMarks(documentId));
+    } catch (e) {
+      // A failed read leaves the list as it was rather than clearing it: an empty list would look
+      // like "no marks pending", which is a claim about the document, not about the failure.
+      setError(e as AppError);
+    }
+  }, [documentId]);
+
+  // Marks belong to one document, so switching documents re-reads them rather than carrying the
+  // previous list across. Not gated on `redactMode`: the panel shows the count whatever tool is
+  // active, and an unapplied redaction that is invisible until you pick the tool is one a user can
+  // forget they made.
+  useEffect(() => {
+    setRedactionMarks([]);
+    refreshRedactionMarks();
+  }, [docKey, refreshRedactionMarks]);
+
+  const addRedactionMark = useCallback(
+    async (page: number, rect: { x0: number; y0: number; x1: number; y1: number }) => {
+      if (!documentId) return;
+      try {
+        await redactMark(documentId, page, rect);
+        await refreshRedactionMarks();
+      } catch (e) {
+        setError(e as AppError);
+      }
+    },
+    [documentId, refreshRedactionMarks],
+  );
 
   // Cross-surface sync (P2-D11). An annotation changed somewhere else -- an undo restored
   // by another pane, a future multi-window edit -- and this pane re-reads the DB rather
@@ -840,6 +910,11 @@ export function EditorProvider({
       runsLoading,
       textEditMode,
       setTextEditMode,
+      redactMode,
+      setRedactMode,
+      redactionMarks,
+      refreshRedactionMarks,
+      addRedactionMark,
       selectedRun,
       selection,
       selectRun,
@@ -870,6 +945,10 @@ export function EditorProvider({
       pageRuns,
       runsLoading,
       textEditMode,
+      redactMode,
+      redactionMarks,
+      refreshRedactionMarks,
+      addRedactionMark,
       selectedRun,
       selection,
       selectRun,

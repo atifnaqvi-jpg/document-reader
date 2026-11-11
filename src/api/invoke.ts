@@ -15,6 +15,7 @@ import type {
   IndexSummary,
   LibraryEntry,
   PageTextRun,
+  RedactionMark,
   RenderedPage,
   SearchHit,
   SignatureBadge,
@@ -463,3 +464,71 @@ export const importTrustCrl = (derPath: string) =>
 /** Drops a document's remembered password when it closes (P2.4 T10). */
 export const forgetPassword = (path: string) =>
   invoke<void>("forget_password", { path });
+
+// --- P3.2 SCOPE-B: redaction -------------------------------------------------
+
+/**
+ * Records one dragged rectangle as a pending redaction mark (P3.2 D-RD1).
+ *
+ * Writes no file: a mark is working state that lives in the local database, so the document on disk
+ * still shows the text until the user applies. `rect` is in PDF page points with the origin at the
+ * bottom-left, which is what the overlay's `pointToPdf` produces; the backend re-orders the corners,
+ * so a rectangle built from a drag in either direction is safe to send.
+ *
+ * Refused on a certified document: applying a mark rewrites the content stream, and no certification
+ * level permits that (`EditKind::Redaction`). The refusal comes back as an error rather than a silent
+ * no-op, so the UI can say why before the user draws more rectangles.
+ */
+export const redactMark = (
+  documentId: string,
+  page: number,
+  rect: { x0: number; y0: number; x1: number; y1: number },
+) => invoke<RedactionMark>("redact_mark", { documentId, page, rect });
+
+/** The document's pending marks, from the database rather than from UI state (P3.2 D-RD1). */
+export const redactMarks = (documentId: string) =>
+  invoke<RedactionMark[]>("redact_marks", { documentId });
+
+/** Removes one pending mark. Not gated: a mark is our own state and changes no document byte. */
+export const redactUnmark = (markId: string) =>
+  invoke<boolean>("redact_unmark", { markId });
+
+/**
+ * Finds `pattern` and records a mark per hit (P3.2 D-RD6).
+ *
+ * An empty array means the text genuinely does not occur — that is an answer, not a failure, and the
+ * UI says so rather than rendering an error. Throws when a page cannot be searched at all, because
+ * reporting a search that silently skipped part of the document would be the under-coverage D-RD3
+ * forbids.
+ */
+export const redactSearch = (documentId: string, pattern: string) =>
+  invoke<RedactionMark[]>("redact_search", { documentId, pattern });
+
+/**
+ * Applies every pending mark and writes a NEW file (P3.2 D-RD1/D-RD2).
+ *
+ * The source is never modified: `outcome.path` is a derived sibling, exactly as the page tools
+ * behave. Marks are cleared only once the write succeeded, so a failed apply leaves them for a retry.
+ *
+ * Rejects when there is nothing to remove (I-RD6) — a second apply at the same marks, or marks over
+ * content already gone. That is reported rather than producing a second byte-identical file the user
+ * cannot tell apart from the redacted one.
+ */
+export const redactApply = (documentId: string) =>
+  invoke<RedactOutcome>("redact_apply", { documentId });
+
+/** What {@link redactApply} did, for the report the user reads afterwards. */
+export interface RedactOutcome {
+  /** Where the redacted copy was written; never the original. */
+  path: string;
+  /** Text-showing operations deleted, across every page and every form. */
+  runsRemoved: number;
+  /** Annotations removed because their box intersected a mark. */
+  annotationsRemoved: number;
+  /** Images removed whole because they intersected a mark. */
+  imagesRemoved: number;
+  /** Objects dropped by the reachability sweep afterwards. */
+  objectsDropped: number;
+  /** Marks cleared from the database. */
+  marksCleared: number;
+}

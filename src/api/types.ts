@@ -607,3 +607,48 @@ export function textRunIdKey(runId: TextRunId): string {
 export function sameTextRunId(a: TextRunId, b: TextRunId): boolean {
   return textRunIdKey(a) === textRunIdKey(b);
 }
+
+/** How a redaction mark came to exist (P3.2 D-RD1/D-RD6). */
+export type RedactionKind = "rect" | "pattern";
+
+/**
+ * One pending redaction mark (P3.2 D-RD1).
+ *
+ * Working state, not document content: it lives in the local database and is cleared when apply
+ * writes its output. `rect` is the stored `x0,y0,x1,y1` string in PDF points, corner-ordered by the
+ * backend — parse it with {@link parseRedactionRect} rather than splitting it in a component, so the
+ * one place that knows the format is also the one place a change has to be made.
+ */
+export interface RedactionMark {
+  id: string;
+  documentId: string;
+  page: number;
+  kind: RedactionKind;
+  /** `x0,y0,x1,y1`, page points, origin bottom-left. */
+  rect: string;
+  /** The searched text, for `pattern` marks only. Display data; never re-run at apply time. */
+  pattern: string | null;
+  createdAt: number;
+}
+
+/**
+ * Parses a stored mark rectangle into page points.
+ *
+ * Returns `null` rather than a zero rectangle for anything malformed. A zero rect would render as an
+ * invisible mark and, worse, would apply as one that removes nothing while the UI reported success.
+ * The backend refuses to store such a value; this is the frontend holding the same line, so a corrupt
+ * row cannot turn into a silent no-op in the interface.
+ */
+export function parseRedactionRect(
+  rect: string,
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  const parts = rect.split(",");
+  if (parts.length !== 4) return null;
+  // An empty component is rejected explicitly. `Number("")` is `0`, and `0` is finite, so a blank
+  // field would otherwise parse as a real coordinate: "1,,2,3" would become a rectangle running from
+  // y=0, which is a mark the user never drew -- and one that removes content they meant to keep.
+  if (parts.some((part) => part.trim() === "")) return null;
+  const [x0, y0, x1, y1] = parts.map((part) => Number(part.trim()));
+  if (![x0, y0, x1, y1].every((value) => Number.isFinite(value))) return null;
+  return { x0, y0, x1, y1 };
+}

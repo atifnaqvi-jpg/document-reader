@@ -34,7 +34,11 @@ use crate::editor::textlocate::{self, RawRun};
 use crate::model::AppError;
 
 /// An axis-aligned rectangle on a page, in PDF page coordinates (points, y up).
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Serde is derived for the wire only, and a deserialised value is **not** normalised: serde builds
+/// the fields directly, so `x0 > x1` survives. Callers that take one from a command must pass it
+/// through [`Rect::new`], which is the only constructor that orders the corners.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     pub x0: f32,
     pub y0: f32,
@@ -64,6 +68,77 @@ impl Rect {
     /// intersecting (D-RD3).
     pub fn intersects(&self, other: &Rect) -> bool {
         self.x0 <= other.x1 && other.x0 <= self.x1 && self.y0 <= other.y1 && other.y0 <= self.y1
+    }
+
+    /// The stored form: normalised `x0,y0,x1,y1` in page points (P3.2 §5's `rect` column).
+    ///
+    /// Stored rather than recomputed because the mark rectangle is what the user drew and it has to
+    /// survive a restart unchanged; a rectangle re-derived from the rendered page would move when
+    /// the zoom did.
+    ///
+    /// **Normalisation happens here, in the one function that defines the stored form.** A rectangle
+    /// can reach this from a command argument, and serde builds `Rect`'s fields directly without
+    /// going through [`Rect::new`], so `x0 > x1` is reachable. Writing it out unnormalised would
+    /// still read back correctly — [`Rect::from_storage`] normalises — which is exactly why this
+    /// cannot be left to the reader: the file on disk would then say the mark runs from its
+    /// bottom-right corner to its top-left, and any future reader that compares components instead
+    /// of using `intersects` would get the complement of what the user drew.
+    pub fn to_storage(self) -> String {
+        let ordered = Rect::new(self.x0, self.y0, self.x1, self.y1);
+        format!(
+            "{},{},{},{}",
+            ordered.x0, ordered.y0, ordered.x1, ordered.y1
+        )
+    }
+
+    /// Refuses a rectangle with a component that is not a finite number.
+    ///
+    /// Separate from [`Rect::to_storage`] and called **before** it, because normalisation launders the
+    /// problem away: `f32::min` returns the non-`NaN` operand, so `Rect::new(NaN, 0, 10, 10)` yields a
+    /// perfectly finite rectangle. Measured — the earlier `add` relied on a storage round trip to
+    /// refuse `NaN`, and that only worked while `to_storage` happened not to normalise. A `NaN`
+    /// corner means the geometry the caller computed was garbage, and turning it into `10,0,10,10`
+    /// would store a mark at a position the user never drew.
+    pub fn require_finite(self) -> Result<Self, AppError> {
+        let finite = [self.x0, self.y0, self.x1, self.y1]
+            .iter()
+            .all(|value| value.is_finite());
+        if finite {
+            Ok(self)
+        } else {
+            Err(AppError::Other(format!(
+                "a redaction rectangle must have finite corners, got {}",
+                self.to_storage()
+            )))
+        }
+    }
+
+    /// Reads back [`Rect::to_storage`], refusing anything that is not four finite numbers.
+    ///
+    /// Refuses rather than defaulting: a mark whose rectangle cannot be read would otherwise be
+    /// applied as a zero-area rect, which removes nothing while reporting that the user's redaction
+    /// ran. That is the silent under-removal D-RD3 forbids, so it is an error naming the row instead.
+    pub fn from_storage(value: &str) -> Result<Self, AppError> {
+        let parts: Vec<&str> = value.split(',').collect();
+        let [x0, y0, x1, y1] = parts.as_slice() else {
+            return Err(AppError::Other(format!(
+                "a stored redaction rectangle must be four comma-separated numbers, got {value:?}"
+            )));
+        };
+        let read = |text: &str| -> Result<f32, AppError> {
+            text.trim().parse::<f32>().map_err(|_| {
+                AppError::Other(format!(
+                    "a stored redaction rectangle has a component that is not a number: {value:?}"
+                ))
+            })
+        };
+        let (x0, y0, x1, y1) = (read(x0)?, read(y0)?, read(x1)?, read(y1)?);
+        if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+            return Err(AppError::Other(format!(
+                "a stored redaction rectangle has a non-finite component: {value:?}"
+            )));
+        }
+        Ok(Rect::new(x0, y0, x1, y1))
     }
 }
 
