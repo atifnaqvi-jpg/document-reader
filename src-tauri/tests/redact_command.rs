@@ -157,7 +157,10 @@ fn the_apply_command_removes_the_text_and_writes_a_new_file() {
     let db = Db::open_in_memory().unwrap();
     let id = register(&db, &path);
     let source_before = std::fs::read(&path).unwrap();
-    assert!(contains(&all_object_bytes(&path), SECRET), "fixture must contain the secret to start with");
+    assert!(
+        contains(&all_object_bytes(&path), SECRET),
+        "fixture must contain the secret to start with"
+    );
 
     redact_mark_with(&db, &id, 0, secret_rect()).expect("mark");
     let outcome = redact_apply_with(&db, &id).expect("apply");
