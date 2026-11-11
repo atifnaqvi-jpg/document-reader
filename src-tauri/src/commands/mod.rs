@@ -1794,6 +1794,69 @@ pub fn import_trust_crl(db: State<'_, Db>, der_path: String) -> Result<TrustImpo
     db.with(|connection| import_crl_bytes(connection, &bytes, now_unix))
 }
 
+/// One imported trust anchor, as the management UI lists it (P3.2 D-SG4).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustAnchorView {
+    /// Base64 DER, the row's identity and what `forget_trust_anchor` takes.
+    pub der_base64: String,
+    /// Distinguished name, so the user can recognise which issuer this is.
+    pub subject: String,
+    /// Unix seconds. Past this the anchor is expired and no longer evidence.
+    pub not_after: i64,
+    /// Unix seconds, when it was imported.
+    pub added_at: i64,
+}
+
+/// The anchors the user has imported (P3.2 D-SG4).
+///
+/// **Why this command exists.** D-SG4 calls trust "local configuration only", which means under the
+/// user's control. `store::add_anchor` was reachable but `store::list_anchors` was not, so the store
+/// was append-only and unauditable: a user could import an anchor and never see, let alone correct,
+/// what they had trusted. A trust store you cannot inspect is not configuration you control,
+/// whatever the design says; it is a list that only grows and that you must take on faith.
+///
+/// Ordering comes from the store (newest first), so a just-imported anchor is where the user looks.
+#[tauri::command]
+pub fn list_trust_anchors(db: State<'_, Db>) -> Result<Vec<TrustAnchorView>, AppError> {
+    list_trust_anchors_with(&db)
+}
+
+/// [`list_trust_anchors`]'s body, by reference, so a test can drive the shipped path.
+pub fn list_trust_anchors_with(db: &Db) -> Result<Vec<TrustAnchorView>, AppError> {
+    let rows = db.with(crate::editor::signature::store::list_anchors)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| TrustAnchorView {
+            der_base64: row.der_base64,
+            subject: row.subject,
+            not_after: row.not_after,
+            added_at: row.added_at,
+        })
+        .collect())
+}
+
+/// Removes one imported trust anchor, so its issuer stops counting toward `valid` (P3.2 D-SG4).
+///
+/// **Why this command exists.** The other half of [`list_trust_anchors`]'s reason: a trust decision
+/// the user cannot reverse is not a decision they made. Importing the wrong CA -- a test root, one
+/// from another organisation, one since compromised -- otherwise keeps contributing to `valid`
+/// forever, and the badge would report a chain as anchored to something the user no longer vouches
+/// for.
+///
+/// Returns whether a row was deleted rather than erroring on an unknown identity: "it is already
+/// gone" is the state the user asked for, and failing there would make a repeated click look like a
+/// fault. The identity is the base64 DER the listing returned, so the UI never invents one.
+#[tauri::command]
+pub fn forget_trust_anchor(db: State<'_, Db>, der_base64: String) -> Result<bool, AppError> {
+    forget_trust_anchor_with(&db, &der_base64)
+}
+
+/// [`forget_trust_anchor`]'s body, by reference, so a test can drive the shipped path.
+pub fn forget_trust_anchor_with(db: &Db, der_base64: &str) -> Result<bool, AppError> {
+    db.with(|connection| crate::editor::signature::store::remove_anchor(connection, der_base64))
+}
+
 // --- P3.2 SCOPE-B: redaction -------------------------------------------------
 //
 // Marking and applying are separate commands because they are separate user actions with different

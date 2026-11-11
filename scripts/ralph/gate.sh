@@ -193,11 +193,14 @@ fi
 # `tests/redact_command.rs` (marking touches no file, apply writes a new file and the text is gone,
 # marks cleared after apply, a repeat apply reports nothing to apply, and the certification refusal
 # on both the mark and the apply path).
-# Measured, not incremented: 935 passed with PDFIUM_LIBRARY_PATH unset, 1041 with --include-ignored.
-# Now 935/106 and 1041/0.
-PIN_PLAIN_PASSED=935
+# SCOPE-C unit 5 adds four in `tests/trust_store.rs` (an import is listed through the command, an
+# empty store lists nothing, forgetting an anchor takes a `valid` badge back to `unknown`, and a
+# repeated forget reports not-removed rather than failing). All four are PDFium-independent.
+# Measured, not incremented: 939 passed with PDFIUM_LIBRARY_PATH unset, 1045 with --include-ignored.
+# Now 939/106 and 1045/0.
+PIN_PLAIN_PASSED=939
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=1041
+PIN_IGNORED_PASSED=1045
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

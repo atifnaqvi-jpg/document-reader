@@ -286,15 +286,20 @@ jobs:
           # 935 for P3.2 SCOPE-B's command layer: +22, all PDFium-independent, so the ignored pin
           # above stays at 106. Twelve unit tests in `db/redactions.rs` and ten in
           # `tests/redact_command.rs`, including the two that drive the shipped apply path and
-          # confirm the redacted text is gone from the written file. Re-measured with the PDFium
-          # path unset: 935 passed, and 1041 when the ignored tests are included as well.
+          # confirm the redacted text is gone from the written file.
+          #
+          # 939 for SCOPE-C unit 5's trust management: +4, all PDFium-independent, ignored pin still
+          # 106. Four in `tests/trust_store.rs` driving the shipped list/forget commands, including
+          # the one that imports an anchor, watches the badge go `valid`, forgets it, and requires
+          # `unknown` again. Re-measured with the PDFium path unset: 939 passed, and 1045 when the
+          # ignored tests are included as well.
           #
           # (That last number is described rather than spelled out: this step must not contain the
           # ignored-including flag even in prose, and the guard
           # `the_linux_job_does_not_force_pdfium_tests_without_a_library` enforces that as a
           # substring check over the whole step. It caught this comment on the first run.)
-          if [ "$passed" -lt 935 ]; then
-            echo "::error::only $passed tests ran; 935 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 939 ]; then
+            echo "::error::only $passed tests ran; 939 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
