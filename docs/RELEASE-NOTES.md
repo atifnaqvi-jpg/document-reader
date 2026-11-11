@@ -7,6 +7,117 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 1.2.0
+
+P3.2: **protect, redact and sign.** The three things a PDF reader is expected to do to a file
+rather than with it, and the first release where the app can change a document's security rather
+than only its text.
+
+Windows-only, as before. Every feature below is offline by design: no feature in this release
+opens a network connection, and that is enforced rather than promised (see *What is not here*).
+
+### Protect a document with a password
+
+*File > Protect…* writes a password-protected copy beside the original — never over it. You choose
+an opening password and an owner password, and then, one checkbox at a time, what a reader may do:
+print, print at high resolution, change the contents, copy text and images, comment, fill in forms,
+and reorder pages.
+
+Two details worth knowing, because both are places where a protection dialog can lie:
+
+- **Both passwords are required, and they must differ.** If the owner password equals the opening
+  password, anyone who can open the document can also remove its restrictions, which makes every
+  checkbox advisory. The dialog refuses that rather than shipping it quietly.
+- **The boxes start ticked, and every one is sent explicitly.** The library underneath treats
+  "unset" as "granted", so a dialog that inherited a default and let you clear boxes could show a
+  restricted document that grants everything. Starting permissive and making each restriction a
+  deliberate untick means the file you get back reflects choices you made.
+
+Protection is verified before you are told it worked: the copy is reopened with the password, and a
+failure is reported in the words of the check that failed.
+
+### Redact
+
+Mark a region and apply. The content underneath is **deleted, not covered** — a black rectangle over
+live text is a redaction that a copy-paste defeats, so this release removes the glyphs, the images
+the mark touches (whole, not clipped), and the annotations on top of them. Marks that name
+something with no location (a popup's parent, a link destination) are resolved and removed rather
+than left as a dangling reference.
+
+Applying is one undo entry and one new file. Applying twice to the same marks is a reported no-op
+rather than a second pass over a document that no longer contains the text.
+
+### Signatures
+
+Sign with a `.pfx`/`.p12` file, or pick a certificate from the Windows certificate store. The
+signature is a detached CMS over a reserved `/Contents` gap, appended as a second revision: **the
+bytes already in the file are not rewritten**, which is what makes an earlier signature survive a
+later one.
+
+A signature badge sits in the viewer and reports one of four states — `valid`, `modified`,
+`unknown`, `unsigned` — with a detail view listing what was and was not checked. The badge is
+deliberately conservative, and the reasons are the point:
+
+- **`unknown` is the normal answer offline.** `valid` requires the signer's chain to anchor in a
+  trust store you built yourself by importing a certificate. Nothing is fetched, so nothing is
+  vouched for by a third party. A reader who expects every signature to go green will see `unknown`
+  and should read that as "this build cannot confirm who signed this", not as "the signature is bad".
+- **Revocation is checked against CRLs you imported**, and the badge always says which of the three
+  answers it got — revoked, not revoked, or *not checked*, with the reason. A badge that went silent
+  when it had no revocation data would read as a quiet pass.
+- **A certification level is stated in words.** If a signer certified the document at `P=1`, the
+  badge says annotations are not permitted; at `P=2`, form filling and further signatures are; at
+  `P=3`, annotations are too. Those sentences are what explains a refused edit, so they are pinned
+  by test rather than by eye — levels 2 and 3 shared one branch until this release and nothing
+  proved they differed.
+- **A refused edit is refused for a reason.** A certification signature governs further changes: at
+  every level a redaction is refused, and a change the level does not permit is refused with the
+  level named.
+
+You can manage what you trust: anchors and CRLs can be listed and forgotten, and forgetting is
+reported as what the backend did rather than assumed.
+
+### Everything has a caller
+
+Two features in this phase were finished in the library and unreachable in the app: the trust store
+could be read and nothing displayed it, and `protect_document` could write a protected copy and no
+menu item asked it to. Both had passing tests, which is precisely why neither looked broken — a
+green suite over code the product cannot run reads exactly like a green suite over a feature.
+
+The protect dialog and the trust panel close both gaps, and a new guard closes the class: every
+command registered with the app must be called from the frontend, or the build fails and names it.
+It is mutation-verified, and it has positive controls so that a scanner which silently stopped
+matching fails instead of passing.
+
+### Also in this release
+
+- **CI fails a stalled dependency install instead of hanging.** An unbounded `apt-get` could hold a
+  runner for the whole timeout; it is now bounded, retried three times, and red in about twenty
+  minutes rather than never. (A DNS failure on the runner fleet still turns these jobs red — that is
+  the guard doing its job, not a build failure.)
+- **Dual-licensed MIT OR Apache-2.0.**
+- **Text-scan guards normalise line endings**, so they hold on Windows checkouts.
+
+### Toolchain
+
+- The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+- Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, `.github/workflows/ci.yml`
+  and `release-windows.yml`.
+
+### What is not here
+
+- **Signing with a certificate whose private key is in the Windows store.** The store can be
+  *listed* — you can see and choose such a certificate — but signing with it is not implemented, and
+  the dialog says so at the point of choice rather than failing later.
+- **Revocation data is never fetched** (R3), so a fresh install has none. Import a CRL if you need
+  revocation checked.
+- **Anything above `P=3`**, and any DocMDP semantics beyond level-based refusal.
+- **Linux.** The rendering, protection and signing paths are platform-neutral and their tests run on
+  Linux CI, but only the Windows installer ships and only the certificate-store read is
+  Windows-specific. A Linux build is a later phase.
+
+---
+
 ## 1.1.1
 
 **Development version. Not a release: no tag, no installer, no hand-test.** It exists to give
