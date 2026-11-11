@@ -32,7 +32,7 @@ set -uo pipefail
 # one entry excuse a family of steps).
 #
 # >>> ci-exemptions -- parsed by src-tauri/tests/gate_parity.rs
-# ci-exempt: sudo apt-get update ;; covers: none ;; platform: CI installs Tauri's system libraries; this machine has them
+# ci-exempt: set -o pipefail ;; covers: none ;; platform: CI installs Tauri's system libraries with a bounded retry; this machine already has them
 # ci-exempt: cargo test 2>&1 | tee /tmp/test-output.txt ;; covers: cargo test ;; the gate runs both shapes as pinned counts instead of CI's shell script of floors
 # ci-exempt: npm ci ;; covers: none ;; install path, not a check; node_modules is already present on this machine
 # ci-exempt: npm test ;; covers: npx vitest run ;; `npm test` is `vitest run`; the gate calls it directly
@@ -201,11 +201,12 @@ fi
 # the `nextUpdate` that decides staleness, an empty store lists nothing, forgetting a revocation
 # takes the badge from demoted back to `valid`, and a repeated forget reports not-removed). Also
 # PDFium-independent.
-# Measured, not incremented: 943 passed with PDFIUM_LIBRARY_PATH unset, 1049 with --include-ignored.
-# Now 943/106 and 1049/0.
-PIN_PLAIN_PASSED=943
+# The apt-stall guard adds one in `tests/ci_workflow.rs`.
+# Measured, not incremented: 944 passed with PDFIUM_LIBRARY_PATH unset, 1050 with --include-ignored.
+# Now 944/106 and 1050/0.
+PIN_PLAIN_PASSED=944
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=1049
+PIN_IGNORED_PASSED=1050
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

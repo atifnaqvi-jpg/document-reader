@@ -21,14 +21,41 @@ jobs:
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
+    # A hung job is worse than a red one: it reports `in_progress` indefinitely, so nobody is
+    # told the tree is unverified, and GitHub refuses to re-run a workflow that is still
+    # running -- the whole check is blocked until someone cancels it by hand. Every step here
+    # has a natural ceiling, so a job timeout turns a stall into a visible failure.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
+      # Bounded retry on the one step that has actually hung. On 2026-11-11 three separate runs
+      # sat in this `apt-get` for 37-102 minutes while the Windows and Frontend jobs on the same
+      # commit passed, so the mirror, not the code, was the variable. apt-get has no default
+      # network timeout worth relying on, so the whole install is wrapped: each attempt is
+      # killed after ten minutes and the next one starts. This does not weaken the gate -- if
+      # the dependencies genuinely cannot be installed, all three attempts fail and the job is
+      # red, which is the honest outcome and the one an unbounded step could not produce.
       - name: Install Tauri system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
+          set -o pipefail
+          for attempt in 1 2 3; do
+            echo "::group::apt attempt $attempt of 3"
+            if sudo timeout 600 apt-get update \
+               && sudo timeout 600 apt-get install -y --no-install-recommends \
+                    libwebkit2gtk-4.1-dev libgtk-3-dev \
+                    libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev; then
+              echo "::endgroup::"
+              echo "system dependencies installed on attempt $attempt"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::apt attempt $attempt failed or timed out; retrying"
+            sudo rm -rf /var/lib/apt/lists/* || true
+            sleep 10
+          done
+          echo "::error::could not install Tauri system dependencies after 3 attempts"
+          exit 1
 
       # Pinned, not `@stable`. rustfmt may change its output between releases, so a floating
       # toolchain turns `cargo fmt --check` into a statement about the calendar rather than
@@ -296,15 +323,17 @@ jobs:
           # 943 for SCOPE-C unit 6's revocation management: +4, all PDFium-independent, ignored pin
           # still 106. Four more in `tests/trust_store.rs` driving the shipped CRL list/forget
           # commands, including the one that imports a revocation, watches the badge leave `valid`,
-          # forgets that list, and requires `valid` back. Re-measured with the PDFium path unset:
-          # 943 passed, and 1049 when the ignored tests are included as well.
+          # forgets that list, and requires `valid` back.
+          #
+          # 944 for the apt-stall guard in `tests/ci_workflow.rs`: +1, PDFium-independent. Re-measured
+          # with the PDFium path unset: 944 passed, and 1050 when the ignored tests are included too.
           #
           # (That last number is described rather than spelled out: this step must not contain the
           # ignored-including flag even in prose, and the guard
           # `the_linux_job_does_not_force_pdfium_tests_without_a_library` enforces that as a
           # substring check over the whole step. It caught this comment on the first run.)
-          if [ "$passed" -lt 943 ]; then
-            echo "::error::only $passed tests ran; 943 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 944 ]; then
+            echo "::error::only $passed tests ran; 944 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

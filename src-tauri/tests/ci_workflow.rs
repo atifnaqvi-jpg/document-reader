@@ -379,8 +379,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 943 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 943. \
+        tests_step.contains(r#"if [ "$passed" -lt 944 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 944. \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }
@@ -443,5 +443,55 @@ fn the_row_one_pdfium_step_cannot_pass_without_running() {
     assert!(
         step.contains("PdfiumUnavailable"),
         "a missing library must be diagnosed by name, not inferred from a nonzero exit"
+    );
+}
+
+/// A hung job is worse than a red one, and this is not a hypothetical: on 2026-11-11 three
+/// separate runs on three commits sat in `Install Tauri system dependencies` for 37, 47 and 102
+/// minutes while the Windows and Frontend jobs on the same commits passed. The job reported
+/// `in_progress` the whole time, so nothing told anyone the tree was unverified -- and GitHub
+/// refuses to re-run a workflow that is still running, so one stalled step blocked the whole
+/// check until it was cancelled by hand.
+///
+/// Two properties prevent a repeat, and both are asserted here because either alone is not
+/// enough. The job timeout bounds the total, but 40 minutes of a hung `apt-get` still wastes the
+/// runner and still blocks a re-run for 40 minutes. The per-attempt `timeout` bounds the step
+/// itself and turns a hang into a retry.
+///
+/// Mutation-verified: removing `timeout-minutes: 40` fails this test; removing `timeout 600`
+/// from the apt lines also fails it.
+#[test]
+fn a_stalled_dependency_install_fails_visibly_instead_of_hanging() {
+    let text = ci_workflow();
+    let rust_job = text
+        .split("  rust:")
+        .nth(1)
+        .expect("the workflow must define the Linux rust job");
+    let job_body = rust_job.split("\n  frontend:").next().unwrap_or(rust_job);
+
+    assert!(
+        job_body.contains("timeout-minutes: 40"),
+        "the Rust job must carry a `timeout-minutes` bound. Without it a stalled step reports \
+         `in_progress` indefinitely, which is the one CI outcome that tells nobody anything and \
+         also blocks `rerun-failed-jobs`."
+    );
+
+    let install = job_body
+        .split("- name: Install Tauri system dependencies")
+        .nth(1)
+        .expect("the Rust job must install the system dependencies")
+        .split("- name:")
+        .next()
+        .unwrap_or("");
+    assert!(
+        install.matches("timeout 600").count() >= 2,
+        "both `apt-get update` and `apt-get install` must be bounded by `timeout`, so a hung \
+         mirror becomes a failed attempt rather than an open-ended wait; found {} occurrence(s)",
+        install.matches("timeout 600").count()
+    );
+    assert!(
+        install.contains("attempt"),
+        "the install must retry rather than fail on the first slow mirror; the step that hung \
+         three times was transient, not broken"
     );
 }
