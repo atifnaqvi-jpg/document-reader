@@ -259,9 +259,11 @@ fn the_gate_runs_before_the_mutation_in_each_command() {
 
     for (command, write) in first_write {
         let body = code_only(&body_of(&source, command));
-        let gate = body.find("refuse_if_certification_forbids(").unwrap_or_else(|| {
-            panic!("{command} does not call the gate; the companion test names the omission")
-        });
+        let gate = body
+            .find("refuse_if_certification_forbids(")
+            .unwrap_or_else(|| {
+                panic!("{command} does not call the gate; the companion test names the omission")
+            });
         let mutation = body.find(write).unwrap_or_else(|| {
             panic!(
                 "{command} no longer contains `{write}`; if the write path was renamed, re-anchor \

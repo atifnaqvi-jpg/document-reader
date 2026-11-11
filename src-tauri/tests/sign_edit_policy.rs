@@ -197,8 +197,8 @@ fn each_level_permits_its_own_edit_and_forbids_the_next_wider_one() {
             Verdict::Refused,
             "P={number} must refuse {forbidden_edit:?}"
         );
-        let refusal = check(Some(level), forbidden_edit)
-            .expect_err("the forbidden edit must be refused");
+        let refusal =
+            check(Some(level), forbidden_edit).expect_err("the forbidden edit must be refused");
         assert!(
             refusal.to_string().contains(&format!("P={number}")),
             "the refusal must name the level; got {refusal}"
