@@ -103,6 +103,8 @@ pub fn run() {
             commands::sign_document,
             commands::import_trust_anchor,
             commands::import_trust_crl,
+            commands::list_trust_anchors,
+            commands::forget_trust_anchor,
             commands::redact_mark,
             commands::redact_marks,
             commands::redact_unmark,

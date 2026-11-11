@@ -711,3 +711,131 @@ fn an_import_file_over_the_limit_is_refused_with_its_size_named() {
     let missing = read_import_file_within("/nonexistent/ca.der", 1024).expect_err("must fail");
     assert!(format!("{missing}").contains("could not read"));
 }
+
+// --- Unit 5: the store is manageable, not append-only (D-SG4) ------------------
+//
+// D-SG4 calls trust "local configuration only", which means under the user's control. The store
+// could grow (`import_trust_anchor`) but could not be read or shrunk: `store::list_anchors` and
+// `store::remove_anchor` had no caller outside the store's own tests. A trust store you cannot
+// audit is not configuration you control, so these tests go through the *commands* -- the shipped
+// path -- and assert the consequence on the badge rather than only on the row count.
+
+use document_reader_lib::commands::{forget_trust_anchor_with, list_trust_anchors_with};
+
+#[test]
+fn an_imported_anchor_is_listed_through_the_command() {
+    // The listing half: what the UI reads must be the same row the import wrote, carrying the
+    // identity `forget_trust_anchor` takes. An id the listing does not return cannot be removed.
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    let now = 1_800_000_000;
+    let imported = db
+        .with(|connection| import_anchor_bytes(connection, &fixture("ca.der"), now))
+        .expect("the CA imports");
+
+    let listed = list_trust_anchors_with(&db).expect("list");
+    assert_eq!(listed.len(), 1, "one import, one listed anchor");
+    assert_eq!(
+        listed[0].der_base64, imported.der_base64,
+        "the listing must carry the same identity the import reported, or the UI cannot forget it"
+    );
+    assert_eq!(
+        listed[0].subject, "C=GB,O=DocReader Test,CN=DocReader Test CA",
+        "the subject is how the user recognises which issuer this is"
+    );
+    assert!(
+        listed[0].not_after > now,
+        "the anchor's own expiry is after the assessment time, so a later `valid` is not decided \
+         by an expired anchor; got {}",
+        listed[0].not_after
+    );
+}
+
+#[test]
+fn an_empty_store_lists_nothing_rather_than_failing() {
+    // The initial state. A first-run UI that errored here would look broken before the user has
+    // done anything; the honest answer is an empty list.
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    assert!(list_trust_anchors_with(&db).expect("list").is_empty());
+}
+
+#[test]
+fn forgetting_an_anchor_takes_a_valid_badge_back_to_unknown() {
+    // The property that makes the command worth having, held over one fixed signed file: the only
+    // thing that changes between the three assessments is the store. Importing makes `valid`
+    // reachable; forgetting must take it away again, or the trust decision is one the user made
+    // once and can never withdraw.
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    let (_dir, written) = signed_with(&leaf_identity(), "import then forget");
+    let now = 1_800_000_000;
+
+    // A clean CRL is needed for `valid`, and it is imported once and left in place, so the only
+    // variable across the three assessments below is the anchor.
+    db.with(|connection| import_crl_bytes(connection, &fixture("crl-empty.der"), now))
+        .expect("crl imports");
+
+    let without = db
+        .with(|connection| store::assess(connection, &written, now))
+        .expect("parses")
+        .expect("signed");
+    assert_eq!(
+        without.badge,
+        Badge::Unknown,
+        "no anchor yet, so the signature is unknown rather than valid"
+    );
+
+    let imported = db
+        .with(|connection| import_anchor_bytes(connection, &fixture("ca.der"), now))
+        .expect("the CA imports");
+    let with = db
+        .with(|connection| store::assess(connection, &written, now))
+        .expect("parses")
+        .expect("signed");
+    assert_eq!(
+        with.badge,
+        Badge::Valid,
+        "the anchor the user imported puts the chain on a path they chose"
+    );
+
+    assert!(
+        forget_trust_anchor_with(&db, &imported.der_base64).expect("forget"),
+        "the anchor that was just imported must be removed"
+    );
+
+    let after = db
+        .with(|connection| store::assess(connection, &written, now))
+        .expect("parses")
+        .expect("signed");
+    assert_eq!(
+        after.badge,
+        Badge::Unknown,
+        "withdrawing the anchor must withdraw the badge: a trust decision the user cannot reverse \
+         is not a decision they made"
+    );
+    assert!(
+        !after.anchored,
+        "and the assessment must say so, not merely change its verdict"
+    );
+    assert!(list_trust_anchors_with(&db).expect("list").is_empty());
+}
+
+#[test]
+fn forgetting_an_unknown_anchor_reports_not_removed_rather_than_failing() {
+    // A repeated click, or a stale UI, must not surface as an error: "it is already gone" is the
+    // state the user asked for. The distinction still has to be reported, so an id that matched
+    // nothing is not mistaken for one that did.
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    let now = 1_800_000_000;
+    let imported = db
+        .with(|connection| import_anchor_bytes(connection, &fixture("ca.der"), now))
+        .expect("imports");
+
+    assert!(forget_trust_anchor_with(&db, &imported.der_base64).expect("first forget"));
+    assert!(
+        !forget_trust_anchor_with(&db, &imported.der_base64).expect("second forget must succeed"),
+        "the second removal found nothing, which is reported rather than raised"
+    );
+    assert!(
+        !forget_trust_anchor_with(&db, "bm90IGEgcmVhbCBpZGVudGl0eQ==").expect("bogus id"),
+        "an id that never matched must not be reported as removed"
+    );
+}
