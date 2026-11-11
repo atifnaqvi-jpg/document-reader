@@ -548,6 +548,35 @@ export interface SignRequest {
  * ordinary -- a user re-imports a CA when they are not sure it took -- and it must not read as
  * either a failure or a second trust decision. The UI says "already trusted" when this is false.
  */
+/** One imported trust anchor, as the management panel lists it (P3.2 D-SG4). */
+export interface TrustAnchorView {
+  /** Base64 DER: the row's identity, and what `forgetTrustAnchor` takes. */
+  derBase64: string;
+  /** Distinguished name, so the user can recognise which issuer this is. */
+  subject: string;
+  /** Unix seconds. Past this the anchor is expired and stops being evidence. */
+  notAfter: number;
+  /** Unix seconds, when it was imported. */
+  addedAt: number;
+}
+
+/** One imported revocation list, as the management panel lists it (P3.2 D-SG4). */
+export interface TrustCrlView {
+  /** Base64 DER: the row's identity, and what `forgetTrustCrl` takes. */
+  derBase64: string;
+  /** The issuer distinguished name the CRL states -- how two lists are told apart. */
+  issuer: string;
+  /** The CRL's `thisUpdate`, in unix seconds. */
+  thisUpdate: number;
+  /**
+   * Its `nextUpdate`, in unix seconds, or null when it states none.
+   *
+   * Not decoration: past this date the list stops being evidence, so the panel must show it rather
+   * than let a stale list look authoritative.
+   */
+  nextUpdate: number | null;
+}
+
 export interface TrustImport {
   /** Distinguished name of the certificate or the CRL's issuer. */
   subject: string;

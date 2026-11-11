@@ -24,6 +24,8 @@ import type {
   SignRequest,
   TextEditResult,
   TrustImport,
+  TrustAnchorView,
+  TrustCrlView,
   TextRunFragmentRef,
   TextRunId,
 } from "./types";
@@ -460,6 +462,36 @@ export const importTrustAnchor = (derPath: string) =>
  */
 export const importTrustCrl = (derPath: string) =>
   invoke<TrustImport>("import_trust_crl", { derPath });
+
+/**
+ * The anchors the user has imported, newest first (P3.2 D-SG4).
+ *
+ * The read side of the trust store. Without it the store was append-only and unauditable: a user
+ * could import a CA and never see, let alone correct, what they had trusted. Everything is local;
+ * nothing is fetched.
+ */
+export const listTrustAnchors = () => invoke<TrustAnchorView[]>("list_trust_anchors");
+
+/**
+ * Drops one anchor by the base64 DER the listing returned (P3.2 D-SG4).
+ *
+ * Resolves false when the identity matched nothing -- a repeated click is not a fault, but the
+ * distinction is reported so the UI never claims to have removed something it did not.
+ */
+export const forgetTrustAnchor = (derBase64: string) =>
+  invoke<boolean>("forget_trust_anchor", { derBase64 });
+
+/**
+ * The revocation lists the user has imported, newest first (P3.2 D-SG4).
+ *
+ * Carries each list's `nextUpdate` because that is what decides staleness: past it a clean list
+ * silently stops counting, and a UI that could not show the date would let the user keep trusting
+ * something the backend had already stopped believing.
+ */
+export const listTrustCrls = () => invoke<TrustCrlView[]>("list_trust_crls");
+
+/** Drops one revocation list by its base64 DER. Resolves false when nothing matched. */
+export const forgetTrustCrl = (derBase64: string) => invoke<boolean>("forget_trust_crl", { derBase64 });
 
 /** Drops a document's remembered password when it closes (P2.4 T10). */
 export const forgetPassword = (path: string) =>

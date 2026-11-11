@@ -24,6 +24,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { TrustPanel } from "./TrustPanel";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import type { SigningCertificates, SigningCertificate, TrustImport } from "../api/types";
 import {
@@ -270,6 +271,10 @@ export function SignDialog({
       {/* Both imports sit here rather than on a separate settings screen: they are the answer to
           "why is this signature unknown?", which is the question this dialog exists to answer. */}
       <TrustImportSection onChanged={onTrustChanged} />
+      {/* Below the imports, because it lists what the imports produced. The panel is what makes
+          those imports reversible: an append-only store lets a mistyped CA or a stale revocation
+          list decide this badge forever, with no way for the user to say otherwise. */}
+      <TrustPanel />
 
       {result.kind === "signed" ? (
         <p className="sign-dialog__ok" role="status">

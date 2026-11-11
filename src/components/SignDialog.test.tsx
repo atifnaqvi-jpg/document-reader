@@ -56,8 +56,20 @@ function certificate(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * The dialog now mounts `TrustPanel`, which reads both halves of the store on mount. These tests are
+ * about the *dialog*, so the panel's reads are stubbed empty rather than left unhandled: an
+ * unhandled command rejects, and the panel's error banner would then be a second `role="alert"` in
+ * every test that asserts on the dialog's own message. `TrustPanel.test.tsx` covers the panel.
+ */
+function stubTrustStore(target: FakeBackend) {
+  target.on("list_trust_anchors", () => []);
+  target.on("list_trust_crls", () => []);
+  return target;
+}
+
 function withStore(certificates: unknown[], skipped: unknown[] = []) {
-  backend = installFakeBackend();
+  backend = stubTrustStore(installFakeBackend());
   backend.on("list_signing_certificates", () => ({ certificates, skipped }));
   return backend;
 }
@@ -81,7 +93,7 @@ describe("the sign dialog", () => {
 
   it("reports an unreadable store as unavailable, not as having no certificates", async () => {
     // Those are different facts and only one of them is the user's fault.
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => {
       throw "the Windows certificate store is not available on this platform";
     });
@@ -119,7 +131,7 @@ describe("the sign dialog", () => {
 describe("the signature level (D-SG6)", () => {
   it("sends no certification level for an approval signature", async () => {
     pickerReturns("/tmp/signer.pfx");
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
     backend.on("sign_document", () => ({
       path: "/tmp/signed.pdf",
@@ -140,7 +152,7 @@ describe("the signature level (D-SG6)", () => {
 
   it("sends the chosen certification level when one is picked", async () => {
     pickerReturns("/tmp/signer.pfx");
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
     backend.on("sign_document", () => ({
       path: "/tmp/signed.pdf",
@@ -160,7 +172,7 @@ describe("the signature level (D-SG6)", () => {
 
   it("omits a reason the user left blank rather than signing a space", async () => {
     pickerReturns("/tmp/signer.pfx");
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
     backend.on("sign_document", () => ({
       path: "/tmp/signed.pdf",
@@ -182,7 +194,7 @@ describe("the signature level (D-SG6)", () => {
 describe("after signing", () => {
   it("tells the caller so the badge re-reads the file it describes", async () => {
     pickerReturns("/tmp/signer.pfx");
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
     backend.on("sign_document", () => ({
       path: "/tmp/signed.pdf",
@@ -203,7 +215,7 @@ describe("after signing", () => {
 
   it("clears the password after a failed sign so the next attempt cannot resubmit it", async () => {
     pickerReturns("/tmp/signer.pfx");
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
     backend.on("sign_document", () => {
       throw "the password does not open this PKCS#12 file";
@@ -221,7 +233,7 @@ describe("after signing", () => {
 
   it("reports a backend refusal in the user's words, not as a stack string", async () => {
     pickerReturns("/tmp/signer.pfx");
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
     backend.on("sign_document", () => {
       throw { code: "SIGNATURE_BUILD_FAILED", message: "the document is password-protected" };
@@ -248,11 +260,14 @@ describe("importing trust from the sign dialog", () => {
 
   /** Open the dialog with an empty certificate store, which no `sign_document` path needs. */
   async function openDialog(onSigned = () => {}) {
-    backend = installFakeBackend();
+    backend = stubTrustStore(installFakeBackend());
     backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
     render(<SignAction documentId="doc-1" signedTick={0} onSigned={onSigned} />);
     await userEvent.click(screen.getByRole("button", { name: "Sign…" }));
-    await screen.findByText(/Trust/);
+    // The dialog's own trust section, by its exact legend. `/Trust/` is now ambiguous: the panel
+    // below mounts a second fieldset, and a loose match would keep passing while pointing at
+    // whichever legend rendered first.
+    await screen.findByText("Trust", { selector: "legend" });
     return backend;
   }
 

@@ -1022,3 +1022,71 @@ button:disabled {
   border-radius: 6px;
   box-shadow: 0 2px 8px rgb(0 0 0 / 15%);
 }
+
+/* The trust management panel (P3.2 SCOPE-C, D-SG4).
+   Deliberately plain: it is a list of what the user has trusted, and decoration would compete with
+   the one thing on each row that matters -- the date, and whether it has passed. The expired colour
+   is the same `--danger` the badge uses for `modified`, because both mean "this no longer supports
+   the claim it appears to support". */
+.trust-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.trust-panel__hint,
+.trust-panel__empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.trust-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trust-panel__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.trust-panel__name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.trust-panel__date {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.trust-panel__date--expired {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.trust-panel__warn {
+  color: var(--danger);
+  font-size: 0.85em;
+}
+
+.trust-panel__ok {
+  margin: 0;
+  color: var(--accent);
+}
+
+.trust-panel__error {
+  margin: 0;
+  color: var(--danger);
+}
