@@ -294,13 +294,20 @@ Linux job never runs, so it is the only place with that concurrency. Not narrowe
 the four above it is.
 
 **The escalation has been earned** (`43075237167`, 2026-11-11). What instrumentation should now
-answer, in order: (1) which test was running when the process died — needs `--test-threads=1`
-*and* `--no-capture` so the name is flushed before the call, since the default harness flushes
-only on return; (2) whether `textedit_gates` ever constructs its own `Pdfium`. Three test files do
-(`incremental_pdfium.rs`, `protect_save.rs`, `redact_pdfium.rs`), and `provider::pdf`'s gate is
-what makes PDFium calls single-threaded — a second `Pdfium` outside that gate is exactly the
-heap-corruption shape the gate exists to prevent, and `Pdfium::new` at a test call site is
-explicitly forbidden by the comment on `pdfium()` in `provider/pdf.rs:120`.
+answer: **which test was running when the process died.** It needs `--test-threads=1` *and*
+`--no-capture`, because the default harness flushes a result only on return and a crash inside a
+test therefore leaves the previous test's name as the last line.
+
+**One hypothesis, checked and dead.** The obvious candidate was a second `Pdfium` constructed at a
+test call site, bypassing the gate in `provider/pdf.rs` that is the only thing making PDFium calls
+single-threaded. `textedit_gates` does not do that: it never names `Pdfium`, and its one render
+(`tests/textedit_gates.rs:1260`) goes through `RenderService::new()`, whose provider entry points
+all acquire the gate. So the crashing binary is not the one that breaks that rule. **The three
+files that do construct their own `Pdfium`** — `incremental_pdfium.rs:87`, `protect_save.rs:109,123`
+and `redact_pdfium.rs:96,160` — are worth a separate look, but they are separate binaries, each in
+its own process, so they cannot perturb `textedit_gates`; that theory is about *their* stability,
+not this crash. Not established either way: whether a `Pdfium` outliving the gate, or PDFium's own
+global init at exit, is involved. Recorded as an open question rather than a lead.
 
 **Still non-blocking for 1.2.0, on the K20 terms.** The installer for `27138bc` was produced by
 attempt 2 of the same SHA, which is the re-run policy this section already mandates: no P3.2
