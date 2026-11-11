@@ -36,10 +36,13 @@ read only from the document itself or from certificates the user imports.
   certification, and signature badges — strictly no network (in flight for
   v1.2.0). Signing writes a new file beside the original and never rewrites it.
   The badge reports `valid` / `modified` / `unknown` / `unsigned` and is
-  deliberately conservative: there is no trust store yet, so a sound signature
-  reads `unknown` rather than `valid`, and revocation is never fetched. Signing
-  with a certificate from the Windows store is not available yet; import the
-  certificate's `.pfx` instead.
+  deliberately conservative: trust is local configuration only. A certificate
+  chains to something only if you imported it, and revocation information comes
+  from the document itself or from a revocation list you imported — never
+  fetched. With nothing imported a sound signature reads `unknown`, never
+  `valid`; importing the issuer's certificate and its revocation list is what
+  lets a signature read `valid`. Signing with a certificate from the Windows
+  store is not available yet; import the certificate's `.pfx` instead.
 - **Not in v1:** OCR of scanned PDFs (planned as P3.5), EPUB/DOCX, any form of
   sync or cloud.
 

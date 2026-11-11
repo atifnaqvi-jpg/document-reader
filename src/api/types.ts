@@ -542,6 +542,28 @@ export interface SignRequest {
 }
 
 /**
+ * What an import actually stored (P3.2 D-SG4, `import_trust_anchor` / `import_trust_crl`).
+ *
+ * `added` is separate from success on purpose. Importing a certificate the store already holds is
+ * ordinary -- a user re-imports a CA when they are not sure it took -- and it must not read as
+ * either a failure or a second trust decision. The UI says "already trusted" when this is false.
+ */
+export interface TrustImport {
+  /** Distinguished name of the certificate or the CRL's issuer. */
+  subject: string;
+  /** Base64 DER, the row's identity: lets the UI show *which* certificate is trusted. */
+  derBase64: string;
+  /** False when the store already held it. */
+  added: boolean;
+  /**
+   * Unix seconds. The anchor's own expiry, or the CRL's `nextUpdate` when it states one.
+   *
+   * Null only for a CRL that states no `nextUpdate`, which by its own terms never expires.
+   */
+  notAfter: number | null;
+}
+
+/**
  * The signature badge, as `signature_badge` reports it (P3.2 SCOPE-C, D-SG7).
  *
  * `badge` is one of exactly four states. `isGreen` is separate from the string on purpose: the

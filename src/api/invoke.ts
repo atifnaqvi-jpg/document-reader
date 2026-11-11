@@ -22,6 +22,7 @@ import type {
   SignOutcome,
   SignRequest,
   TextEditResult,
+  TrustImport,
   TextRunFragmentRef,
   TextRunId,
 } from "./types";
@@ -435,6 +436,29 @@ export const signDocument = (request: SignRequest) =>
  */
 export const getSignatureBadge = (documentId: string) =>
   invoke<SignatureBadge>("signature_badge", { documentId });
+
+/**
+ * Imports one trust anchor, so signatures from that CA can reach `valid` (P3.2 D-SG4).
+ *
+ * This is the write side of the local-only trust store: without it the `valid` state is
+ * unreachable on any file, because `anchored` requires a path to an anchor the user imported.
+ * The path is a file the user chose; nothing is fetched (D-SG3). DER and PEM are both accepted.
+ *
+ * The call resolves with what was stored, so the caller can say "trusted" or "already trusted"
+ * rather than guessing from the absence of an error.
+ */
+export const importTrustAnchor = (derPath: string) =>
+  invoke<TrustImport>("import_trust_anchor", { derPath });
+
+/**
+ * Imports one certificate revocation list (P3.2 D-SG4).
+ *
+ * Separate from the anchor because it answers a different question: the anchor says which issuer
+ * is checked, the CRL says which of its certificates are revoked. A signature needs both for
+ * `valid`. The CRL's own `nextUpdate` decides when it stops being evidence; nothing is fetched.
+ */
+export const importTrustCrl = (derPath: string) =>
+  invoke<TrustImport>("import_trust_crl", { derPath });
 
 /** Drops a document's remembered password when it closes (P2.4 T10). */
 export const forgetPassword = (path: string) =>

@@ -482,3 +482,232 @@ fn an_imported_crl_is_stored_by_its_own_identity() {
     store::add_crl(&connection, &fixture("crl-empty.der"), now).expect("re-import is a no-op");
     assert!(store::add_crl(&connection, b"not a crl", now).is_err());
 }
+
+// --- The import surface the product actually calls (SCOPE-C unit 4) --------------------------
+//
+// The tests above call `store::add_anchor` directly. That is what the end-to-end test had to do
+// before this unit existed, and it is why `valid` was unreachable in the shipped product: the store
+// worked, and nothing reached it. These tests go through `commands::import_anchor_bytes`, which is
+// the function the `import_trust_anchor` command calls after reading the file, so the path from "a
+// user picks a certificate" to "a signature can now be `valid`" is covered end to end.
+
+use document_reader_lib::commands::{
+    import_anchor_bytes, import_crl_bytes, read_import_file_within,
+};
+
+/// Encode `der` as PEM, so the import tests exercise the shape users actually have.
+fn pem(label: &str, der: &[u8]) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut digits = String::new();
+    for chunk in der.chunks(3) {
+        let byte = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let triple = (u32::from(byte[0]) << 16) | (u32::from(byte[1]) << 8) | u32::from(byte[2]);
+        for position in 0..4 {
+            if position <= chunk.len() {
+                digits.push(ALPHABET[((triple >> (18 - position * 6)) & 0x3F) as usize] as char);
+            } else {
+                digits.push('=');
+            }
+        }
+    }
+    let mut text = format!("-----BEGIN {label}-----\n");
+    for chunk in digits.as_bytes().chunks(64) {
+        text.push_str(&String::from_utf8_lossy(chunk));
+        text.push('\n');
+    }
+    text.push_str(&format!("-----END {label}-----\n"));
+    text.into_bytes()
+}
+
+#[test]
+fn importing_through_the_command_reaches_the_valid_badge_on_a_real_file() {
+    // The whole point of the unit, stated as one test: before it, no shipped path could produce
+    // `valid`, because nothing could put an anchor in the store.
+    let (_dir, written) = signed_with(&leaf_identity(), "reached through the import command");
+    let connection = store_db();
+    let now = 1_800_000_000;
+
+    let before = store::assess(&connection, &written, now)
+        .expect("the file parses")
+        .expect("the file carries a signature");
+    assert_eq!(
+        before.badge,
+        Badge::Unknown,
+        "precondition: with nothing imported, the file cannot be `valid`"
+    );
+
+    // Exactly what the command does, on the bytes it would have read from the chosen file.
+    import_anchor_bytes(&connection, &fixture("ca.der"), now).expect("the anchor imports");
+    import_crl_bytes(&connection, &fixture("crl-empty.der"), now).expect("the CRL imports");
+
+    let after = store::assess(&connection, &written, now)
+        .expect("the file parses")
+        .expect("the file carries a signature");
+    assert_eq!(
+        after.badge,
+        Badge::Valid,
+        "an anchored, clean, intact signature must reach `valid` through the shipped import path"
+    );
+}
+
+#[test]
+fn the_import_command_reports_what_it_stored_and_whether_it_was_new() {
+    let connection = store_db();
+    let now = 1_800_000_000;
+
+    let first = import_anchor_bytes(&connection, &fixture("ca.der"), now).expect("imports");
+    assert!(first.added, "the first import is an addition");
+    assert_eq!(
+        first.subject, "C=GB,O=DocReader Test,CN=DocReader Test CA",
+        "the caller must be able to show which certificate it now trusts"
+    );
+    assert!(!first.der_base64.is_empty(), "the row identity is returned");
+    // The fixture's own `notAfter` (2036-11-07 16:39:40 UTC), read from the certificate with
+    // `openssl x509 -enddate` rather than copied from the README's rounded date.
+    assert_eq!(
+        first.not_after,
+        Some(2_109_688_780),
+        "the returned expiry must be the certificate's own, so a UI can warn before it lapses"
+    );
+
+    // The second import is a no-op, and must say so: "imported" twice for one anchor would let a
+    // user believe they had added a second trust decision.
+    let second = import_anchor_bytes(&connection, &fixture("ca.der"), now).expect("re-import ok");
+    assert!(!second.added, "the same certificate is not a new anchor");
+    assert_eq!(
+        store::list_anchors(&connection).expect("list").len(),
+        1,
+        "and the store must still hold exactly one row"
+    );
+}
+
+#[test]
+fn a_pem_anchor_imports_through_the_command_like_its_der() {
+    // The same file, in the encoding a user is most likely to have from a CA's download page.
+    let connection = store_db();
+    let now = 1_800_000_000;
+    let imported = import_anchor_bytes(&connection, &pem("CERTIFICATE", &fixture("ca.der")), now)
+        .expect("a PEM certificate imports");
+    assert!(imported.added);
+    assert_eq!(
+        imported.der_base64,
+        import_anchor_bytes(&store_db(), &fixture("ca.der"), now)
+            .expect("imports")
+            .der_base64,
+        "PEM and DER of one certificate must produce one identity, or a store would hold both"
+    );
+}
+
+#[test]
+fn an_unreadable_import_is_refused_with_a_code_the_ui_can_read() {
+    let connection = store_db();
+    let now = 1_800_000_000;
+
+    let error = import_anchor_bytes(&connection, b"not a certificate", now)
+        .expect_err("garbage must not import");
+    assert_eq!(
+        error.code(),
+        "CERTIFICATE_UNREADABLE",
+        "the frontend branches on this code; `OTHER` would render as a defect"
+    );
+    assert_eq!(
+        store::list_anchors(&connection).expect("list").len(),
+        0,
+        "and nothing may be written for a file that was refused"
+    );
+
+    let error =
+        import_crl_bytes(&connection, b"not a crl", now).expect_err("garbage must not import");
+    assert_eq!(error.code(), "CERTIFICATE_UNREADABLE");
+}
+
+#[test]
+fn importing_a_crl_reports_the_expiry_that_decides_when_it_stops_being_evidence() {
+    // `nextUpdate`, not `thisUpdate`. A CRL whose reported expiry was the day it was issued would
+    // look permanently fresh to any caller that used this field, which is the field a UI reads to
+    // warn "this revocation list is out of date". The mutant that reported `thisUpdate` survived
+    // the rest of this file, so this test exists to be the one that dies.
+    let connection = store_db();
+    let now = 1_800_000_000;
+
+    let crl = import_crl_bytes(&connection, &fixture("crl-empty.der"), now).expect("CRL imports");
+    assert!(crl.added, "the first import is an addition");
+    assert_eq!(
+        crl.subject, "C=GB,O=DocReader Test,CN=DocReader Test CA",
+        "the issuer is reported so the UI can say whose list this is"
+    );
+
+    // The fixture's own timestamps, read from the file with `openssl crl -lastupdate -nextupdate`.
+    let this_update = 1_794_328_781; // 2026-11-10 16:39:41 UTC
+    let next_update = 2_109_688_781; // 2036-11-07 16:39:41 UTC
+    assert_eq!(
+        crl.not_after,
+        Some(next_update),
+        "the reported expiry must be `nextUpdate`; `thisUpdate` would present a stale list as fresh"
+    );
+    assert_ne!(
+        crl.not_after,
+        Some(this_update),
+        "and it must not be `thisUpdate`"
+    );
+
+    // Re-importing is a no-op, and says so.
+    let again =
+        import_crl_bytes(&connection, &fixture("crl-empty.der"), now).expect("re-import ok");
+    assert!(!again.added, "the same CRL is not a new import");
+}
+
+#[test]
+fn importing_a_crl_that_names_the_signer_suppresses_the_valid_badge() {
+    // The import surface must not be able to launder a revocation: importing the *revoked* list
+    // instead of the clean one has to demote the badge, through the same command a user would use.
+    let (_dir, written) = signed_with(&leaf_identity(), "revoked through the import command");
+    let connection = store_db();
+    let now = 1_800_000_000;
+    import_anchor_bytes(&connection, &fixture("ca.der"), now).expect("anchor imports");
+    import_crl_bytes(&connection, &fixture("crl-revoked.der"), now).expect("revoked CRL imports");
+
+    let assessment = store::assess(&connection, &written, now)
+        .expect("the file parses")
+        .expect("the file carries a signature");
+    assert_ne!(
+        assessment.badge,
+        Badge::Valid,
+        "a revocation imported by the user must never leave a green badge"
+    );
+}
+
+#[test]
+fn an_import_file_over_the_limit_is_refused_with_its_size_named() {
+    // The command's own guard, not the store's: a user who picks a disk image or a bundle archive by
+    // mistake must get a sentence rather than a stalled command and a large allocation. The limit is
+    // supplied here so the test does not need to create a 16 MiB file to reach the branch.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("bundle.pem");
+    let body = b"not really a bundle, but large enough for the limit below";
+    std::fs::write(&path, body).expect("write");
+    let path = path.to_str().expect("utf-8 path");
+
+    let error = read_import_file_within(path, 8).expect_err("must refuse");
+    let text = format!("{error}");
+    assert!(text.contains("larger than the 8 byte limit"), "got {text}");
+    assert!(
+        text.contains(&format!("{} bytes", body.len())),
+        "the refusal must name the size so the user can see it was the wrong file; got {text}"
+    );
+
+    // And a file under the limit is read, not refused: the guard must not reject everything.
+    assert_eq!(
+        read_import_file_within(path, 1024)
+            .expect("within the limit")
+            .len(),
+        body.len()
+    );
+    // A missing file is a read failure, not a size failure.
+    let missing = read_import_file_within("/nonexistent/ca.der", 1024).expect_err("must fail");
+    assert!(format!("{missing}").contains("could not read"));
+}

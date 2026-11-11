@@ -277,8 +277,19 @@ jobs:
           # 897 for `tests/certification_gate.rs`: +3, PDFium-independent, so the ignored pin above
           # stays at 106. Re-measured with the PDFium path unset: 897 passed. Then 898 for the
           # inverse direction of the same guard, so a shrunk GOVERNED list fails too.
-          if [ "$passed" -lt 898 ]; then
-            echo "::error::only $passed tests ran; 898 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # 913 for D-SG4's trust import: +15, all PDFium-independent, so the ignored pin above
+          # stays at 106. Eight unit tests in `editor/signature/trust.rs` and seven integration
+          # tests in `tests/trust_store.rs`, including the one that reaches the `valid` badge
+          # through the shipped command on a real file. Re-measured with the PDFium path unset:
+          # 913 passed, and 1019 when the ignored tests are included as well.
+          #
+          # (That last number is described rather than spelled out: this step must not contain the
+          # ignored-including flag even in prose, and the guard
+          # `the_linux_job_does_not_force_pdfium_tests_without_a_library` enforces that as a
+          # substring check over the whole step. It caught this comment on the first run.)
+          if [ "$passed" -lt 913 ]; then
+            echo "::error::only $passed tests ran; 913 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

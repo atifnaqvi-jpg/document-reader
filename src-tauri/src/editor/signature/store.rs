@@ -143,26 +143,79 @@ fn store_anchor_count(connection: &Connection) -> Result<i64, AppError> {
     Ok(connection.query_row("SELECT count(*) FROM TrustAnchor", [], |row| row.get(0))?)
 }
 
+/// One imported CRL as the UI lists it.
+///
+/// The same shape as [`AnchorRow`] for the same reason: an import reports what it stored, not just
+/// that it stored something, so a table can render the result without a second query.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrlRow {
+    /// Base64 of the DER, which is also the row's identity.
+    pub der_base64: String,
+    /// Issuer distinguished name, as the CRL states it.
+    pub issuer: String,
+    /// The CRL's `thisUpdate`, in unix seconds.
+    pub this_update: i64,
+    /// The CRL's `nextUpdate`; `None` when it states none, which means it never expires by its own
+    /// terms and `revocation` treats it accordingly.
+    pub next_update: Option<i64>,
+}
+
 /// Store one CRL the user imported.
-pub fn add_crl(connection: &Connection, der: &[u8], now_unix: i64) -> Result<(), AppError> {
+///
+/// Parsed before storage for the same reason [`add_anchor`] parses: an unreadable list refused here
+/// is a sentence the user can act on, rather than a row that quietly contributes no evidence and
+/// leaves a badge `unknown` forever.
+pub fn add_crl(connection: &Connection, der: &[u8], now_unix: i64) -> Result<CrlRow, AppError> {
     use x509_cert::der::Decode;
 
     let list: x509_cert::crl::CertificateList = x509_cert::crl::CertificateList::from_der(der)
         .map_err(|error| AppError::CertificateUnreadable(format!("not a CRL: {error}")))?;
     let tbs = &list.tbs_cert_list;
+    let row = CrlRow {
+        der_base64: base64_encode(der),
+        issuer: tbs.issuer.to_string(),
+        this_update: tbs.this_update.to_unix_duration().as_secs() as i64,
+        next_update: tbs
+            .next_update
+            .map(|time| time.to_unix_duration().as_secs() as i64),
+    };
     connection.execute(
         "INSERT INTO TrustCrl (der, issuer, this_update, next_update, added_at)
          VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(der) DO NOTHING",
         params![
-            base64_encode(der),
-            tbs.issuer.to_string(),
-            tbs.this_update.to_unix_duration().as_secs() as i64,
-            tbs.next_update
-                .map(|time| time.to_unix_duration().as_secs() as i64),
+            row.der_base64,
+            row.issuer,
+            row.this_update,
+            row.next_update,
             now_unix,
         ],
     )?;
-    Ok(())
+    Ok(row)
+}
+
+/// Whether one CRL is already imported, by its base64 DER.
+///
+/// Needed by the command so an import can report `added: false` for a list that was already there.
+/// The insert is idempotent, so without this a repeat import would be indistinguishable from a new
+/// one.
+pub fn has_crl(connection: &Connection, der_base64: &str) -> Result<bool, AppError> {
+    let found: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM TrustCrl WHERE der = ?1",
+            params![der_base64],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// The base64 DER of one certificate, which is its identity in the store.
+///
+/// Exposed so a caller can ask [`has_anchor`] what it is about to insert without re-deriving the
+/// encoding — and, more importantly, without this module's base64 being duplicated in `commands`.
+pub fn anchor_identity(der: &[u8]) -> String {
+    base64_encode(der)
 }
 
 /// Every imported CRL's DER.

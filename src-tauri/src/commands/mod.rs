@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::Connection;
 use tauri::{AppHandle, State};
 
 use crate::db::{annotations, app_state, bookmarks, documents, search, Db};
@@ -1648,6 +1649,148 @@ pub async fn sign_document(
 pub fn forget_password(passwords: State<'_, PasswordStore>, path: String) -> Result<(), AppError> {
     passwords.forget(&path);
     Ok(())
+}
+
+/// What an import actually stored (P3.2 D-SG4).
+///
+/// Returned rather than a bare `Ok(())` because "the import succeeded" and "the anchor is now in the
+/// store" are different claims, and a UI that showed only the first would be able to report success
+/// for an import that changed nothing. `added` is false when the certificate was already present —
+/// importing the same CA twice is ordinary, and it must not read as a failure or as a new trust
+/// decision.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustImport {
+    /// Distinguished name of what was stored, as the store renders it.
+    pub subject: String,
+    /// Base64 DER, the row's identity. Lets the UI show *which* certificate it trusts.
+    pub der_base64: String,
+    /// False when this certificate was already imported.
+    pub added: bool,
+    /// Unix seconds. The anchor's own expiry, or the CRL's `nextUpdate` when it states one.
+    pub not_after: Option<i64>,
+}
+
+/// How much of the user's disk an import will read, before deciding it is not a certificate.
+///
+/// A certificate is kilobytes and a CRL is usually small; anything past a few megabytes is a
+/// mistake — a disk image, a bundle archive, the wrong file — and reading it to find out would stall
+/// the command and buffer whatever it was. The cap makes the failure immediate and names the reason.
+const MAX_TRUST_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a user-chosen file for import, refusing anything implausibly large.
+///
+/// The error names the size and the limit rather than saying "too large": the user picked the file,
+/// and telling them how big it was is what lets them see it was the wrong one.
+pub fn read_import_file(path: &str) -> Result<Vec<u8>, AppError> {
+    read_import_file_within(path, MAX_TRUST_IMPORT_BYTES)
+}
+
+/// [`read_import_file`] with the limit supplied, so the guard can be exercised without a 16 MiB file.
+///
+/// The limit is a parameter here rather than a constant because a test that had to allocate the real
+/// ceiling would be testing the filesystem, and a test that could not reach this code at all would
+/// leave the guard unverified -- which is how a size cap ends up removed by a later refactor with
+/// nothing to notice.
+pub fn read_import_file_within(path: &str, limit: u64) -> Result<Vec<u8>, AppError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
+    if metadata.len() > limit {
+        return Err(AppError::Other(format!(
+            "{path} is {} bytes, which is larger than the {limit} byte limit for a certificate or \
+             revocation list; this does not look like the file you meant to import",
+            metadata.len(),
+        )));
+    }
+    std::fs::read(path).map_err(|error| AppError::Other(format!("could not read {path}: {error}")))
+}
+
+/// Import one trust anchor's bytes into `connection` (P3.2 D-SG4).
+///
+/// Split from the command the way [`badge_for`] is split from `signature_badge`: the command is
+/// file I/O and a lock, and everything that decides anything is here, where a test can run it
+/// against a real database without a Tauri handle. A guard that could only grep the command's source
+/// would not prove the store changed, and "the command exists" is not the claim that matters.
+pub fn import_anchor_bytes(
+    connection: &Connection,
+    bytes: &[u8],
+    now_unix: i64,
+) -> Result<TrustImport, AppError> {
+    let der = crate::editor::signature::trust::decode_certificate(bytes)
+        .map_err(|error| AppError::CertificateUnreadable(error.to_string()))?;
+    let identity = crate::editor::signature::store::anchor_identity(&der);
+    // Asked before the insert so `added` reports what happened rather than what was requested. The
+    // insert is idempotent (`ON CONFLICT DO NOTHING`), so without this check a second import would
+    // return a row and look like a new anchor.
+    let already = crate::editor::signature::store::has_anchor(connection, &identity)?;
+    let row = crate::editor::signature::store::add_anchor(connection, &der, now_unix)?;
+    Ok(TrustImport {
+        subject: row.subject,
+        der_base64: row.der_base64,
+        added: !already,
+        not_after: Some(row.not_after),
+    })
+}
+
+/// Import one CRL's bytes into `connection` (P3.2 D-SG4).
+pub fn import_crl_bytes(
+    connection: &Connection,
+    bytes: &[u8],
+    now_unix: i64,
+) -> Result<TrustImport, AppError> {
+    let der = crate::editor::signature::trust::decode_crl(bytes)
+        .map_err(|error| AppError::CertificateUnreadable(error.to_string()))?;
+    let identity = crate::editor::signature::store::anchor_identity(&der);
+    let already = crate::editor::signature::store::has_crl(connection, &identity)?;
+    let row = crate::editor::signature::store::add_crl(connection, &der, now_unix)?;
+    Ok(TrustImport {
+        subject: row.issuer,
+        der_base64: row.der_base64,
+        added: !already,
+        // The CRL's own `nextUpdate` is the expiry that matters: past it the list is stale, and
+        // `revocation` treats a stale clean list as no evidence rather than as a clean bill.
+        not_after: row.next_update,
+    })
+}
+
+/// Import one trust anchor, so a signature from that CA can reach `valid` (P3.2 D-SG4).
+///
+/// **Why this command exists.** `store::add_anchor` was written, tested and reachable from nothing:
+/// no command, no UI. The consequence was not cosmetic — with no way to import an anchor, the
+/// `valid` badge was unreachable in the shipped product on every file, because `anchored` requires a
+/// path to an anchor the user imported. The end-to-end test could produce `valid` only by calling the
+/// store directly, which is exactly the gap `tests/command_registration.rs` was written to stop.
+///
+/// DER and PEM are both accepted (`trust::decode_certificate`), because the file a user has is PEM
+/// about as often as DER. The parse happens before anything is stored, so an unreadable file is a
+/// sentence the user can act on rather than a row the badge later has to apologise for.
+///
+/// **This is a trust decision, and it is the user's alone.** D-SG4 puts the store under their
+/// control deliberately; nothing here fetches a CA, validates a chain to a system root, or decides
+/// the certificate is worth trusting. Importing an anchor is the user saying "treat signatures from
+/// this issuer as mine to verify", and that is the entire meaning of the act.
+#[tauri::command]
+pub fn import_trust_anchor(db: State<'_, Db>, der_path: String) -> Result<TrustImport, AppError> {
+    let bytes = read_import_file(&der_path)?;
+    let now_unix = now();
+    db.with(|connection| import_anchor_bytes(connection, &bytes, now_unix))
+}
+
+/// Import one certificate revocation list (P3.2 D-SG4).
+///
+/// Separate from the anchor import because they answer different questions: an anchor says "this
+/// issuer is one I check", a CRL says "and here is its current answer about which of its
+/// certificates are revoked". A signature needs both to reach `valid` — see `store::assess`, which
+/// asks for a clean revocation answer before `badge::decide` will go green.
+///
+/// DER and PEM are both accepted. Nothing is fetched: D-SG3 keeps the document's hash on the
+/// machine, and the same reasoning applies to revocation — a CRL is imported from a file the user
+/// chose, never downloaded, and its `nextUpdate` decides whether it is still evidence.
+#[tauri::command]
+pub fn import_trust_crl(db: State<'_, Db>, der_path: String) -> Result<TrustImport, AppError> {
+    let bytes = read_import_file(&der_path)?;
+    let now_unix = now();
+    db.with(|connection| import_crl_bytes(connection, &bytes, now_unix))
 }
 
 #[cfg(test)]

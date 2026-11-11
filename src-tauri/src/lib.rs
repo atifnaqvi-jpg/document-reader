@@ -101,6 +101,8 @@ pub fn run() {
             commands::signature_badge,
             commands::list_signing_certificates,
             commands::sign_document,
+            commands::import_trust_anchor,
+            commands::import_trust_crl,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

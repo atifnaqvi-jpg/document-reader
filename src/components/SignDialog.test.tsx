@@ -236,3 +236,100 @@ describe("after signing", () => {
     expect(alert.textContent).toContain("the document is password-protected");
   });
 });
+
+describe("importing trust from the sign dialog", () => {
+  const imported = (overrides: Record<string, unknown> = {}) => ({
+    subject: "CN=DocReader Test CA",
+    derBase64: "MIID",
+    added: true,
+    notAfter: 2109688780,
+    ...overrides,
+  });
+
+  /** Open the dialog with an empty certificate store, which no `sign_document` path needs. */
+  async function openDialog(onSigned = () => {}) {
+    backend = installFakeBackend();
+    backend.on("list_signing_certificates", () => ({ certificates: [], skipped: [] }));
+    render(<SignAction documentId="doc-1" signedTick={0} onSigned={onSigned} />);
+    await userEvent.click(screen.getByRole("button", { name: "Sign…" }));
+    await screen.findByText(/Trust/);
+    return backend;
+  }
+
+  it("sends the chosen path to import_trust_anchor and reports the subject", async () => {
+    const fake = await openDialog();
+    fake.on("import_trust_anchor", () => imported());
+    pickerReturns("/tmp/ca.der");
+
+    await userEvent.click(screen.getByRole("button", { name: /Import certificate/ }));
+
+    expect(await screen.findByText(/Certificate trusted: CN=DocReader Test CA/)).toBeTruthy();
+    // The argument the Rust command declares is `derPath`; a camelCase mismatch here would fail
+    // only at runtime, which is why this asserts on the wire rather than on the wrapper's signature.
+    expect(fake.callsTo("import_trust_anchor")).toEqual([{ derPath: "/tmp/ca.der" }]);
+  });
+
+  it("sends the CRL to its own command, not to the anchor one", async () => {
+    const fake = await openDialog();
+    fake.on("import_trust_crl", () => imported({ subject: "CN=DocReader Test CA (CRL)" }));
+    pickerReturns("/tmp/crl-empty.der");
+
+    await userEvent.click(screen.getByRole("button", { name: /Import revocation list/ }));
+
+    expect(await screen.findByText(/Revocation list trusted/)).toBeTruthy();
+    expect(fake.callsTo("import_trust_crl")).toEqual([{ derPath: "/tmp/crl-empty.der" }]);
+    expect(fake.callsTo("import_trust_anchor")).toEqual([]);
+  });
+
+  it("says an already-trusted certificate was already trusted, not that it was trusted again", async () => {
+    // `added: false` is the ordinary repeat import. Reporting it as a fresh trust decision would
+    // let a user believe they had made two, when they made one.
+    const fake = await openDialog();
+    fake.on("import_trust_anchor", () => imported({ added: false }));
+    pickerReturns("/tmp/ca.der");
+
+    await userEvent.click(screen.getByRole("button", { name: /Import certificate/ }));
+
+    expect(await screen.findByText(/was already trusted; nothing changed/)).toBeTruthy();
+    expect(screen.queryByText(/^Certificate trusted/)).toBeNull();
+  });
+
+  it("tells the badge to re-read after an import, because the store is one of its inputs", async () => {
+    // Without this the badge keeps showing `unknown` after the very action that could make it
+    // `valid` -- correct when it was read, and stale by the time the user looks at it.
+    const onSigned = vi.fn();
+    const fake = await openDialog(onSigned);
+    fake.on("import_trust_anchor", () => imported());
+    pickerReturns("/tmp/ca.der");
+
+    await userEvent.click(screen.getByRole("button", { name: /Import certificate/ }));
+    await screen.findByText(/Certificate trusted/);
+
+    await waitFor(() => expect(onSigned).toHaveBeenCalled());
+  });
+
+  it("does not claim a trust change when the user cancels the file picker", async () => {
+    const onSigned = vi.fn();
+    await openDialog(onSigned);
+    picked.path = null;
+
+    await userEvent.click(screen.getByRole("button", { name: /Import certificate/ }));
+
+    // Nothing was imported, so nothing may be reported and the badge must not be told to re-read.
+    await waitFor(() => expect(screen.queryByText(/already trusted/)).toBeNull());
+    expect(onSigned).not.toHaveBeenCalled();
+  });
+
+  it("shows an unreadable file as the backend's sentence, not as a silent failure", async () => {
+    const fake = await openDialog();
+    fake.on("import_trust_anchor", () => {
+      throw { code: "CERTIFICATE_UNREADABLE", message: "this file is not a certificate" };
+    });
+    pickerReturns("/tmp/notes.txt");
+
+    await userEvent.click(screen.getByRole("button", { name: /Import certificate/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("this file is not a certificate");
+  });
+});

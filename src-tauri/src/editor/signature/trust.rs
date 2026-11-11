@@ -309,6 +309,80 @@ pub fn parse_all(ders: &[Vec<u8>]) -> (Vec<CertFacts>, Vec<TrustError>) {
     (parsed, failed)
 }
 
+/// Decode one imported certificate, accepting either DER or PEM.
+///
+/// **Why both.** A user importing an anchor has almost always been handed a `.crt`, `.cer` or
+/// `.pem` file, and those are PEM about as often as they are DER — the file extension does not
+/// decide it, and Windows' own certificate export offers both under the same `.cer`. Accepting only
+/// DER would refuse the majority of real CA downloads with "could not be read", which reads as "your
+/// certificate is broken" rather than "this build wants the other encoding". The conversion is
+/// lossless in both directions, so there is no security consequence: the DER that reaches
+/// [`CertFacts::parse`] is the DER the user's certificate actually was.
+///
+/// A PEM file may carry several blocks, so a bundle is refused rather than silently truncated to its
+/// first certificate: importing "the file" and getting one of five anchors is the silent-narrowing
+/// failure this codebase keeps finding. The caller imports each certificate deliberately.
+pub fn decode_certificate(input: &[u8]) -> Result<Vec<u8>, TrustError> {
+    if let Some(body) = pem_body(input) {
+        use x509_cert::der::Encode;
+        let certificates = x509_cert::Certificate::load_pem_chain(body)
+            .map_err(|error| TrustError::Unreadable(format!("not a PEM certificate: {error}")))?;
+        return match certificates.as_slice() {
+            [only] => Ok(only.to_der().map_err(|error| {
+                TrustError::Unreadable(format!("re-encoding the certificate failed: {error}"))
+            })?),
+            [] => Err(TrustError::Unreadable(
+                "the file contains no certificate".to_string(),
+            )),
+            many => Err(TrustError::Unreadable(format!(
+                "the file carries {} certificates; import one at a time so you can see what you \
+                 are trusting",
+                many.len()
+            ))),
+        };
+    }
+    Ok(input.to_vec())
+}
+
+/// Decode one imported CRL, accepting either DER or PEM.
+///
+/// Same reasoning as [`decode_certificate`]. `openssl crl -outform PEM` and most CA download pages
+/// produce PEM, so a store that only took DER would make revocation data harder to import than the
+/// certificate it is about.
+pub fn decode_crl(input: &[u8]) -> Result<Vec<u8>, TrustError> {
+    if let Some(body) = pem_body(input) {
+        use x509_cert::der::{DecodePem, Encode};
+        let list: x509_cert::crl::CertificateList = x509_cert::crl::CertificateList::from_pem(body)
+            .map_err(|error| {
+                TrustError::CrlUnreadable(format!("not a PEM certificate revocation list: {error}"))
+            })?;
+        return list.to_der().map_err(|error| {
+            TrustError::CrlUnreadable(format!("re-encoding the CRL failed: {error}"))
+        });
+    }
+    Ok(input.to_vec())
+}
+
+/// The PEM text when `input` is PEM, with any BOM and leading whitespace already stripped.
+///
+/// Returns the *sliced* bytes rather than a boolean because the parser rejects the BOM and leading
+/// blank lines this function deliberately tolerates: a `bool` here left the caller handing the
+/// original bytes to `load_pem_chain`, which failed on the very input the check accepted. Detecting
+/// and not normalising is the same as not detecting.
+///
+/// Only the preamble is inspected; whatever it accepts is fully parsed afterwards, so a file that
+/// starts `-----BEGIN` and is otherwise garbage still fails with a parse error rather than being
+/// passed through as DER.
+fn pem_body(input: &[u8]) -> Option<&[u8]> {
+    const BEGIN: &[u8] = b"-----BEGIN";
+    let trimmed = input.strip_prefix(b"\xef\xbb\xbf").unwrap_or(input);
+    let start = trimmed
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let body = &trimmed[start..];
+    body.starts_with(BEGIN).then_some(body)
+}
+
 /// Deduplicate a set of certificates by their DER, preserving the first-seen order.
 ///
 /// Importing the same anchor twice is an ordinary thing to do, and a duplicate would otherwise let
@@ -822,5 +896,146 @@ mod fixture_tests {
             crl_evidence(b"not a crl at all", &leaf, 1_800_000_000),
             Err(TrustError::CrlUnreadable(_))
         ));
+    }
+
+    // --- Import decoders (D-SG4 write surface) ------------------------------------------------
+    //
+    // The PEM text is produced from the committed DER rather than typed into the test, so a
+    // regenerated fixture cannot leave a stale PEM string behind that this test would keep
+    // accepting.
+
+    /// Wrap DER bytes in a PEM block with `label`, 64 characters to a line per RFC 7468.
+    ///
+    /// The base64 is local to the test on purpose: `store`'s encoder is private, and reaching for it
+    /// would mean widening that module's surface for a test. Deriving the PEM from the committed DER
+    /// is the part that matters — a hand-typed PEM string would go stale when a fixture is
+    /// regenerated but this test would keep accepting it.
+    fn pem(label: &str, der: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut digits = String::new();
+        for chunk in der.chunks(3) {
+            let byte = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let triple =
+                (u32::from(byte[0]) << 16) | (u32::from(byte[1]) << 8) | u32::from(byte[2]);
+            for position in 0..4 {
+                if position <= chunk.len() {
+                    digits
+                        .push(ALPHABET[((triple >> (18 - position * 6)) & 0x3F) as usize] as char);
+                } else {
+                    digits.push('=');
+                }
+            }
+        }
+        let mut text = format!("-----BEGIN {label}-----\n");
+        for chunk in digits.as_bytes().chunks(64) {
+            text.push_str(&String::from_utf8_lossy(chunk));
+            text.push('\n');
+        }
+        text.push_str(&format!("-----END {label}-----\n"));
+        text
+    }
+
+    #[test]
+    fn a_der_certificate_passes_through_the_decoder_unchanged() {
+        let der = fixture("ca.der");
+        assert_eq!(
+            decode_certificate(&der).expect("DER is accepted"),
+            der,
+            "a DER import must reach the store as the exact bytes the user supplied"
+        );
+    }
+
+    #[test]
+    fn a_pem_certificate_decodes_to_the_same_bytes_as_its_der() {
+        let der = fixture("ca.der");
+        let text = pem("CERTIFICATE", &der);
+        let decoded = decode_certificate(text.as_bytes()).expect("PEM is accepted");
+        assert_eq!(
+            decoded, der,
+            "PEM and DER of one certificate must import identically, or the two encodings would \
+             create two different anchors for the same key"
+        );
+        // The precondition, so a fixture that fails to parse fails here rather than by accident.
+        assert!(CertFacts::parse(&decoded).is_ok());
+    }
+
+    #[test]
+    fn a_pem_certificate_with_a_bom_and_leading_blank_lines_is_still_recognised() {
+        let der = fixture("ca.der");
+        let mut bytes = b"\xef\xbb\xbf\n\n  ".to_vec();
+        bytes.extend_from_slice(pem("CERTIFICATE", &der).as_bytes());
+        assert_eq!(
+            decode_certificate(&bytes).expect("BOM and whitespace are tolerated"),
+            der,
+            "a file saved from Notepad or a browser download must not look corrupt"
+        );
+    }
+
+    #[test]
+    fn a_pem_bundle_is_refused_rather_than_narrowed_to_its_first_certificate() {
+        let bundle = format!(
+            "{}{}",
+            pem("CERTIFICATE", &fixture("ca.der")),
+            pem("CERTIFICATE", &fixture("other-ca.der"))
+        );
+        let error =
+            decode_certificate(bundle.as_bytes()).expect_err("two certificates is a bundle");
+        let message = error.to_string();
+        assert!(
+            message.contains('2') && message.contains("one at a time"),
+            "the refusal must say how many certificates the file carries and what to do; got \
+             {message:?}"
+        );
+    }
+
+    #[test]
+    fn a_pem_chain_of_one_is_accepted_and_a_pem_of_the_wrong_label_is_not() {
+        // The positive control for the bundle rule: one block is the ordinary case.
+        assert!(decode_certificate(pem("CERTIFICATE", &fixture("leaf.der")).as_bytes()).is_ok());
+        // A CRL handed to the certificate decoder must be refused, not parsed as a certificate.
+        let crl_pem = pem("X509 CRL", &fixture("crl-empty.der"));
+        let error = decode_certificate(crl_pem.as_bytes())
+            .expect_err("a CRL is not a certificate, whatever it is wrapped in");
+        assert!(
+            !error.to_string().is_empty(),
+            "the refusal must be explained, not empty"
+        );
+    }
+
+    #[test]
+    fn a_der_crl_passes_through_and_a_pem_crl_decodes_to_the_same_bytes() {
+        let der = fixture("crl-empty.der");
+        assert_eq!(decode_crl(&der).expect("DER is accepted"), der);
+
+        let decoded = decode_crl(pem("X509 CRL", &der).as_bytes()).expect("PEM CRL is accepted");
+        assert_eq!(
+            decoded, der,
+            "a PEM CRL must import as the same bytes as its DER form"
+        );
+    }
+
+    #[test]
+    fn a_certificate_handed_to_the_crl_decoder_is_refused() {
+        let error = decode_crl(pem("CERTIFICATE", &fixture("ca.der")).as_bytes())
+            .expect_err("a certificate is not a revocation list");
+        assert!(
+            matches!(error, TrustError::CrlUnreadable(_)),
+            "the wrong-kind refusal must be the CRL variant so the command maps it correctly; got \
+             {error:?}"
+        );
+    }
+
+    #[test]
+    fn empty_input_is_not_mistaken_for_pem_or_accepted_as_a_certificate() {
+        // Both halves matter: the PEM check must not panic on nothing, and the store must not end
+        // up with an empty anchor row if a caller passes an empty read.
+        assert_eq!(pem_body(b""), None);
+        assert_eq!(pem_body(b"   \n\t"), None);
+        assert!(CertFacts::parse(&decode_certificate(b"").expect("passes through")).is_err());
     }
 }

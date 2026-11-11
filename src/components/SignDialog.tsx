@@ -25,8 +25,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import type { SigningCertificates, SigningCertificate } from "../api/types";
-import { listSigningCertificates, signDocument, toAppError } from "../api/invoke";
+import type { SigningCertificates, SigningCertificate, TrustImport } from "../api/types";
+import {
+  importTrustAnchor,
+  importTrustCrl,
+  listSigningCertificates,
+  signDocument,
+  toAppError,
+} from "../api/invoke";
 
 /** Certification levels, with the restriction each one imposes (D-SG6, ISO 32000-1 12.8.2.2). */
 export const CERTIFICATION_LEVELS = [
@@ -58,9 +64,18 @@ export function SignDialog({
   documentId,
   onClose,
   onSigned,
+  onTrustChanged,
 }: {
   documentId: string;
   onClose: () => void;
+  /**
+   * Called when the trust store changed, so the badge re-reads it.
+   *
+   * Separate from `onSigned` because nothing was signed: the badge's inputs changed, not the file.
+   * Sharing one callback would make "a file was written" and "a certificate was imported" read the
+   * same at every call site, and the two have different consequences.
+   */
+  onTrustChanged: () => void;
   /** Called once a file has actually been written, so the badge can re-read it. */
   onSigned: () => void;
 }) {
@@ -252,6 +267,10 @@ export function SignDialog({
         <input type="text" value={location} onChange={(event) => setLocation(event.target.value)} />
       </label>
 
+      {/* Both imports sit here rather than on a separate settings screen: they are the answer to
+          "why is this signature unknown?", which is the question this dialog exists to answer. */}
+      <TrustImportSection onChanged={onTrustChanged} />
+
       {result.kind === "signed" ? (
         <p className="sign-dialog__ok" role="status">
           Signed. The new file is <span className="path">{result.path}</span>.
@@ -279,6 +298,90 @@ export function SignDialog({
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * Import a trust anchor or a CRL, which is what makes `valid` reachable at all (P3.2 D-SG4).
+ *
+ * **Why this belongs in the Sign dialog.** `valid` requires a verified path to an anchor *the user
+ * imported*, so before this surface existed the strongest badge the product could ever show was
+ * `unknown`, on every file, no matter how clean the signature was. The fix is not a new screen: the
+ * user is already here, looking at whether their signature can be checked, and the answer to "why is
+ * this unknown?" is "because nothing has been imported". Putting the import next to the question it
+ * answers is what makes the badge reachable without teaching anyone a second workflow.
+ *
+ * **Both files are needed, and the wording says so.** An anchor says which issuer to check; a CRL is
+ * its current answer about revocations. Importing only the anchor leaves the revocation check
+ * unanswerable, which reads as `unknown` rather than as `valid` -- correct, and confusing unless
+ * said out loud, which is why both buttons sit under one heading.
+ *
+ * **The outcome is reported, not assumed.** `added: false` is not an error: re-importing a
+ * certificate the store already holds is ordinary, and saying "already trusted" is different from
+ * saying "trusted" for a second time. Collapsing the two would let a user believe they had made two
+ * trust decisions when they made one.
+ */
+function TrustImportSection({ onChanged }: { onChanged: () => void }) {
+  const [busy, setBusy] = useState<null | "anchor" | "crl">(null);
+  const [outcome, setOutcome] = useState<null | { kind: "ok" | "error"; message: string }>(null);
+
+  const describe = (what: string, imported: TrustImport) =>
+    imported.added
+      ? `${what} trusted: ${imported.subject}`
+      : `${imported.subject} was already trusted; nothing changed`;
+
+  const pick = useCallback(
+    async (which: "anchor" | "crl") => {
+      setBusy(which);
+      setOutcome(null);
+      try {
+        const picked = await openFileDialog({
+          multiple: false,
+          directory: false,
+          // DER and PEM are both accepted by the backend; filtering to one would make the other
+          // look like an unsupported file for a reason the user cannot see.
+          filters: [{ name: which === "anchor" ? "Certificate" : "Revocation list", extensions: ["der", "cer", "crt", "pem", "crl"] }],
+        });
+        if (typeof picked !== "string") return;
+        const imported =
+          which === "anchor" ? await importTrustAnchor(picked) : await importTrustCrl(picked);
+        setOutcome({ kind: "ok", message: describe(which === "anchor" ? "Certificate" : "Revocation list", imported) });
+        // The badge depends on this store, so a successful import has to re-read it -- otherwise the
+        // badge keeps saying `unknown` after the very action that could make it `valid`.
+        onChanged();
+      } catch (error: unknown) {
+        setOutcome({ kind: "error", message: toAppError(error).message });
+      } finally {
+        setBusy(null);
+      }
+    },
+    [onChanged],
+  );
+
+  return (
+    <fieldset className="sign-dialog__trust">
+      <legend>Trust</legend>
+      <p className="sign-dialog__hint">
+        A signature can only be shown as valid against an issuer you have chosen to trust, and its
+        revocation list. Both are files you supply; nothing is downloaded.
+      </p>
+      <div className="sign-dialog__trust-actions">
+        <button type="button" onClick={() => void pick("anchor")} disabled={busy !== null}>
+          {busy === "anchor" ? "Importing…" : "Import certificate…"}
+        </button>
+        <button type="button" onClick={() => void pick("crl")} disabled={busy !== null}>
+          {busy === "crl" ? "Importing…" : "Import revocation list…"}
+        </button>
+      </div>
+      {outcome ? (
+        <p
+          className={outcome.kind === "ok" ? "sign-dialog__ok" : "sign-dialog__error"}
+          role={outcome.kind === "ok" ? "status" : "alert"}
+        >
+          {outcome.message}
+        </p>
+      ) : null}
+    </fieldset>
   );
 }
 
@@ -313,6 +416,9 @@ export function SignAction({
             setOpen(false);
             onSigned();
           }}
+          // The dialog stays open: importing a certificate is usually not the last thing a user
+          // wants to do here, and closing on success would hide the badge they just made reachable.
+          onTrustChanged={onSigned}
         />
       ) : null}
     </span>

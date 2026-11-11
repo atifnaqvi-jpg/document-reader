@@ -174,10 +174,20 @@ fi
 # constant) and clippy said so, which is the same "guard that cannot fail" defect this file keeps
 # finding in production code.
 # Measured, not incremented: 898 passed with PDFIUM_LIBRARY_PATH unset, 1004 with --include-ignored.
-# Now 898/106 and 1004/0.
-PIN_PLAIN_PASSED=898
+#
+# 2026-11-11 (D-SG4 trust import): +15, all PDFium-independent, so both shapes move by fifteen and
+# the ignored count stays at 106. Eight unit tests in `editor/signature/trust.rs` (PEM<->DER
+# passthrough both ways, a PEM bundle refused rather than narrowed to its first certificate, CRL
+# decode, a certificate refused by the CRL decoder, and empty input not mistaken for PEM) and seven
+# in `tests/trust_store.rs` (the import command reaching `valid` on a real file, what it reports as
+# stored vs new, a PEM anchor taking the same path as DER, an unreadable import refused with a code
+# the UI can read, a CRL reporting the `nextUpdate` that decides when it stops being evidence, a CRL
+# naming the signer suppressing `valid`, and the size cap refusing with the size named).
+# Measured, not incremented: 913 passed with PDFIUM_LIBRARY_PATH unset, 1019 with --include-ignored.
+# Now 913/106 and 1019/0.
+PIN_PLAIN_PASSED=913
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=1004
+PIN_IGNORED_PASSED=1019
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
