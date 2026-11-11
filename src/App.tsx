@@ -14,6 +14,7 @@ import { Toolbar } from "./components/Toolbar";
 import { ViewerPane } from "./components/ViewerPane";
 import { SignatureBadgeChip } from "./components/SignatureBadge";
 import { SignAction } from "./components/SignDialog";
+import { ProtectAction } from "./components/ProtectDialog";
 import type { JumpRequest, ViewerHandle } from "./components/ViewerPane";
 import type { NavigationTarget } from "./components/Menu";
 import { EditorProvider } from "./state/EditorProvider";
@@ -195,6 +196,11 @@ function Workspace() {
             {/* The badge reports; this is how a signature gets there in the first place. Placed
                 beside the badge so the state and the action that produces it are found together,
                 and outside any pane for the same reason the badge is. */}
+            {/* SCOPE-A's write path had no UI at all: `protect_document` was registered, tested and
+                unreachable. Placed beside Sign for the same reason Sign sits beside the badge --
+                the file-level actions are found together, and both write a sibling copy rather than
+                touching the original. */}
+            {selected && <ProtectAction documentId={selected.id} />}
             {selected && (
               <SignAction
                 documentId={selected.id}

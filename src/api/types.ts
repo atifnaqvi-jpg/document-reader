@@ -577,6 +577,31 @@ export interface TrustCrlView {
   nextUpdate: number | null;
 }
 
+/**
+ * Every `/P` bit the user can choose, one field each (P3.2 D-PR3).
+ *
+ * A struct of booleans rather than a bitflags value because the dialog must show each bit's state.
+ * lopdf's `Permissions::default()` is `all()`, so any representation that can be "partly set" starts
+ * by granting everything -- which is how a document ends up looking restricted while granting it all.
+ */
+export interface PermissionsChoice {
+  print: boolean;
+  modify: boolean;
+  copy: boolean;
+  annotate: boolean;
+  fillForms: boolean;
+  assemble: boolean;
+  printHighQuality: boolean;
+}
+
+/** What a successful protect produced (P3.2 D-PR4). */
+export interface ProtectOutcome {
+  /** The sibling copy's full path -- `"{stem} (protected).pdf"`, never the original. */
+  path: string;
+  /** Page count of the written file, as read back during verification. */
+  pages: number;
+}
+
 export interface TrustImport {
   /** Distinguished name of the certificate or the CRL's issuer. */
   subject: string;

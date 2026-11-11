@@ -1090,3 +1090,102 @@ button:disabled {
   margin: 0;
   color: var(--danger);
 }
+
+/* P3.2 SCOPE-A: the Protect dialog. Same panel idiom as the trust store -- a fieldset that sits in
+   the toolbar strip, not a modal over the document, so the user can still see which file they are
+   about to protect. */
+.protect-action {
+  position: relative;
+  display: inline-flex;
+}
+
+.protect-dialog {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 22rem;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+  text-align: left;
+}
+
+.protect-dialog label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.protect-dialog input[type="password"] {
+  font: inherit;
+  color: var(--text);
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.protect-dialog__hint {
+  margin: 0;
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+
+.protect-dialog__permissions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* A row per bit: box, name, and what the bit actually lets a reader do. The detail is deliberately
+   quieter -- it explains, and must not compete with the label the user is deciding on. */
+.protect-dialog__permission {
+  display: grid !important;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  align-items: baseline;
+  font-size: 0.85em;
+  color: var(--text) !important;
+  cursor: pointer;
+}
+
+.protect-dialog__permission-detail {
+  grid-column: 2;
+  font-size: 0.92em;
+  color: var(--text-muted);
+}
+
+.protect-dialog__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.protect-dialog__ok {
+  margin: 0;
+  font-size: 0.8em;
+  color: var(--accent);
+}
+
+.protect-dialog__ok .path {
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+.protect-dialog__error {
+  margin: 0;
+  font-size: 0.8em;
+  color: var(--danger);
+}

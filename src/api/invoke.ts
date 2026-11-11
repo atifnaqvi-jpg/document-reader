@@ -23,6 +23,8 @@ import type {
   SignOutcome,
   SignRequest,
   TextEditResult,
+  PermissionsChoice,
+  ProtectOutcome,
   TrustImport,
   TrustAnchorView,
   TrustCrlView,
@@ -492,6 +494,31 @@ export const listTrustCrls = () => invoke<TrustCrlView[]>("list_trust_crls");
 
 /** Drops one revocation list by its base64 DER. Resolves false when nothing matched. */
 export const forgetTrustCrl = (derBase64: string) => invoke<boolean>("forget_trust_crl", { derBase64 });
+
+/**
+ * Writes a protected copy of a document (P3.2 SCOPE-A, D-PR3/D-PR4).
+ *
+ * The copy lands beside the original as `"{stem} (protected).pdf"`; the original is opened read-only
+ * and never written. `protect_save` reopens the output with the password before returning, so a
+ * resolved promise means the file the user is handed actually opens -- not merely that a write
+ * returned.
+ *
+ * `permissions` is required and complete: every `/P` bit is sent explicitly. There is no overload
+ * that omits it, because lopdf's own default grants everything, and a caller that forgot the
+ * argument would ship an unprotected file wearing a protected name.
+ */
+export const protectDocument = (
+  documentId: string,
+  userPassword: string,
+  ownerPassword: string,
+  permissions: PermissionsChoice,
+) =>
+  invoke<ProtectOutcome>("protect_document", {
+    documentId,
+    userPassword,
+    ownerPassword,
+    permissions,
+  });
 
 /** Drops a document's remembered password when it closes (P2.4 T10). */
 export const forgetPassword = (path: string) =>
