@@ -562,6 +562,55 @@ fn retag_as_set(contents: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The certification level `written` declares, read from our own parse of its bytes.
+///
+/// This is the **portable** read-back half of I-SG5: it needs no PDFium, so the Linux gate proves the
+/// same statement the Windows job proves. [`declared_level`] already did this work for the badge, and
+/// this wrapper exists so the command layer has a name that says what it returns rather than reaching
+/// into the verifier's internals.
+///
+/// `None` means the document declares no DocMDP certification — not that the level is unknown. An
+/// undefined `/P` (anything outside `1..=3`) also yields `None`, because a level this reader does not
+/// recognise is a claim it cannot enforce, and enforcing a guess would be worse than enforcing
+/// nothing. The badge reports the recognised levels, so the two views cannot disagree.
+///
+/// A file that will not parse yields `None` as well: there is no catalog to read, and refusing every
+/// edit on an unparseable file would conflate "certified" with "damaged". The damaged case is the
+/// verifier's own finding and is reported through the badge, not through the edit policy.
+pub fn certification_level(written: &[u8]) -> Option<super::editpolicy::CertificationLevel> {
+    let document = Document::load_mem(written).ok()?;
+    super::editpolicy::CertificationLevel::from_number(declared_level(&document)?)
+}
+
+/// The level to enforce, from our own parse first and PDFium's typed reader second.
+///
+/// Two readers, and the order is the point:
+///
+/// * **Our parse decides when it has an answer.** It reads `/Perms /DocMDP` and the signature's
+///   `/Reference /TransformParams /P` from the bytes, so it works with no PDFium present and it is
+///   what the Linux gate can prove. It is also the reader that knows *which* signature is the
+///   certification rather than merely the newest one.
+/// * **PDFium's typed reader fills a gap only.** If our parse finds no level, `doc_mdp_level` gets a
+///   turn, which covers a document whose `/P` we failed to reach but PDFium can. It never overrides
+///   a level we did read: PDFium reports the newest signature, so on a document certified at `P=1`
+///   and later signed again it can answer `not a certification` where the enforcement question is
+///   still governed by the `P=1`.
+///
+/// A gap PDFium fills is therefore always an *additional* restriction, never a relaxation: a level
+/// found only there is enforced, and a level found by our parse is never dropped because PDFium
+/// disagreed. That is the safe direction, because the failure mode of the other one is a document
+/// silently edited past its own certification.
+pub fn enforceable_level(
+    written: &[u8],
+    path: &std::path::Path,
+) -> Option<super::editpolicy::CertificationLevel> {
+    if let Some(level) = certification_level(written) {
+        return Some(level);
+    }
+    crate::provider::PdfProvider::doc_mdp_level(path)
+        .and_then(super::editpolicy::CertificationLevel::from_number)
+}
+
 /// Whether the file's catalog still names a `/Perms /DocMDP` entry.
 ///
 /// Used by the badge to report the certification the file *declares*. Parsed with `lopdf` from the

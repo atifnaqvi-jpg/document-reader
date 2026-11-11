@@ -349,6 +349,13 @@ pub fn add_annotation(
 ) -> Result<Annotation, AppError> {
     let kind = AnnotationKind::parse(&kind)
         .ok_or_else(|| AppError::Other(format!("unknown annotation kind: {kind}")))?;
+    // I-SG5: a P=1 or P=2 document forbids annotation. Refused before the row is written, so a
+    // refusal leaves no trace in the database for the user to clean up.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Annotation,
+    )?;
     let annotation = db.with_mut(|connection| {
         annotations::add(connection, &document_id, page, kind, data, text, now())
     })?;
@@ -369,6 +376,12 @@ pub fn update_annotation(
     // (rather than trusting a frontend-supplied id) is what keeps the payload honest.
     let document_id =
         db.with(|connection| annotations::document_id_for(connection, &annotation_id))?;
+    // I-SG5. Updating an annotation is an annotation edit, so `P=1` and `P=2` both refuse it.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Annotation,
+    )?;
 
     let annotation = db.with_mut(|connection| {
         annotations::update(connection, &annotation_id, data, text, now())
@@ -402,6 +415,13 @@ pub fn set_annotation_status(
 
     let document_id =
         db.with(|connection| annotations::document_id_for(connection, &annotation_id))?;
+    // I-SG5: setting a review status is still a change to an annotation, so the same levels that
+    // forbid creating one forbid changing its status.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Annotation,
+    )?;
     let annotation = db.with_mut(|connection| {
         annotations::set_status(connection, &annotation_id, status, now())
     })?;
@@ -525,6 +545,15 @@ pub fn remove_annotation_and_gc(db: &Db, annotation_id: &str) -> Result<String, 
     let document_id =
         db.with(|connection| annotations::document_id_for(connection, annotation_id))?;
 
+    // I-SG5: deleting an annotation is an annotation change. ISO 32000-1 §12.8.2.2 permits creating,
+    // modifying *and deleting* annotations only at `P=3`, so `P=1` and `P=2` must refuse this too --
+    // a gate that covered only creation would let the user delete a mark on a document that forbids
+    // adding one, which is the same change to the signed document's annots array.
+    refuse_if_certification_forbids(
+        &document_path(db, &document_id)?,
+        crate::editor::signature::editpolicy::EditKind::Annotation,
+    )?;
+
     db.with_mut(|connection| annotations::remove(connection, annotation_id))?;
 
     // P2-D12: the edit copy's reason to exist has just gone away.
@@ -572,6 +601,12 @@ pub fn overwrite_edits(db: State<'_, Db>, document_id: String) -> Result<String,
         ))
     })?;
 
+    // I-SG5: baking annotations into the file is an annotation change, so `P=1` and `P=2` refuse it.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Annotation,
+    )?;
     let source = std::fs::read(&original_path)
         .map_err(|error| AppError::Other(format!("could not read {original_path}: {error}")))?;
     let edited = crate::editor::annotate::apply_annotations(&source, &rows)?;
@@ -594,6 +629,32 @@ fn document_path(db: &Db, document_id: &str) -> Result<String, AppError> {
             .map(|entry| entry.path)
             .ok_or_else(|| AppError::Other(format!("document not found: {document_id}")))
     })
+}
+
+/// Refuse `kind` when the document's certification level forbids it (P3.2 I-SG5).
+///
+/// Called at the top of every mutating command a certification governs, **before** anything is
+/// written. That ordering is the whole point: a command that wrote first and checked afterwards would
+/// leave the user's file changed by an edit it then reported as refused, which is worse than either
+/// outcome on its own.
+///
+/// The level is read from the file on disk rather than from an in-memory copy or a caller-supplied
+/// argument, for two reasons. It cannot go stale if the file is replaced underneath us, and a
+/// frontend cannot talk the backend out of the restriction by sending a different number — the point
+/// of the level is that it is a property of the bytes.
+///
+/// A file that cannot be read is **not** silently treated as uncertified: it is reported. "We could
+/// not establish the level" and "the level permits this" are different answers, and collapsing them
+/// would turn a permissions failure into permission granted.
+fn refuse_if_certification_forbids(
+    path: &str,
+    kind: crate::editor::signature::editpolicy::EditKind,
+) -> Result<(), AppError> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
+    let level =
+        crate::editor::signature::verify::enforceable_level(&bytes, std::path::Path::new(path));
+    crate::editor::signature::editpolicy::check(level, kind)
 }
 
 /// Where a "save edits" action would write, so the UI can confirm the filename
@@ -689,6 +750,12 @@ pub fn rotate_page(
     page: u32,
     degrees: i64,
 ) -> Result<RotateResult, AppError> {
+    // I-SG5: rotating a page rewrites the page tree, which no level permits.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Content,
+    )?;
     let mut document = load_document(&db, &document_id)?;
     let page_id = page_object_id(&document, page)?;
 
@@ -715,6 +782,12 @@ pub fn delete_pages(
     document_id: String,
     pages: Vec<u32>,
 ) -> Result<String, AppError> {
+    // I-SG5: deleting pages removes content, which no level permits.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Content,
+    )?;
     let mut document = load_document(&db, &document_id)?;
 
     crate::editor::pages::delete_pages(&mut document, &pages)?;
@@ -729,6 +802,12 @@ pub fn move_page(
     from: u32,
     to: u32,
 ) -> Result<String, AppError> {
+    // I-SG5: reordering pages changes the document's content, which no level permits.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Content,
+    )?;
     let mut document = load_document(&db, &document_id)?;
 
     crate::editor::pages::move_page(&mut document, from, to)?;
@@ -792,6 +871,12 @@ pub fn add_watermark(
     document_id: String,
     text: String,
 ) -> Result<String, AppError> {
+    // I-SG5: a watermark is added content, which no level permits.
+    let path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Content,
+    )?;
     let mut document = load_document(&db, &document_id)?;
 
     crate::editor::export::watermark(&mut document, &text)?;
@@ -1023,6 +1108,14 @@ pub async fn edit_page_text(
     // any other work, and never prompts for a password.
     crate::editor::protect::read_only_guard(Path::new(&path))?;
 
+    // I-SG5: editing existing text is a content edit. Checked after the read-only gate because an
+    // encrypted document's bytes cannot be read for a level at all, and "protected" is the more
+    // specific refusal when both apply.
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Content,
+    )?;
+
     let content_hash = db.with(|connection| documents::content_hash(connection, &document_id))?;
 
     let service = Arc::clone(&service);
@@ -1166,6 +1259,13 @@ pub async fn revert_page_text(
     operation: crate::editor::textlocate::ContentOperation,
 ) -> Result<String, AppError> {
     let path = edited_path.clone();
+
+    // I-SG5: reverting a text edit rewrites the content stream, so it is a content edit like any
+    // other. Checked against the file the inverse describes, which is where the bytes actually are.
+    refuse_if_certification_forbids(
+        &path,
+        crate::editor::signature::editpolicy::EditKind::Content,
+    )?;
 
     let bytes = tauri::async_runtime::spawn_blocking(move || {
         let source = std::fs::read(&path)

@@ -575,6 +575,45 @@ impl PdfProvider {
         Pdfium::bind_to_library(library)
             .map_err(|e| AppError::PdfiumUnavailable(format!("{}: {e}", library.display())))
     }
+
+    /// The DocMDP level PDFium's typed signature reader reports, or `None` when it reports nothing.
+    ///
+    /// This is I-SG5's read-back half **through the platform PDFium** (K17: `PdfDocument::signatures()`
+    /// and `PdfSignature::modification_detection_permission()` are typed, so this needs no raw binding
+    /// work). It is advisory rather than authoritative for two reasons:
+    ///
+    /// 1. it needs a PDFium library, so the Linux gate cannot run it, while
+    ///    [`crate::editor::signature::verify::certification_level`] can; and
+    /// 2. PDFium reports the level of the **newest** signature it can read, which on a document with
+    ///    several signatures is not necessarily the certification.
+    ///
+    /// Callers therefore treat `None` as "no opinion" and fall back to our own parse. Returning an
+    /// `Option` rather than an error keeps a missing library from becoming a reason a user cannot
+    /// edit their file: an unenforceable level must never silently become "permitted", but the
+    /// *parse* is what decides that, and it does not need PDFium.
+    pub fn doc_mdp_level(path: &Path) -> Option<u8> {
+        // Same gate as every other PDFium entry point: the library is not thread-safe outside this
+        // process-wide serialisation, and a certification read must not race a render.
+        let _gate = PdfiumGate::acquire();
+        let document = Self::load(pdfium().ok()?, path).ok()?;
+        let signatures = document.signatures();
+        // `get` rather than a `first()` helper: pdfium-render 0.8.37's `PdfSignatures` exposes
+        // `len`/`is_empty`/`get`/`iter` and no `first`, and `get(0)` on an unsigned document is an
+        // out-of-bounds error rather than an empty optional, so the emptiness test has to come first.
+        if signatures.is_empty() {
+            return None;
+        }
+        let signature = signatures.get(0).ok()?;
+        match signature.modification_detection_permission() {
+            Ok(PdfSignatureModificationDetectionPermission::Mdp1) => Some(1),
+            Ok(PdfSignatureModificationDetectionPermission::Mdp2) => Some(2),
+            Ok(PdfSignatureModificationDetectionPermission::Mdp3) => Some(3),
+            // A signature PDFium cannot read, or one that is not a certification, is not a level we
+            // may invent. Every arm is spelled out: a wildcard here would let a future variant
+            // silently become a permissive answer. The caller's own parse still gets a turn.
+            Err(_) => None,
+        }
+    }
 }
 
 impl ReaderProvider for PdfProvider {

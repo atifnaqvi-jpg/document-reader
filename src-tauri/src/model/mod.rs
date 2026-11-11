@@ -402,6 +402,25 @@ pub enum AppError {
     /// mistake. Collapsing it into `Other` would lose that distinction in the frontend.
     #[error("the signature could not be built ({0})")]
     SignatureBuildFailed(String),
+    /// P3.2 I-SG5: the document is certified at a level that forbids this edit.
+    ///
+    /// A refusal, not a failure: the edit was understood and deliberately not performed, and the
+    /// file on disk is untouched. The sentence names the edit **and** the level, because "this
+    /// document cannot be changed" leaves the user with no way to tell a `P=1` restriction from a
+    /// damaged file or a bug — and the level is the thing they would have to change to proceed.
+    ///
+    /// `level` is the `/P` number, so the message reads `P=2` rather than the prose name: the level
+    /// is also what the signature badge shows, and two spellings of the same fact drift.
+    #[error(
+        "this document is certified at P={level}, which does not permit {edit}; the signature \
+         would no longer be valid. Save a copy without the certification to make this change"
+    )]
+    CertificationRefusesEdit {
+        /// What the caller tried to do, as a short noun phrase.
+        edit: &'static str,
+        /// The declared `/P` level.
+        level: u8,
+    },
     #[error("{0}")]
     Other(String),
 }
@@ -432,6 +451,7 @@ impl AppError {
             AppError::CertificateStoreUnavailable(_) => "CERTIFICATE_STORE_UNAVAILABLE",
             AppError::CertificateUnreadable(_) => "CERTIFICATE_UNREADABLE",
             AppError::SignatureBuildFailed(_) => "SIGNATURE_BUILD_FAILED",
+            AppError::CertificationRefusesEdit { .. } => "CERTIFICATION_REFUSES_EDIT",
             AppError::Other(_) => "OTHER",
         }
     }

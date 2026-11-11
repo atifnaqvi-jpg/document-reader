@@ -269,8 +269,16 @@ jobs:
           # source guard), so the ignored pin above stays at 106. Measured with the PDFium path
           # unset and pointed at a nonexistent path, 883 in both. Then 884 for the CRLF regression
           # test in `tests/command_registration.rs`, also PDFium-independent.
-          if [ "$passed" -lt 884 ]; then
-            echo "::error::only $passed tests ran; 884 is the non-PDFium baseline. A test stopped being collected."
+          #
+          # 894 for the I-SG5 edit policy: +10, all PDFium-independent (5 unit tests in
+          # `signature/editpolicy.rs`, 5 integration tests in `tests/sign_edit_policy.rs`), so the
+          # ignored pin above stays at 106. Re-measured with the PDFium path unset: 894 passed.
+          #
+          # 897 for `tests/certification_gate.rs`: +3, PDFium-independent, so the ignored pin above
+          # stays at 106. Re-measured with the PDFium path unset: 897 passed. Then 898 for the
+          # inverse direction of the same guard, so a shrunk GOVERNED list fails too.
+          if [ "$passed" -lt 898 ]; then
+            echo "::error::only $passed tests ran; 898 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

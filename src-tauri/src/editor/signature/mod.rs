@@ -3,6 +3,7 @@
 
 pub mod badge;
 pub mod cms;
+pub mod editpolicy;
 pub mod identity;
 pub mod pfx;
 pub mod revocation;

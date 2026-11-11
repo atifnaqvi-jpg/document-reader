@@ -153,10 +153,31 @@ fi
 # `tests/command_registration.rs`. That test exists because a `"\n}\n"` bound passed on Linux and
 # failed on the Windows runner's CRLF checkout, so the guard was red only on the shipping target.
 # +1 PDFium-independent; ignored count stays 106.
-# Now 884/106 and 990/0.
-PIN_PLAIN_PASSED=884
+#
+# 2026-11-11 (I-SG5 edit policy): +10, all PDFium-independent, so both shapes move by ten and the
+# ignored count stays at 106: five unit tests in `editor/signature/editpolicy.rs` (the normative
+# P=1/2/3 matrix, the uncertified arm, the /P round-trip, the refusal wording, and check()/permits()
+# agreement) and five in the new `tests/sign_edit_policy.rs` (per-level permitted+forbidden edit with
+# the badge read off a real certified file, signed bytes intact after an appended revision, an
+# uncertified document, an approval signature, and the three levels being distinguishable).
+# Measured, not incremented: 894 passed with PDFIUM_LIBRARY_PATH unset, 1000 with --include-ignored.
+#
+# +3 more for `tests/certification_gate.rs`, the command-layer guard for the same invariant: it scans
+# `src/commands/mod.rs` to prove every governed command calls the gate, calls it with the right
+# EditKind, calls it before the mutation, and propagates the refusal with `?`. That guard found a real
+# omission while being written -- `remove_annotation` was ungated, and deleting an annotation is the
+# same change to the signed document's annots array that P=1/P=2 refuse -- and it caught a mutation
+# that deleted the `?`, turning the gate into a silent no-op.
+# +1 more: `no_command_calls_the_gate_without_being_listed`, the inverse direction -- every gate call
+# in the source must be covered by a GOVERNED entry, so shrinking the list fails instead of silently
+# narrowing the forward guard. An earlier `!GOVERNED.is_empty()` could never fail (a compile-time
+# constant) and clippy said so, which is the same "guard that cannot fail" defect this file keeps
+# finding in production code.
+# Measured, not incremented: 898 passed with PDFIUM_LIBRARY_PATH unset, 1004 with --include-ignored.
+# Now 898/106 and 1004/0.
+PIN_PLAIN_PASSED=898
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=990
+PIN_IGNORED_PASSED=1004
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
