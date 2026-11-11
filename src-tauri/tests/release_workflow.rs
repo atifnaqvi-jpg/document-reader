@@ -443,6 +443,49 @@ fn a_tag_publishes_a_full_release_since_1_0_0() {
     );
 }
 
+/// The release body must name the product the installer actually installs.
+///
+/// Version and name are two separate ways for the same paragraph to be wrong, and only one of them
+/// was guarded. `the_release_body_names_the_version_being_published` would have passed a body
+/// reading "**Document Reader 1.2.0**" all the way to the Releases page -- and did: this repository
+/// renamed the product to `DocuPro` in v1.0.1 (D-R9), the 1.2.0 body was written from the repository
+/// name, and the version check was satisfied by the number alone. The installer it announced is
+/// called `DocuPro_1.2.0_x64-setup.exe`, so the page and the download would have disagreed about
+/// what the user had just run.
+///
+/// This is the same defect as the version one, one field over: a hardcoded string that only one
+/// assertion reads. So the name is not checked against a literal either -- it is read from
+/// `productName` in `tauri.conf.json`, the value the bundler uses to name the file. A rename then
+/// has to reach the release body, or the gate stops.
+///
+/// Deliberately scoped to the `body:` block. The surrounding comments legitimately quote the old
+/// published headline as history, and rewriting a record of what shipped is not this test's
+/// business (see the 1.1.1 notes on forward-only fixes).
+#[test]
+fn the_release_body_names_the_product_it_ships() {
+    let text = workflow();
+    let body = publish_body(&text).expect("the publish step must carry a `body:`");
+
+    let product = product_name();
+
+    // The *headline*, not the body at large. A whole-body `contains` survived its own mutant:
+    // rewriting the first line to the repository name left "DocuPro" in the download sentence
+    // further down, so the assertion passed while the sentence a user actually reads said the
+    // wrong product. Measured, not assumed -- the mutant was run and lived.
+    let headline = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .expect("the release body is empty");
+    assert!(
+        headline.contains(&product),
+        "the release body's headline must name {product:?}, the `productName` in tauri.conf.json \
+         and the prefix of the installer it links to. The headline says: {headline:?}. A body \
+         naming the repository instead of the product tells the user they are about to run \
+         something other than the file in front of them."
+    );
+}
+
 /// The published release body must name the version this tag actually publishes.
 ///
 /// v1.0.1 published with `**Document Reader 1.0.0** — line-level reflow` as its headline. The
@@ -515,6 +558,24 @@ fn the_notes_link_points_at_the_tag_not_a_branch() {
 
 /// Reads `version` from `[package]` in `Cargo.toml`, the same source `release_version.rs` uses
 /// to hold all six carriers together.
+/// `productName` from the Tauri config -- the string the bundler turns into the installer's
+/// filename. Read rather than hardcoded, so a rename has to reach the release body: a literal here
+/// would be a third copy of the name, and the copy that never gets updated is the one that ships.
+fn product_name() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    // A line scan, not a JSON dependency: this file is compiled into the gate on every run and the
+    // config has one top-level `productName`. `unquote` already strips the quoting.
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("\"productName\":"))
+        // The value is followed by a comma; `unquote` strips quotes and whitespace only.
+        .map(|value| unquote(value.trim().trim_end_matches(',')))
+        .unwrap_or_else(|| {
+            panic!("tauri.conf.json has no top-level `\"productName\":`; the installer would be                     named from the crate and this guard would have nothing to compare against")
+        })
+}
+
 fn publish_version() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let text = std::fs::read_to_string(&path)

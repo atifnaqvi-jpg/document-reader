@@ -9,9 +9,9 @@ the version in `Cargo.toml` has a section here.
 
 ## 1.2.0
 
-P3.2: **protect, redact and sign.** The three things a PDF reader is expected to do to a file
-rather than with it, and the first release where the app can change a document's security rather
-than only its text.
+**DocuPro 1.2.0 — protect, redact and sign.** The three things a PDF reader is expected to do to
+a file rather than with it, and the first release where the app can change a document's security
+rather than only its text.
 
 Windows-only, as before. Every feature below is offline by design: no feature in this release
 opens a network connection, and that is enforced rather than promised (see *What is not here*).

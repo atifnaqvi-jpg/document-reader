@@ -204,9 +204,9 @@ fi
 # The apt-stall guard adds one in `tests/ci_workflow.rs`.
 # Measured, not incremented: 944 passed with PDFIUM_LIBRARY_PATH unset, 1050 with --include-ignored.
 # Now 944/106 and 1050/0.
-PIN_PLAIN_PASSED=947
+PIN_PLAIN_PASSED=948
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=1053
+PIN_IGNORED_PASSED=1054
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

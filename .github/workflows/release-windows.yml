@@ -164,7 +164,7 @@ jobs:
           # is the stale-headline defect (v1.0.1 published that way). Whoever bumps to 1.3.0
           # rewrites this whole block for that phase -- the guard is what makes them.
           body: |
-            **Document Reader 1.2.0** — protect, redact and sign.
+            **DocuPro 1.2.0** — protect, redact and sign.
 
             This release makes the app able to change a document's *security*, not only its text:
 
@@ -186,7 +186,7 @@ jobs:
             [the release notes](https://github.com/atifnaqvi-jpg/document-reader/blob/${{ github.ref_name }}/docs/RELEASE-NOTES.md)
             for what changed, what is still refused, and the phase's acceptance record.
 
-            Windows installer for Document Reader ${{ github.ref_name }}.
+            Windows installer for DocuPro ${{ github.ref_name }}.
 
             Download the `.exe` below and run it. Per-user install, no admin
             rights needed. PDFium is bundled, so PDF support works out of the box.
