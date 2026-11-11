@@ -258,12 +258,24 @@ reports `0 ignored` while having run nothing. `tests/ci_workflow.rs` fails on th
 ## Known open defect: the Windows suite crashes intermittently
 
 The `--include-ignored` Windows job aborts with
-`exit code: 0xc0000005, STATUS_ACCESS_VIOLATION`. Undiagnosed. Two timestamped reproductions:
+`exit code: 0xc0000005, STATUS_ACCESS_VIOLATION`. Undiagnosed. Three timestamped
+reproductions:
 
 | Run | Commit | What it shows |
 |---|---|---|
 | `40908435884` attempt 1 | `3942c8c` | crashed after 354 of 393 tests; a **same-SHA re-run passed** |
 | `41278018858` | `94d2d34` | crashed on a **documentation-only** commit |
+| `43075237167` attempt 1 | `27138bc` | **binary identified**: `textedit_gates`, dead after 17 of 65 tests; a **same-SHA re-run passed** (attempt 2, which produced the 1.2.0 installer) |
+
+**What the third reproduction adds, and what it takes away.** It is the first to name the test
+*binary* — `textedit_gates`, not the whole `--include-ignored` sweep — and the first to place the
+abort **mid-run**: 17 tests reported `ok`, then the process died before the next one printed, with
+no panic and no teardown message. That is narrower than "somewhere in the suite" and it refines the
+earlier characterisation of this as a *teardown* fault: this one was not in teardown. It also
+removes one hypothesis from the earlier list — a per-binary or per-file property is now plausible,
+because only *this* binary died while the other 18 test binaries in the same process-tree run
+finished. It does not tell us the next test's name, only its position: libtest does not flush
+results for a test that never returns.
 
 **What the two reproductions rule out.** Anything code-dependent. `94d2d34` touches two
 markdown files and no source; no Rust in it compiled differently. The first reproduction
@@ -277,9 +289,23 @@ manifestation depends on allocation timing; PDFium's own global initialisation n
 thread-safe at exit; and the Windows job's `--include-ignored` running ~90 tests that the
 Linux job never runs, so it is the only place with that concurrency. Not narrowed further.
 
-**Do not silently retry.** A third reproduction is an escalation, not a re-run: two is a
-pattern, three is a defect with a shape worth instrumenting (which test, which thread, at what
-point in teardown). A re-run that passes tells you nothing about which of the four above it is.
+**Do not silently retry.** Two is a pattern, three is a defect with a shape worth instrumenting
+(which test, which thread, at what point). A re-run that passes tells you nothing about which of
+the four above it is.
+
+**The escalation has been earned** (`43075237167`, 2026-11-11). What instrumentation should now
+answer, in order: (1) which test was running when the process died — needs `--test-threads=1`
+*and* `--no-capture` so the name is flushed before the call, since the default harness flushes
+only on return; (2) whether `textedit_gates` ever constructs its own `Pdfium`. Three test files do
+(`incremental_pdfium.rs`, `protect_save.rs`, `redact_pdfium.rs`), and `provider::pdf`'s gate is
+what makes PDFium calls single-threaded — a second `Pdfium` outside that gate is exactly the
+heap-corruption shape the gate exists to prevent, and `Pdfium::new` at a test call site is
+explicitly forbidden by the comment on `pdfium()` in `provider/pdf.rs:120`.
+
+**Still non-blocking for 1.2.0, on the K20 terms.** The installer for `27138bc` was produced by
+attempt 2 of the same SHA, which is the re-run policy this section already mandates: no P3.2
+correctness claim rests on a single Windows run, and every Windows-only assertion has a Linux-side
+equivalent.
 
 ## Gates
 
