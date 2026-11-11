@@ -98,6 +98,18 @@ matching fails instead of passing.
 - **Dual-licensed MIT OR Apache-2.0.**
 - **Text-scan guards normalise line endings**, so they hold on Windows checkouts.
 
+### Status: development version, not a release
+
+No tag exists for this version and none should be created until the installer has been run by a
+human. What exists is a build to test:
+
+- **Installer:** `DocuPro_1.2.0_x64-setup.exe`, **11,089,015 bytes**, SHA-256
+  `2eaebaa217c1d66a477e7503671958659d180ea8ce0064e0b7345922066cc52a`.
+- **Built by** `release-windows.yml` dispatch `43075237167`, attempt 2, from `27138bc`.
+- **Attempt 1 of that run failed** with the known `STATUS_ACCESS_VIOLATION` in `textedit_gates`
+  (third reproduction; recorded in `AGENTS.md`). The installer comes from the same-SHA re-run,
+  which is the policy the design mandates — no claim in this section rests on a single Windows run.
+
 ### Toolchain
 
 - The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
