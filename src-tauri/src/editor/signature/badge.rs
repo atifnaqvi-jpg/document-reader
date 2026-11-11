@@ -558,6 +558,46 @@ mod tests {
         );
     }
 
+    /// Levels 2 and 3 share the `_` arm, so nothing above pinned them apart from each other or from
+    /// level 1. A match that collapsed all three would still satisfy the level-1 test, and the badge
+    /// would tell a user their certification permits annotations when it permits only form filling --
+    /// a wrong statement about what the file allows, on the surface whose whole purpose is to say so.
+    #[test]
+    fn each_certification_level_states_what_it_actually_permits() {
+        let wording = |level: u8| {
+            let mut evidence = good();
+            evidence.certification_level = Some(level);
+            explain(&evidence)
+                .lines()
+                .into_iter()
+                .find(|line| line.starts_with("certification:"))
+                .unwrap_or_else(|| panic!("no certification line for level {level}"))
+        };
+
+        let one = wording(1);
+        let two = wording(2);
+        let three = wording(3);
+
+        assert!(
+            one.contains("no changes permitted"),
+            "P=1 permits nothing: {one}"
+        );
+        assert!(
+            two.contains("form filling") && two.contains("further signatures"),
+            "P=2 permits form filling and further signatures, and must not claim annotations: {two}"
+        );
+        assert!(
+            three.contains("annotations"),
+            "P=3 additionally permits annotations: {three}"
+        );
+
+        // The three sentences must be distinct. Two levels sharing a sentence would mean the badge
+        // states a permission the certification does not grant.
+        assert_ne!(one, two, "P=1 and P=2 must not read the same");
+        assert_ne!(two, three, "P=2 and P=3 must not read the same");
+        assert_ne!(one, three, "P=1 and P=3 must not read the same");
+    }
+
     #[test]
     fn badge_codes_are_stable() {
         // The UI and support reports key off these strings; a rename is a silent break.
