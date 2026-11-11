@@ -105,6 +105,8 @@ pub fn run() {
             commands::import_trust_crl,
             commands::list_trust_anchors,
             commands::forget_trust_anchor,
+            commands::list_trust_crls,
+            commands::forget_trust_crl,
             commands::redact_mark,
             commands::redact_marks,
             commands::redact_unmark,

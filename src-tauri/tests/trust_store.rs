@@ -839,3 +839,156 @@ fn forgetting_an_unknown_anchor_reports_not_removed_rather_than_failing() {
         "an id that never matched must not be reported as removed"
     );
 }
+
+// --- Unit 6: revocation lists are manageable too (D-SG4) -----------------------
+//
+// The same defect unit 5 closed for anchors, in the other store. `add_crl` and `has_crl` were the
+// whole surface: a user could import revocation evidence and never see which lists were in force,
+// could not tell when one went stale, and could not withdraw one. D-SG4 puts revocation under the
+// user's control, so these go through the commands, and the one that matters asserts on the badge.
+
+use document_reader_lib::commands::{forget_trust_crl_with, list_trust_crls_with};
+
+#[test]
+fn an_imported_crl_is_listed_with_its_issuer_and_its_staleness() {
+    // The listing half. `nextUpdate` is carried because it is the field that decides whether the
+    // list is still evidence: a stale clean list silently stops counting, and a UI that could not
+    // show the date would let the user keep trusting it.
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    let now = 1_800_000_000;
+    let imported = db
+        .with(|connection| import_crl_bytes(connection, &fixture("crl-empty.der"), now))
+        .expect("the CRL imports");
+
+    let listed = list_trust_crls_with(&db).expect("list");
+    assert_eq!(listed.len(), 1, "one import, one listed list");
+    assert_eq!(
+        listed[0].der_base64, imported.der_base64,
+        "the listing must carry the identity the import reported, or the UI cannot forget it"
+    );
+    assert!(
+        !listed[0].issuer.is_empty(),
+        "the issuer is how the user tells two lists apart; an empty one renders as a blank row"
+    );
+    assert_eq!(
+        listed[0].next_update, imported.not_after,
+        "the listing reports the same expiry the import reported -- the one that decides staleness"
+    );
+    assert!(
+        listed[0].this_update > 0,
+        "a CRL must state `thisUpdate` (RFC 5280 5.1.2.4.1), so this must carry a real date \
+         rather than the 0 a missing field would leave; got {}",
+        listed[0].this_update
+    );
+}
+
+#[test]
+fn an_empty_crl_store_lists_nothing_rather_than_failing() {
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    assert!(list_trust_crls_with(&db).expect("list").is_empty());
+}
+
+#[test]
+fn forgetting_a_revocation_list_gives_the_badge_back() {
+    // The property that makes the commands worth having, and the mirror image of the existing
+    // "importing a revoked CRL suppresses valid" test. One fixed signed file, the anchor imported
+    // throughout, and the revocation list as the only variable:
+    //
+    //   anchor + revoked CRL -> not valid   (the shipped import path can demote)
+    //   anchor + nothing   -> valid         (forgetting gives it back)
+    //
+    // Without the second step the user is stuck: they imported a revocation, and the app would
+    // never let them say it no longer applies.
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    let (_dir, written) = signed_with(&leaf_identity(), "revocation withdrawn");
+    let now = 1_800_000_000;
+
+    db.with(|connection| import_anchor_bytes(connection, &fixture("ca.der"), now))
+        .expect("the CA imports");
+
+    // A clean CRL is imported and left in place for the whole test. It is not incidental: D-SG7
+    // makes "absent revocation data" one of the reasons for `unknown`, so an anchored file with no
+    // CRL at all is `unknown` by design and could not be demoted by anything. Importing the clean
+    // list establishes the green badge that the revoked list then takes away and the removal
+    // restores -- and it makes the *only* variable the revoked list.
+    db.with(|connection| import_crl_bytes(connection, &fixture("crl-empty.der"), now))
+        .expect("the clean CRL imports");
+
+    // Precondition, asserted rather than assumed: anchored plus a clean current list is `valid`.
+    // If this did not hold the test would pass for the wrong reason -- a badge that was never green
+    // cannot be said to have recovered.
+    let before = db
+        .with(|connection| store::assess(connection, &written, now))
+        .expect("parses")
+        .expect("signed");
+    assert_eq!(
+        before.badge,
+        Badge::Valid,
+        "precondition: anchored with a clean current CRL must be valid"
+    );
+
+    let imported = db
+        .with(|connection| import_crl_bytes(connection, &fixture("crl-revoked.der"), now))
+        .expect("the revoked CRL imports");
+
+    // A revocation outranks a clean bill (`trust::best_crl_evidence` ranks `Revoked` above
+    // `NotRevoked`), so both lists can be present and the revocation still wins. This is what makes
+    // the removal below meaningful: the clean list never left, so only the deletion can explain
+    // the badge coming back.
+    let demoted = db
+        .with(|connection| store::assess(connection, &written, now))
+        .expect("parses")
+        .expect("signed");
+    assert_ne!(
+        demoted.badge,
+        Badge::Valid,
+        "precondition: a revocation naming the signer must demote the badge, even beside the clean list"
+    );
+
+    assert!(
+        forget_trust_crl_with(&db, &imported.der_base64).expect("forget"),
+        "the list that was just imported must be removed"
+    );
+
+    let after = db
+        .with(|connection| store::assess(connection, &written, now))
+        .expect("parses")
+        .expect("signed");
+    assert_eq!(
+        after.badge,
+        Badge::Valid,
+        "withdrawing the revocation list must give the badge back: otherwise a user who imported \
+         the wrong list has demoted their own document permanently, with no way to say so"
+    );
+    let remaining = list_trust_crls_with(&db).expect("list");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the revoked list went; the clean one was never touched"
+    );
+    assert_ne!(
+        remaining[0].der_base64, imported.der_base64,
+        "the surviving list must be the clean one, not the retired revocation"
+    );
+}
+
+#[test]
+fn forgetting_an_unknown_crl_reports_not_removed_rather_than_failing() {
+    // Same contract as the anchor version: a repeated click is not a fault, but the distinction is
+    // still reported so an id that matched nothing is not mistaken for one that did.
+    let db = document_reader_lib::db::Db::open_in_memory().expect("db");
+    let now = 1_800_000_000;
+    let imported = db
+        .with(|connection| import_crl_bytes(connection, &fixture("crl-empty.der"), now))
+        .expect("imports");
+
+    assert!(forget_trust_crl_with(&db, &imported.der_base64).expect("first forget"));
+    assert!(
+        !forget_trust_crl_with(&db, &imported.der_base64).expect("second forget must succeed"),
+        "the second removal found nothing, which is reported rather than raised"
+    );
+    assert!(
+        !forget_trust_crl_with(&db, "bm90IGEgcmVhbCBpZGVudGl0eQ==").expect("bogus id"),
+        "an id that never matched must not be reported as removed"
+    );
+}

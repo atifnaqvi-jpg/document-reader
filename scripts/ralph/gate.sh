@@ -196,11 +196,16 @@ fi
 # SCOPE-C unit 5 adds four in `tests/trust_store.rs` (an import is listed through the command, an
 # empty store lists nothing, forgetting an anchor takes a `valid` badge back to `unknown`, and a
 # repeated forget reports not-removed rather than failing). All four are PDFium-independent.
-# Measured, not incremented: 939 passed with PDFIUM_LIBRARY_PATH unset, 1045 with --include-ignored.
-# Now 939/106 and 1045/0.
-PIN_PLAIN_PASSED=939
+#
+# SCOPE-C unit 6 adds four more there for the CRL store (an import is listed with its issuer and
+# the `nextUpdate` that decides staleness, an empty store lists nothing, forgetting a revocation
+# takes the badge from demoted back to `valid`, and a repeated forget reports not-removed). Also
+# PDFium-independent.
+# Measured, not incremented: 943 passed with PDFIUM_LIBRARY_PATH unset, 1049 with --include-ignored.
+# Now 943/106 and 1049/0.
+PIN_PLAIN_PASSED=943
 PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=1045
+PIN_IGNORED_PASSED=1049
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

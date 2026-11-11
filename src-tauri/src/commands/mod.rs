@@ -1857,6 +1857,67 @@ pub fn forget_trust_anchor_with(db: &Db, der_base64: &str) -> Result<bool, AppEr
     db.with(|connection| crate::editor::signature::store::remove_anchor(connection, der_base64))
 }
 
+/// One imported CRL, as the management UI lists it (P3.2 D-SG4).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustCrlView {
+    /// Base64 DER, the row's identity and what `forget_trust_crl` takes.
+    pub der_base64: String,
+    /// Issuer distinguished name, as the CRL states it -- how the user tells two lists apart.
+    pub issuer: String,
+    /// The CRL's `thisUpdate`, in unix seconds.
+    pub this_update: i64,
+    /// Its `nextUpdate`; absent when it states none. Past this the list is stale and stops being
+    /// evidence, so the UI can show it rather than let a stale list look authoritative.
+    pub next_update: Option<i64>,
+}
+
+/// The revocation lists the user has imported (P3.2 D-SG4).
+///
+/// **Why this command exists.** The anchor store could be listed but the CRL store could not:
+/// `add_crl` and `has_crl` were the entire surface, so a user could import revocation evidence and
+/// then never see which lists were in force or when they went stale. D-SG4 puts revocation under the
+/// user's control -- "read from the document or imported by the user, never fetched" -- and control
+/// that cannot be inspected is not control. It is also the only way to discover the identity
+/// [`forget_trust_crl`] needs, since the import result is not kept anywhere after the dialog closes.
+#[tauri::command]
+pub fn list_trust_crls(db: State<'_, Db>) -> Result<Vec<TrustCrlView>, AppError> {
+    list_trust_crls_with(&db)
+}
+
+/// [`list_trust_crls`]'s body, by reference, so a test can drive the shipped path.
+pub fn list_trust_crls_with(db: &Db) -> Result<Vec<TrustCrlView>, AppError> {
+    let rows = db.with(crate::editor::signature::store::list_crls)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| TrustCrlView {
+            der_base64: row.der_base64,
+            issuer: row.issuer,
+            this_update: row.this_update,
+            next_update: row.next_update,
+        })
+        .collect())
+}
+
+/// Removes one imported revocation list, so it stops deciding badges (P3.2 D-SG4).
+///
+/// **Why this command exists.** Without it a list naming the signer keeps demoting the badge
+/// forever, with no way back: the user imported a revocation, and the app will not let them say it
+/// no longer applies. A stale *clean* list stops being evidence by itself once past `nextUpdate`,
+/// so the direction that needs an escape hatch is the one that keeps suppressing `valid`.
+///
+/// Returns whether a row was deleted rather than raising on an unknown identity, matching
+/// `forget_trust_anchor`: a repeated click is not a fault.
+#[tauri::command]
+pub fn forget_trust_crl(db: State<'_, Db>, der_base64: String) -> Result<bool, AppError> {
+    forget_trust_crl_with(&db, &der_base64)
+}
+
+/// [`forget_trust_crl`]'s body, by reference, so a test can drive the shipped path.
+pub fn forget_trust_crl_with(db: &Db, der_base64: &str) -> Result<bool, AppError> {
+    db.with(|connection| crate::editor::signature::store::remove_crl(connection, der_base64))
+}
+
 // --- P3.2 SCOPE-B: redaction -------------------------------------------------
 //
 // Marking and applying are separate commands because they are separate user actions with different

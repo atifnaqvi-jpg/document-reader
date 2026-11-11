@@ -210,6 +210,51 @@ pub fn has_crl(connection: &Connection, der_base64: &str) -> Result<bool, AppErr
     Ok(found.is_some())
 }
 
+/// Every imported CRL, newest first, as the management UI lists them.
+///
+/// **Why this exists.** `add_crl` could write and `has_crl` could answer yes/no, but nothing could
+/// enumerate. A user who imported a stale list, or one for the wrong issuer, had no way to discover
+/// that -- and no way to find the identity [`remove_crl`] takes. The badge would then be decided by
+/// revocation evidence the user could neither see nor withdraw, which is the same defect the anchor
+/// listing closed.
+///
+/// Newest first, matching [`list_anchors`], so a just-imported list is where the user looks.
+/// Unreadable rows are skipped here for the same reason they are skipped in `anchor_facts`: a row
+/// that will not decode is a store inconsistency, not something to fail the listing over. Unlike an
+/// anchor there is no count guard, because a CRL contributes only revocation evidence and a skipped
+/// row cannot make a green badge.
+pub fn list_crls(connection: &Connection) -> Result<Vec<CrlRow>, AppError> {
+    let mut statement = connection.prepare(
+        "SELECT der, issuer, this_update, next_update FROM TrustCrl ORDER BY added_at DESC, der ASC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(CrlRow {
+            der_base64: row.get(0)?,
+            issuer: row.get(1)?,
+            this_update: row.get(2)?,
+            next_update: row.get(3)?,
+        })
+    })?;
+    let mut crls = Vec::new();
+    for row in rows {
+        crls.push(row?);
+    }
+    Ok(crls)
+}
+
+/// Remove one imported CRL by its base64 DER. Returns whether a row was actually deleted.
+///
+/// The counterpart to [`list_crls`]: without it a revocation list, once imported, decides badges
+/// forever. That matters most in the direction that hides a problem -- a stale *clean* list stops
+/// being evidence on its own (`revocation` treats an expired list as none), but a list naming the
+/// signer keeps demoting the badge long after the user has decided that revocation no longer
+/// applies. Returning a bool rather than erroring on an unknown identity matches [`remove_anchor`]:
+/// "it is already gone" is the state the caller asked for.
+pub fn remove_crl(connection: &Connection, der_base64: &str) -> Result<bool, AppError> {
+    let removed = connection.execute("DELETE FROM TrustCrl WHERE der = ?1", params![der_base64])?;
+    Ok(removed > 0)
+}
+
 /// The base64 DER of one certificate, which is its identity in the store.
 ///
 /// Exposed so a caller can ask [`has_anchor`] what it is about to insert without re-deriving the
