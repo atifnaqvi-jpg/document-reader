@@ -14,7 +14,7 @@
 //! Closing a document (or a re-import, which replaces its bytes) drops the entry.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// An in-memory password that zeroises its bytes when cleared.
 ///
@@ -34,7 +34,7 @@ impl SessionPassword {
     }
 
     /// Overwrites the bytes before dropping the string.
-    fn wipe(&mut self) {
+    pub fn wipe(&mut self) {
         // SAFETY: `as_bytes_mut` on a `String` we uniquely own, which is valid UTF-8 by
         // construction. Zeroing preserves UTF-8 validity (NUL is a valid code point), so
         // the `String` is never left in an invalid state.
@@ -61,7 +61,11 @@ impl std::fmt::Debug for SessionPassword {
 /// The process-wide password store (T10). One per app, held in Tauri managed state.
 #[derive(Default)]
 pub struct PasswordStore {
-    entries: Mutex<HashMap<String, SessionPassword>>,
+    /// `Arc` rather than a bare `SessionPassword` so a *reader* can keep the bytes alive for as
+    /// long as the document it unlocked is open. `PdfDocument` borrows the password string, so a
+    /// value that vanished at the end of the lookup would leave that borrow dangling; the Arc ties
+    /// the two lifetimes together without copying the secret.
+    entries: Mutex<HashMap<String, Arc<SessionPassword>>>,
 }
 
 impl PasswordStore {
@@ -71,13 +75,30 @@ impl PasswordStore {
 
     /// Remembers a password for a document path, replacing any previous one.
     pub fn remember(&self, path: &str, password: SessionPassword) {
+        self.remember_shared(path, Arc::new(password));
+    }
+
+    /// [`remember`](Self::remember) for a password already shared with a reader.
+    pub fn remember_shared(&self, path: &str, password: Arc<SessionPassword>) {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(previous) = entries.insert(path.to_string(), password) {
-            // The replaced entry is dropped, which zeroises it. Doing it explicitly here
-            // makes the intent visible: replacing a password must not leave the old one
-            // in the map.
+            // The replaced entry is dropped, which zeroises it -- unless a reader still holds a
+            // clone, in which case it is zeroised when that document closes. Either way the store
+            // no longer serves the old password.
             drop(previous);
         }
+    }
+
+    /// A shared handle to the password for `path`, if one is held.
+    ///
+    /// The only reason this exists beside [`with_password`](Self::with_password): a reader needs
+    /// the bytes to outlive the lookup, and a closure cannot hand back a borrow of its own argument.
+    pub fn get(&self, path: &str) -> Option<Arc<SessionPassword>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .cloned()
     }
 
     /// Runs `f` with the remembered password for `path`, if any.
@@ -103,8 +124,13 @@ impl PasswordStore {
     pub fn forget(&self, path: &str) -> bool {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         match entries.remove(path) {
-            Some(mut password) => {
-                password.wipe();
+            // `Arc::into_inner` succeeds only when no reader still holds the password, which is the
+            // usual case by the time a document closes. When a handle does still hold one, dropping
+            // it zeroises there instead -- the store's job is to stop serving it, and it does.
+            Some(password) => {
+                if let Some(mut owned) = Arc::into_inner(password) {
+                    owned.wipe();
+                }
                 true
             }
             None => false,
@@ -114,8 +140,10 @@ impl PasswordStore {
     /// Forgets every password. Used on app exit and by tests.
     pub fn clear(&self) {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, mut password) in entries.drain() {
-            password.wipe();
+        for (_, password) in entries.drain() {
+            if let Some(mut owned) = Arc::into_inner(password) {
+                owned.wipe();
+            }
         }
     }
 
@@ -127,6 +155,20 @@ impl PasswordStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// The process-wide store, so read paths can find a remembered password.
+///
+/// One instance, not two: `lib.rs` manages *this* `Arc`, and the PDF provider reads through it. A
+/// second `PasswordStore` would make "remembered" and "available to open the file" different
+/// questions, which is precisely the failure this fixes -- a document the app could decrypt but
+/// still could not render.
+///
+/// Returning an `Arc` rather than a `&'static` keeps `PasswordStore` usable as Tauri managed state
+/// while leaving the interior mutability (`Mutex`) to enforce T10's rules.
+pub fn shared() -> Arc<PasswordStore> {
+    static SHARED: OnceLock<Arc<PasswordStore>> = OnceLock::new();
+    Arc::clone(SHARED.get_or_init(|| Arc::new(PasswordStore::new())))
 }
 
 #[cfg(test)]

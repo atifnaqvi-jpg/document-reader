@@ -353,6 +353,14 @@ pub enum AppError {
     /// The password supplied for a protected PDF was not accepted (P2.4 F7/F8).
     #[error("the password did not unlock this document")]
     WrongPassword,
+    /// Opening needs a password the app does not hold yet, or the one it holds was refused.
+    ///
+    /// Distinct from [`WrongPassword`](Self::WrongPassword) because the two call for different
+    /// UI: this one means *ask*, and that one means *the answer was wrong, ask again*. Both
+    /// deliberately carry no PDFium detail -- `PdfiumLibraryInternalError(PasswordError)`
+    /// reached the user as a banner and named nothing they could act on.
+    #[error("this document is password-protected; enter its password to open it")]
+    PasswordRequired,
     /// A Stage-1 admissibility gate refused the run (P2.4 T3). The string *names the
     /// violated gate* and, for the width gate, quotes both measured widths — a refusal
     /// that does not say why is indistinguishable from a bug.
@@ -499,6 +507,7 @@ impl AppError {
             AppError::Db(_) => "DB_ERROR",
             AppError::EncryptedReadOnly => "ENCRYPTED_READ_ONLY",
             AppError::WrongPassword => "WRONG_PASSWORD",
+            AppError::PasswordRequired => "PASSWORD_REQUIRED",
             AppError::TextRunNotEditable(_) => "TEXT_RUN_NOT_EDITABLE",
             AppError::RedactionIncomplete(_) => "REDACTION_INCOMPLETE",
             AppError::GlyphsNotCoverable => "GLYPHS_NOT_COVERABLE",

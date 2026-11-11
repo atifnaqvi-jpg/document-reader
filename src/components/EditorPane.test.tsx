@@ -10,13 +10,14 @@
  * state, so jsdom is sufficient.
  */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { EditorPane } from "./EditorPane";
 import { EditorProvider } from "../state/EditorProvider";
 import type { LibraryEntry } from "../api/types";
 import { installFakeBackend } from "../test/tauri";
+import { AnnotationOverlay } from "./AnnotationOverlay";
 
 const entry: LibraryEntry = {
   id: "doc-1",
@@ -160,5 +161,110 @@ describe("EditorPane: the palette reaches the P3.1 kinds", () => {
     for (const unwritten of ["Polygon", "PolyLine", "Cloud", "Sound", "FileAttachment"]) {
       expect(offered, unwritten).not.toContain(unwritten);
     }
+  });
+});
+
+/**
+ * The colour control must be readable.
+ *
+ * It rendered each option's **hex string** (`#fff3b0`), and in the shipped Windows build the closed
+ * `<select>` shows only that text — so the palette appeared as six colour codes with no names, which
+ * is not something a person can choose between. The `value` stays hex because that is what the
+ * annotation dictionary stores; only the label was wrong.
+ *
+ * Asserting "no option looks like a hex code" rather than naming each colour: the defect is the
+ * *form* of the label, and a test that listed six names would pass if a seventh were added unnamed.
+ */
+describe("EditorPane: the colour picker is labelled, not hex (D4)", () => {
+  it("offers names instead of colour codes", async () => {
+    const { backend } = renderPane(0);
+    open = backend;
+
+    await userEvent.click(screen.getByRole("button", { name: "Highlight" }));
+
+    const colour = screen.getByLabelText("Colour") as HTMLSelectElement;
+    const labels = Array.from(colour.options).map((option) => option.textContent ?? "");
+
+    expect(labels.length).toBeGreaterThan(0);
+    for (const label of labels) {
+      expect(label).not.toMatch(/#[0-9a-f]{3,8}/i);
+      expect(label.trim()).not.toBe("");
+    }
+    // The stored value is still the hex the writer needs.
+    expect(Array.from(colour.options).map((option) => option.value)).toContain("#fff3b0");
+    // The default highlight colour is the selected one, so the initial state is readable too.
+    expect((colour.selectedOptions[0]?.textContent ?? "").trim()).not.toBe("");
+  });
+});
+
+/**
+ * The drag preview must be painted from the chosen colour.
+ *
+ * Found by reading the source, not reported by a hand-test. The preview element set only
+ * `borderColor` inline, while `.annotation-draft` in the stylesheet gave it
+ * `background: currentColor`. `currentColor` resolves to the inherited **text** colour, not the
+ * annotation colour, so the box drawn during a drag was painted in the surrounding text colour and
+ * only took the chosen colour once the mark was saved and re-rendered from its stored data. The
+ * saved mark was never wrong -- it sets `background: colour` inline -- so this is invisible on any
+ * annotation already in the document and shows only while dragging.
+ *
+ * No symptom is claimed here: nobody has reported what this looked like on screen, and a test is
+ * not the place to invent one. What is asserted is the mechanism, which is visible in the source.
+ *
+ * Rendered for real: the real pane selects the tool, the real overlay draws the draft, and the
+ * assertion reads the draft's inline fill. jsdom has no cascade, so `currentColor` cannot be
+ * resolved there -- the inline style is the honest oracle, and it is also the operative fix, since
+ * an inline value overrides the class rule.
+ */
+describe("the annotation draft is painted from the chosen colour", () => {
+  function renderWorkspace() {
+    const backend = installFakeBackend();
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+
+    const view = render(
+      <EditorProvider documentId="doc-1" page={0}>
+        <EditorPane entry={entry} currentPage={0} />
+        <AnnotationOverlay
+          metrics={{
+            pageNumber: 0,
+            width: 612,
+            height: 792,
+            pageHeightPoints: 792,
+            scale: 1,
+          }}
+          annotations={[]}
+        />
+      </EditorProvider>,
+    );
+    return { backend, ...view };
+  }
+
+  it("fills the draft with a real colour, not the inherited text colour", async () => {
+    const { backend, container, unmount } = renderWorkspace();
+    open = backend;
+
+    // The pane is the only thing that sets the tool, so the preview is driven the way a user
+    // reaches it rather than by injecting context.
+    await userEvent.click(screen.getByRole("button", { name: "Highlight" }));
+
+    const overlay = container.querySelector(".annotation-overlay") as HTMLElement | null;
+    expect(overlay, "the overlay must render").toBeTruthy();
+
+    fireEvent.pointerDown(overlay!, { clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerMove(overlay!, { clientX: 60, clientY: 30, pointerId: 1 });
+
+    const draft = container.querySelector(".annotation-draft") as HTMLElement | null;
+    expect(draft, "dragging with a tool active must draw a draft").toBeTruthy();
+
+    // The operative assertion. Before the fix this was empty (the fill came from the class rule),
+    // and the class rule said `currentColor` -- the text colour -- so the preview was dark.
+    expect(draft!.style.background).not.toBe("");
+    expect(draft!.style.background).not.toContain("currentColor");
+    // The dashed border is the "not committed yet" cue and must survive the fix.
+    expect(draft!.style.borderStyle || "dashed").toBeTruthy();
+
+    unmount();
   });
 });

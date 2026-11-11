@@ -169,8 +169,12 @@ jobs:
           # a byte scan we wrote cannot tell "our writer agrees with itself" from "a reader
           # shows nothing". They move this pin; the seven in `tests/redact_content.rs` need no
           # library and move the `passed` floor instead.
-          if [ "$ignored" -ne 106 ]; then
-            echo "::error::$ignored tests ignored; 106 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured at 107, not 106: the D1 regression in `tests/protect_save.rs` opens a document
+          # this app protected, which needs PDFium because a protected file cannot be read without a
+          # real PDF reader. It is one test, so one mark: the pin moved by exactly that, and the
+          # `passed` floor above did not move at all.
+          if [ "$ignored" -ne 107 ]; then
+            echo "::error::$ignored tests ignored; 107 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -328,12 +332,18 @@ jobs:
           # 944 for the apt-stall guard in `tests/ci_workflow.rs`: +1, PDFium-independent. Re-measured
           # with the PDFium path unset: 944 passed, and 1050 when the ignored tests are included too.
           #
+          # 948, measured on 2026-11-11 while fixing the 1.2.0 hand-test defects: the floor had
+          # drifted four BELOW the tree, so it was re-measured from the tree rather than moved by a
+          # delta (the same rule as above -- 948 is what actually ran). Note this is the count
+          # *before* those fixes: the D1 regression is `#[ignore]`d, so it moves the pin above and
+          # leaves this floor where measurement put it.
+          #
           # (That last number is described rather than spelled out: this step must not contain the
           # ignored-including flag even in prose, and the guard
           # `the_linux_job_does_not_force_pdfium_tests_without_a_library` enforces that as a
           # substring check over the whole step. It caught this comment on the first run.)
-          if [ "$passed" -lt 944 ]; then
-            echo "::error::only $passed tests ran; 944 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 948 ]; then
+            echo "::error::only $passed tests ran; 948 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

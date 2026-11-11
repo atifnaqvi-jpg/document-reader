@@ -53,7 +53,7 @@ pub fn run() {
             app.manage(editor::events::ChangeTickets::new());
             // Session-scoped document passwords (P2.4 T10): in memory only, zeroised on
             // clear, and never written to SQLite or an event.
-            app.manage(editor::session::PasswordStore::new());
+            app.manage(editor::session::shared());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

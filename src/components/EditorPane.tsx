@@ -39,8 +39,21 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
   { kind: "oval", label: "Oval", hint: "Drag a box" },
 ];
 
-/** Colours offered per tool; a full picker would be its own change, not a P2 need. */
-const COLOURS = ["#fff3b0", "#a8e6a1", "#9fd8ff", "#ffb3c1", "#f5a623", "#d1242f"];
+/**
+ * Colours offered per tool; a full picker would be its own change, not a P2 need.
+ *
+ * Named, because the label is what the user reads. A raw `#fff3b0` in a native Windows `<select>` is
+ * a hex string, not a colour: the closed control shows only that text, so the palette read as six
+ * codes nobody could choose between. `value` stays the hex, which is what the annotation dict stores.
+ */
+const COLOURS: { value: string; label: string }[] = [
+  { value: "#fff3b0", label: "Yellow" },
+  { value: "#a8e6a1", label: "Green" },
+  { value: "#9fd8ff", label: "Blue" },
+  { value: "#ffb3c1", label: "Pink" },
+  { value: "#f5a623", label: "Orange" },
+  { value: "#d1242f", label: "Red" },
+];
 
 export function EditorPane({
   entry,
@@ -208,8 +221,8 @@ export function EditorPane({
               onChange={(event) => setStyle({ ...style, color: event.target.value })}
             >
               {COLOURS.map((colour) => (
-                <option key={colour} value={colour}>
-                  {colour}
+                <option key={colour.value} value={colour.value}>
+                  {colour.label}
                 </option>
               ))}
             </select>

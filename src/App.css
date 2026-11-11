@@ -553,11 +553,14 @@ button:disabled {
   margin: 0;
 }
 
+/* The drag preview. Its fill is set inline from the chosen colour, because this rule cannot see it:
+   `background: currentColor` resolved to the inherited *text* colour, so dragging a yellow highlight
+   previewed as a near-black box and only turned yellow once saved. The dashed border stays -- that is
+   the "not committed yet" cue -- but the fill now predicts the mark it will become. */
 .annotation-draft {
   position: absolute;
   border: 1px dashed;
-  background: currentColor;
-  opacity: 0.25;
+  opacity: 0.4;
 }
 
 .annotation-draft-ink {
@@ -767,6 +770,69 @@ button:disabled {
 }
 
 /* P2.7.6 §4: the bundled-font notice, reachable from the menu with no document open. */
+.password-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+
+.password-panel {
+  background: var(--panel, #fff);
+  color: inherit;
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  min-width: 22rem;
+  max-width: 34rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.password-panel h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.password-panel p {
+  margin: 0;
+}
+
+/* The path can be long; it must not stretch the dialog off-screen. */
+.password-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.password-refused {
+  color: var(--danger, #b3261e);
+}
+
+.password-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.password-panel input {
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+}
+
+.password-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+}
+
 .notices-backdrop {
   position: fixed;
   inset: 0;

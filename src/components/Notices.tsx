@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 
 import { getMigrationNotice } from "../api/invoke";
 
@@ -26,6 +27,10 @@ export function Notices({ onClose }: { onClose: () => void }) {
   // data directory. That happened without them asking, so it is stated here rather than
   // only logged -- a migration nobody can see is indistinguishable from one that failed.
   const [migration, setMigration] = useState<string | null>(null);
+  // Read from the running build, never written in: a version typed here would be one more thing to
+  // remember at release time, and it would be *wrong* rather than missing when forgotten -- the
+  // About box would confidently name a release the user is not running.
+  const [version, setVersion] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     // Started inside a resolved promise so a missing IPC boundary (the About surface is
@@ -39,6 +44,21 @@ export function Notices({ onClose }: { onClose: () => void }) {
       .catch(() => {
         // The notice is informational; failing to read it must not break the About surface.
       });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    // Same reasoning as the migration notice: the panel must render in tests and in a plain webview,
+    // so a missing IPC boundary leaves the line out rather than breaking the About surface.
+    Promise.resolve()
+      .then(() => getVersion())
+      .then((running) => {
+        if (live) setVersion(running);
+      })
+      .catch(() => {});
     return () => {
       live = false;
     };
@@ -61,6 +81,10 @@ export function Notices({ onClose }: { onClose: () => void }) {
         </header>
 
         <div className="notices-body">
+          <p>
+            <strong>DocuPro</strong>
+            {version ? <span className="notices-version"> version {version}</span> : null}
+          </p>
           <p>DocuPro edits PDFs on this machine. It sends nothing over the network.</p>
 
           {migration ? (

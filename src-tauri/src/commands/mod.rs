@@ -25,15 +25,44 @@ fn now() -> i64 {
         .unwrap_or_default()
 }
 
+/// Opens a document, optionally unlocking it with `password`.
+///
+/// The password is optional rather than a second command because opening is one gesture to the
+/// user: the first attempt has none and fails with [`AppError::PasswordRequired`], the retry carries
+/// one. A separate `open_document_with_password` would leave two ways to import the same file, and
+/// the import is where the library row is written -- a path that exists twice is a path that can
+/// disagree with itself.
+///
+/// On success the password is remembered for the session (T10), keyed by path, so every later
+/// render and text extraction of this document opens it without a second prompt.
 #[tauri::command]
 pub fn open_document(
     app: tauri::AppHandle,
     db: State<'_, Db>,
+    passwords: State<'_, Arc<PasswordStore>>,
     service: State<'_, Arc<RenderService>>,
     index_service: State<'_, Arc<IndexService>>,
     path: String,
+    password: Option<String>,
 ) -> Result<DocumentMeta, AppError> {
-    let (meta, doc_id, path_on_disk) = db.with(|connection| {
+    if password.as_deref() == Some("") {
+        // An empty password is not an attempt: it would clear a good one and then fail.
+        return Err(AppError::PasswordRequired);
+    }
+
+    // Remembered *before* the import reads the file: `open_and_import` reaches PDFium through the
+    // provider, which resolves the password from this store. Remembering after would make the first
+    // open fail and only the second succeed.
+    //
+    // The previous entry is captured so a failed unlock can put it back. Without that, one mistyped
+    // password would replace a working one and every later render of an already-open document would
+    // fail -- a wrong password must cost the user one prompt, not their session.
+    let previous = passwords.get(&path);
+    if let Some(supplied) = password.clone() {
+        passwords.remember(&path, SessionPassword::new(supplied));
+    }
+
+    let imported = db.with(|connection| {
         let entry = library::open_and_import(connection, path.as_ref(), now())?;
 
         // Re-opening is the only moment a document's bytes can change under a stable id,
@@ -48,7 +77,22 @@ pub fn open_document(
 
         let doc_id = entry.meta.id.clone();
         Ok((entry.meta, doc_id, entry.path))
-    })?;
+    });
+
+    let (meta, doc_id, path_on_disk) = match imported {
+        Ok(ok) => ok,
+        Err(error) => {
+            // The supplied password did not open the file, so it is not the document's password.
+            // Restore what was held before and let the caller ask again.
+            match previous {
+                Some(held) => passwords.remember_shared(&path, held),
+                None => {
+                    passwords.forget(&path);
+                }
+            }
+            return Err(error);
+        }
+    };
 
     // Indexing is started here rather than from the viewer, so a document is searchable
     // even if the user opens it and immediately moves to another one.
@@ -1309,7 +1353,7 @@ pub async fn revert_page_text(
 #[tauri::command]
 pub async fn decrypt_copy(
     db: State<'_, Db>,
-    passwords: State<'_, PasswordStore>,
+    passwords: State<'_, Arc<PasswordStore>>,
     document_id: String,
     password: String,
 ) -> Result<crate::editor::protect::DecryptOutcome, AppError> {
@@ -1647,7 +1691,10 @@ pub async fn sign_document(
 
 /// Drops a document's remembered password (P2.4 T10), called when the document closes.
 #[tauri::command]
-pub fn forget_password(passwords: State<'_, PasswordStore>, path: String) -> Result<(), AppError> {
+pub fn forget_password(
+    passwords: State<'_, Arc<PasswordStore>>,
+    path: String,
+) -> Result<(), AppError> {
     passwords.forget(&path);
     Ok(())
 }

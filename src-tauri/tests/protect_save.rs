@@ -304,3 +304,128 @@ fn protecting_an_already_protected_file_is_refused() {
          work; got: {message}"
     );
 }
+
+/// **D1 regression**: the app can open the file the app itself protected.
+///
+/// The release defect was that it could not. `protect_save` writes a non-empty *user* password, so
+/// every load without one fails with `PasswordError`; the provider passed `None` unconditionally and
+/// the user saw `failed to open PDF: PdfiumLibraryInternalError(PasswordError, )` in a banner with no
+/// prompt anywhere. The file was readable -- nothing in the app ever asked for the password.
+///
+/// Two halves, because either alone can pass for the wrong reason:
+///
+/// * without a remembered password the open must fail with `PasswordRequired` (not a PDFium detail),
+///   which is what makes the UI prompt instead of printing an internal; and
+/// * with the password remembered (T10) the open must succeed, which is what makes the prompt worth
+///   showing. A test that only asserted the failure would be green on a build that could never open
+///   the document at all.
+///
+/// `PdfProvider::open` is the real import path, not a hand-rolled `load_pdf_from_file`: the defect
+/// lived in the wiring between the store and that path, and re-implementing the load here would
+/// reproduce the wiring I wrote rather than the wiring the app uses.
+#[test]
+#[ignore = "needs the real PDFium library; run under --include-ignored with PDFIUM_LIBRARY_PATH"]
+fn the_app_opens_the_protected_file_it_wrote_once_it_has_the_password() {
+    use document_reader_lib::editor::session::SessionPassword;
+    use document_reader_lib::model::AppError;
+    use document_reader_lib::provider::{PdfProvider, ReaderProvider};
+
+    let dir = temp_dir("d1-reopen");
+    let source = source_pdf(&dir);
+
+    let outcome = protect::protect_save(
+        &source,
+        "user-secret",
+        "owner-secret",
+        protect::PermissionsChoice::all(),
+    )
+    .expect("protect_save should succeed");
+    let protected = std::path::PathBuf::from(&outcome.path);
+
+    // A missing library must fail this guard rather than turn it into a vacuous pass, exactly as
+    // `a_protected_file_refuses_a_wrong_password` insists.
+    if !PdfProvider::pdfium_available() {
+        panic!("this guard needs the real PDFium library, not a missing one");
+    }
+
+    let store = document_reader_lib::editor::session::shared();
+    // The store is process-wide, so a leftover entry from an earlier test in this binary would make
+    // the "without a password" half pass for the wrong reason.
+    store.forget(&outcome.path);
+
+    match PdfProvider.open(&protected) {
+        Err(AppError::PasswordRequired) => {}
+        Err(other) => panic!("without a password the open must ask for one, not fail as {other:?}"),
+        Ok(_) => panic!("a document with a user password must not open without it"),
+    }
+
+    store.remember(&outcome.path, SessionPassword::new("user-secret"));
+    let meta = PdfProvider
+        .open(&protected)
+        .expect("with the password remembered, the app must open its own protected output");
+
+    assert_eq!(
+        meta.pages,
+        Some(1),
+        "the reopened document keeps its one page"
+    );
+
+    // The wrong password path must stay distinguishable, because the UI says different things.
+    store.remember(&outcome.path, SessionPassword::new("not-the-password"));
+    match PdfProvider.open(&protected) {
+        Err(AppError::WrongPassword) => {}
+        Err(other) => panic!("a refused password must report WRONG_PASSWORD, got {other:?}"),
+        Ok(_) => panic!("a wrong password must not open the document"),
+    }
+
+    // The read paths must work too, not just the import. Rendering, text extraction and page count
+    // each load the document themselves; covering only `open` left a mutation that ignored the store
+    // in the *render* path surviving this test, which is what "the viewer cannot draw what the app
+    // imported" would look like in the field.
+    store.remember(&outcome.path, SessionPassword::new("user-secret"));
+
+    let raster = PdfProvider::render_page_at(&protected, 0, 1.0)
+        .expect("the viewer must be able to render a document it could open");
+    assert!(
+        raster.width > 0 && raster.height > 0 && !raster.bytes.is_empty(),
+        "a rendered page must have pixels, not an empty bitmap"
+    );
+    PdfProvider::extract_page_text(&protected, 0)
+        .expect("text extraction must work on a protected document once its password is known");
+    assert_eq!(
+        PdfProvider::page_count(&protected).expect("page count must work"),
+        1,
+        "the protected copy still has one page"
+    );
+
+    // The **cached** path is the one the viewer actually uses (`RenderService` -> `render_cached` ->
+    // `DocumentHandles::acquire`), and it opens the document through a different function than the
+    // one-shot reads above. Mutating only `acquire` to ignore the store survives every assertion
+    // written up to here, which is exactly the "viewer cannot draw the document the app imported"
+    // symptom -- so it has to be driven through the handle cache, not around it.
+    let handles = document_reader_lib::provider::DocumentHandles::new();
+    PdfProvider::render_cached(&handles, &protected, None, 0, 1.0, true).expect(
+        "the viewer's cached render must open a protected document with its known password",
+    );
+    assert_eq!(
+        handles.open_count(),
+        1,
+        "the protected document is held as one handle"
+    );
+    // A second render is a cache hit rather than a re-open; it must not fail for want of a password
+    // the first one consumed.
+    PdfProvider::render_cached(&handles, &protected, None, 0, 1.0, true)
+        .expect("a cached second render must not re-prompt for the password");
+
+    // And with the password dropped, the same cached path must ask rather than fail obscurely.
+    store.forget(&outcome.path);
+    handles.forget_path(&protected);
+    match PdfProvider::render_cached(&handles, &protected, None, 0, 1.0, true) {
+        Err(AppError::PasswordRequired) => {}
+        Err(other) => {
+            panic!("a render without the password must ask for it, not fail as {other:?}")
+        }
+        Ok(_) => panic!("a protected document must not render without its password"),
+    }
+    let _ = dir;
+}

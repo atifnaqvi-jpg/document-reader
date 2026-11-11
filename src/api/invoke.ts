@@ -48,8 +48,15 @@ export function toAppError(value: unknown): AppError {
   return { code: "UNKNOWN", message: String(value) };
 }
 
-export const openDocument = (path: string) =>
-  invoke<DocumentMeta>("open_document", { path });
+/**
+ * Opens a document, optionally with a password.
+ *
+ * `password` is omitted on the first attempt. A document protected by this app has a non-empty user
+ * password, so that attempt fails with `PASSWORD_REQUIRED` and the caller prompts; `WRONG_PASSWORD`
+ * means a password was supplied and refused, which is the same prompt with a different message.
+ */
+export const openDocument = (path: string, password?: string) =>
+  invoke<DocumentMeta>("open_document", { path, password: password ?? null });
 
 export const listLibrary = () => invoke<LibraryEntry[]>("list_library");
 

@@ -341,6 +341,10 @@ export function AnnotationOverlay({
             width: draft.width,
             height: draft.height,
             borderColor: style.color,
+            // The fill has to come from the chosen colour rather than `currentColor`, or the preview
+            // shows the text colour and the mark appears to change colour on save. Matched to the
+            // saved mark's opacity so the preview is the same weight, not merely the same hue.
+            background: style.color,
           }}
         />
       ) : null}

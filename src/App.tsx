@@ -9,6 +9,8 @@ import { CommentPane } from "./components/CommentPane";
 import { RedactPanel } from "./components/RedactPanel";
 import { EditorPane } from "./components/EditorPane";
 import { ErrorBanner, LibraryPane } from "./components/LibraryPane";
+import { PasswordPrompt } from "./components/PasswordPrompt";
+import type { PasswordAsk } from "./components/PasswordPrompt";
 import { IndexingIndicator, SearchPane } from "./components/SearchPane";
 import { Toolbar } from "./components/Toolbar";
 import { ViewerPane } from "./components/ViewerPane";
@@ -36,6 +38,11 @@ function Workspace() {
   const [selectRequest, setSelectRequest] = useState<{ id: string; nonce: number } | null>(
     null,
   );
+  // The file chosen from the picker, pending its first import attempt. A state variable rather
+  // than a local so the open path can stay a stable callback.
+  const [pendingPath, setPendingPath] = useState<string | null>(null);
+  // Non-null while a protected document is waiting for its password.
+  const [passwordAsk, setPasswordAsk] = useState<PasswordAsk | null>(null);
   // Which page the viewer is showing, reported up only so the EditorProvider can scope
   // its annotation list. The viewer remains the owner of its own page state.
   const [visiblePage, setVisiblePage] = useState(0);
@@ -65,20 +72,56 @@ function Workspace() {
     try {
       const picked = await openFileDialog({ multiple: false, filters: OPEN_FILTERS });
       if (typeof picked !== "string") return;
-
-      setBusy(true);
-      const meta = await openDocument(picked);
-      const list = await refreshLibrary();
-      // Opening a document starts from its first page, not wherever the previous
-      // document was left, so any pending jump is dropped.
-      setJump(null);
-      setSelected(list.find((e) => e.id === meta.id) ?? null);
+      setPendingPath(picked);
     } catch (e) {
       setError(toAppError(e));
-    } finally {
-      setBusy(false);
     }
-  }, [refreshLibrary]);
+  }, []);
+
+  /**
+   * Imports a path, prompting for a password when the document needs one.
+   *
+   * The retry lives here rather than in a loop over `openDocument` because the prompt is a distinct
+   * user gesture: each refusal must wait for a new answer, and a loop would either re-prompt
+   * instantly or exhaust itself. `PASSWORD_REQUIRED` and `WRONG_PASSWORD` both lead back to the
+   * prompt; only the second says the previous answer was wrong.
+   */
+  const openPath = useCallback(
+    async (path: string, password?: string) => {
+      setError(null);
+      setBusy(true);
+      try {
+        const meta = await openDocument(path, password);
+        const list = await refreshLibrary();
+        // Opening a document starts from its first page, not wherever the previous
+        // document was left, so any pending jump is dropped.
+        setJump(null);
+        setSelected(list.find((e) => e.id === meta.id) ?? null);
+        setPasswordAsk(null);
+      } catch (e) {
+        const failure = toAppError(e);
+        if (failure.code === "PASSWORD_REQUIRED" || failure.code === "WRONG_PASSWORD") {
+          // A refused password is already reported in the prompt, so no banner sits behind it
+          // saying the same thing in a less useful way.
+          setError(null);
+          setPasswordAsk({ path, refused: failure.code === "WRONG_PASSWORD" });
+        } else {
+          setPasswordAsk(null);
+          setError(failure);
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshLibrary],
+  );
+
+  useEffect(() => {
+    if (!pendingPath) return;
+    const path = pendingPath;
+    setPendingPath(null);
+    void openPath(path);
+  }, [pendingPath, openPath]);
 
   const handleSelect = useCallback((entry: LibraryEntry) => {
     setJump(null);
@@ -149,6 +192,17 @@ function Workspace() {
         getCurrentPage={getCurrentPage}
       />
       <ErrorBanner error={error ?? fullscreenError} />
+      {passwordAsk ? (
+        <PasswordPrompt
+          // Keyed by path so switching files starts from an empty field, while a refusal on the
+          // same file keeps what was typed for a quick correction.
+          key={passwordAsk.path}
+          ask={passwordAsk}
+          busy={busy}
+          onSubmit={(password) => void openPath(passwordAsk.path, password)}
+          onCancel={() => setPasswordAsk(null)}
+        />
+      ) : null}
       <main className={`workspace${chromeHidden ? " chrome-hidden" : ""}`}>
         <aside className="sidebar">
           <LibraryPane

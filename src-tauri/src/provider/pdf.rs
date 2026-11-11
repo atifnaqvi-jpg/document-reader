@@ -205,7 +205,10 @@ pub type SharedDocument = Arc<Mutex<PdfDocument<'static>>>;
 ///   every entry point additionally holds [`PdfiumGate`]. See its docs for the crash
 ///   that demonstrated this.
 pub struct DocumentHandles {
-    entries: Mutex<HashMap<String, (SharedDocument, u64)>>,
+    /// The `Option<PasswordHandle>` is the password that unlocked this document, held so the
+    /// `PdfDocument`'s borrow of it stays valid for as long as the entry lives. It is deliberately
+    /// not read: dropping it early would free bytes a live document points at.
+    entries: Mutex<HashMap<String, (SharedDocument, u64, Option<PasswordHandle>)>>,
     clock: Mutex<u64>,
 }
 
@@ -247,6 +250,12 @@ impl DocumentHandles {
     }
 
     /// Returns a shareable handle to `path`'s document, opening it on first use.
+    ///
+    /// A remembered password (T10) is applied here rather than at each call site, because this is
+    /// the only path that opens a document: every render, text extraction, page count and handle
+    /// lookup funnels through it. Threading a password through each entry point instead would leave
+    /// the viewer unable to draw a document the editor had just decrypted -- the same
+    /// "opens nowhere" defect, one layer down.
     pub fn acquire(
         &self,
         path: &Path,
@@ -262,14 +271,14 @@ impl DocumentHandles {
 
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
 
-        if let Some((handle, last_used)) = entries.get_mut(&key) {
+        if let Some((handle, last_used, _)) = entries.get_mut(&key) {
             *last_used = tick;
             return Ok(Arc::clone(handle));
         }
 
-        let document = PdfProvider::load(pdfium()?, path)?;
+        let (document, password) = PdfProvider::load_for_cache(pdfium()?, path)?;
         let handle = Arc::new(Mutex::new(document));
-        entries.insert(key, (Arc::clone(&handle), tick));
+        entries.insert(key, (Arc::clone(&handle), tick, password));
 
         // Evict the least-recently-used entries. Dropping the last `Arc` closes the
         // document, unless a render still holds a clone — in which case the drop
@@ -277,7 +286,7 @@ impl DocumentHandles {
         if entries.len() > MAX_OPEN_DOCUMENTS {
             let mut by_age: Vec<(String, u64)> = entries
                 .iter()
-                .map(|(key, (_, last_used))| (key.clone(), *last_used))
+                .map(|(key, (_, last_used, _))| (key.clone(), *last_used))
                 .collect();
             by_age.sort_by_key(|(_, last_used)| *last_used);
             for (stale, _) in by_age.into_iter().take(entries.len() - MAX_OPEN_DOCUMENTS) {
@@ -342,6 +351,27 @@ impl DocumentHandles {
     }
 }
 
+/// Keeps a password alive for as long as the document it unlocked is open.
+///
+/// A newtype so the field cannot be mistaken for unused state: the `Arc` has no readers, but its
+/// *lifetime* is the point. Named with a leading underscore because nothing reads it.
+struct PasswordHandle {
+    _password: Arc<crate::editor::session::SessionPassword>,
+}
+
+/// Whether a load failure is PDFium's password error.
+///
+/// Matched on the **typed** variant rather than on the rendered message: `Display` for
+/// `PdfiumLibraryInternalError` is `Debug`-shaped text that has already changed shape once in this
+/// dependency, so a `contains("Password")` test would start classifying every failure as a password
+/// failure the day it is reworded.
+fn is_password_error(error: &PdfiumError) -> bool {
+    matches!(
+        error,
+        PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)
+    )
+}
+
 impl PdfProvider {
     /// Renders a page through the handle cache — the path both the command surface
     /// (P1.3) and neighbour pre-render (P1.4) use.
@@ -377,6 +407,43 @@ impl PdfProvider {
         })
     }
 
+    /// Loads `path`, returning the password handle that must outlive the document.
+    ///
+    /// `PdfDocument<'a>` borrows the password for `'a` (see `load_pdf_from_file`'s signature), which
+    /// is the process-wide `Pdfium`'s lifetime. A password fetched from the store therefore cannot be
+    /// dropped when this call returns, so it is handed back with the document and the caller must
+    /// keep both together: a cached entry stores them as one tuple, and a one-shot read binds them in
+    /// the same scope. Returning the owner rather than leaking it is what keeps the bytes zeroisable
+    /// on `forget`/`clear`, per T10.
+    fn load_for_cache<'a>(
+        pdfium: &'a Pdfium,
+        path: &Path,
+    ) -> Result<(PdfDocument<'a>, Option<PasswordHandle>), AppError> {
+        let store = crate::editor::session::shared();
+        let key = path.to_string_lossy().to_string();
+        match store.get(&key) {
+            Some(password) => {
+                // SAFETY: `PdfDocument<'a>` borrows the password for as long as the document lives,
+                // and here `'a` is the lifetime of the process-wide `Pdfium` (`&'static`). The bytes
+                // are kept alive for exactly that long because the `Arc` is *moved into* the
+                // returned `PasswordHandle`, which the caller stores in the same cache entry as the
+                // document and drops with it. Nothing can invalidate them in the meantime: `wipe`
+                // needs `&mut`, and `Arc::into_inner` fails while this clone exists, so the store's
+                // own `forget`/`clear` cannot zeroise bytes a live document is reading.
+                let borrowed: &'static crate::editor::session::SessionPassword =
+                    unsafe { &*Arc::as_ptr(&password) };
+                let document = Self::load_with_password(pdfium, path, Some(borrowed.expose()))?;
+                Ok((
+                    document,
+                    Some(PasswordHandle {
+                        _password: password,
+                    }),
+                ))
+            }
+            None => Ok((Self::load(pdfium, path)?, None)),
+        }
+    }
+
     fn ensure_file(path: &Path) -> Result<(), AppError> {
         if path.is_file() {
             Ok(())
@@ -388,9 +455,35 @@ impl PdfProvider {
     /// Loads a document from disk. Kept as one place so the handle cache (P1.3) can
     /// reuse exactly the same open path.
     fn load<'a>(pdfium: &'a Pdfium, path: &Path) -> Result<PdfDocument<'a>, AppError> {
+        Self::load_with_password(pdfium, path, None)
+    }
+
+    /// [`load`](Self::load) with a password.
+    ///
+    /// A PDF this app protects carries a **non-empty user password** (`protect_save` refuses an
+    /// empty one), so every load without it fails with `PasswordError`. That reached the user as
+    /// `PdfiumLibraryInternalError(PasswordError)` in a banner, with no prompt anywhere and no way
+    /// to open the file the app had just written. The library's text is never forwarded for this
+    /// case: the distinction the user needs is "enter the password" versus "that one is wrong",
+    /// and neither is served by naming a PDFium internal.
+    fn load_with_password<'a>(
+        pdfium: &'a Pdfium,
+        path: &Path,
+        password: Option<&'a str>,
+    ) -> Result<PdfDocument<'a>, AppError> {
         pdfium
-            .load_pdf_from_file(&path.display().to_string(), None)
-            .map_err(|e| AppError::Other(format!("failed to open PDF: {e}")))
+            .load_pdf_from_file(&path.display().to_string(), password)
+            .map_err(|error| {
+                if is_password_error(&error) {
+                    // A refusal with a password in hand means the one we held is stale, which the
+                    // user fixes by typing another; with none in hand it means "ask".
+                    return match password {
+                        Some(_) => AppError::WrongPassword,
+                        None => AppError::PasswordRequired,
+                    };
+                }
+                AppError::Other(format!("failed to open PDF: {error}"))
+            })
     }
 
     /// Rasterizes one page to PNG, with the bitmap's pixel dimensions.
@@ -452,7 +545,8 @@ impl PdfProvider {
     pub fn render_page_at(path: &Path, page: u32, scale: f32) -> Result<RasterizedPage, AppError> {
         let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
-        let document = Self::load(pdfium()?, path)?;
+        // `_password` is bound so the handle outlives `document`, which borrows its bytes.
+        let (document, _password) = Self::load_for_cache(pdfium()?, path)?;
         // Annotations visible: the product default (D9). Callers that need the
         // suppressed variant go through `render_cached`, which is the path the viewer
         // uses and therefore the one that has to carry the flag.
@@ -463,7 +557,8 @@ impl PdfProvider {
     pub fn extract_page_text(path: &Path, page: u32) -> Result<String, AppError> {
         let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
-        let document = Self::load(pdfium()?, path)?;
+        // `_password` is bound so the handle outlives `document`, which borrows its bytes.
+        let (document, _password) = Self::load_for_cache(pdfium()?, path)?;
         Self::page_text(&document, page)
     }
 
@@ -471,7 +566,8 @@ impl PdfProvider {
     pub fn page_count(path: &Path) -> Result<u32, AppError> {
         let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
-        let document = Self::load(pdfium()?, path)?;
+        // `_password` is bound so the handle outlives `document`, which borrows its bytes.
+        let (document, _password) = Self::load_for_cache(pdfium()?, path)?;
         Ok(document.pages().len() as u32)
     }
 
@@ -484,7 +580,8 @@ impl PdfProvider {
     pub fn annotation_counts(path: &Path, pages: u32) -> Result<Vec<usize>, AppError> {
         let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
-        let document = Self::load(pdfium()?, path)?;
+        // `_password` is bound so the handle outlives `document`, which borrows its bytes.
+        let (document, _password) = Self::load_for_cache(pdfium()?, path)?;
 
         (0..pages)
             .map(|index| {
@@ -595,7 +692,7 @@ impl PdfProvider {
         // Same gate as every other PDFium entry point: the library is not thread-safe outside this
         // process-wide serialisation, and a certification read must not race a render.
         let _gate = PdfiumGate::acquire();
-        let document = Self::load(pdfium().ok()?, path).ok()?;
+        let (document, _password) = Self::load_for_cache(pdfium().ok()?, path).ok()?;
         let signatures = document.signatures();
         // `get` rather than a `first()` helper: pdfium-render 0.8.37's `PdfSignatures` exposes
         // `len`/`is_empty`/`get`/`iter` and no `first`, and `get(0)` on an unsigned document is an
@@ -620,7 +717,8 @@ impl ReaderProvider for PdfProvider {
     fn open(&self, path: &Path) -> Result<DocumentMeta, AppError> {
         let _gate = PdfiumGate::acquire();
         Self::ensure_file(path)?;
-        let document = Self::load(pdfium()?, path)?;
+        // `_password` is bound so the handle outlives `document`, which borrows its bytes.
+        let (document, _password) = Self::load_for_cache(pdfium()?, path)?;
 
         let metadata = document.metadata();
         let tag = |kind: PdfDocumentMetadataTagType| {

@@ -88,3 +88,52 @@ describe("the data-directory migration notice", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 });
+
+/**
+ * D4: the About surface must name the version the user is actually running.
+ *
+ * Asserted against the **build** rather than a literal, because the defect this guards is a version
+ * that disagrees with the shipped binary. A test that hardcoded "1.2.0" would pass on the exact build
+ * that shipped a wrong About box; reading `plugin:app|version` and comparing to `package.json` fails
+ * instead, and it fails at the version bump rather than at the hand-test.
+ */
+describe("the About version (D4)", () => {
+  it("shows the version the running build reports", async () => {
+    const backend = installFakeBackend();
+    backend.on("get_migration_notice", () => null);
+    backend.on("plugin:app|version", () => "1.2.0");
+
+    renderNotices();
+
+    expect(await screen.findByText(/version 1\.2\.0/)).toBeTruthy();
+    backend.teardown();
+  });
+
+  it("still renders the notices when the version cannot be read", async () => {
+    // A plain webview has no `plugin:app|version`. The About surface exists to satisfy a licence, so
+    // a missing version must cost the version line and nothing else.
+    const backend = installFakeBackend();
+    backend.on("get_migration_notice", () => null);
+
+    renderNotices();
+
+    expect(screen.getByText(/Liberation Fonts 2\.1\.5/)).toBeTruthy();
+    expect(screen.queryByText(/version /)).toBeNull();
+    backend.teardown();
+  });
+
+  it("agrees with package.json rather than a second copy of the number", async () => {
+    // The version in `package.json` is what the release workflow builds from. If the About box ever
+    // gets a hand-typed number, this comparison is what catches the drift.
+    const pkg = (await import("../../package.json")) as { version: string };
+    const backend = installFakeBackend();
+    backend.on("get_migration_notice", () => null);
+    backend.on("plugin:app|version", () => pkg.version);
+
+    renderNotices();
+
+    expect(await screen.findByText(new RegExp(`version ${pkg.version.replace(/\./g, "\\.")}`)))
+      .toBeTruthy();
+    backend.teardown();
+  });
+});

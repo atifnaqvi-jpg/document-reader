@@ -110,6 +110,32 @@ human. What exists is a build to test:
   (third reproduction; recorded in `AGENTS.md`). The installer comes from the same-SHA re-run,
   which is the policy the design mandates — no claim in this section rests on a single Windows run.
 
+### Fixed after hand-testing
+
+Four defects, only one of which a hand-test reported. The others were found while fixing it and by
+reading the source. Each has a guard now, and each guard was mutation-checked: the defect was put
+back and the guard failed. Where a report existed it is quoted as recorded; where none exists, the
+entry describes the mechanism rather than inventing a symptom.
+
+- **A protected document could not be re-opened.** *Protect…* writes a non-empty opening password, and
+  every read path then loaded the file **without** one, so a document the app had just written failed
+  to open with `PdfiumLibraryInternalError(PasswordError, )` in a banner and no prompt anywhere. The
+  password is now remembered for the session and used by every load — import, render, text
+  extraction, page count and save — so the file opens; a wrong password is reported as a wrong
+  password, and a missing one asks for it instead of leaking a library internal. Nothing about the
+  written file changed: it was always readable, and nothing in the app ever asked for the password.
+
+- **The colour picker showed hex codes.** The palette was six colour codes with no names, so there
+  was nothing in the control to choose between except the codes themselves. The options are named
+  now (Yellow, Green, …); the value stored in the document is still the hex.
+- **The drag preview ignored the colour you picked.** While dragging a highlight, the box was
+  painted with `currentColor`, which is the colour of the **text** around it rather than the
+  annotation colour, so the preview did not match the mark that appeared on release. The saved
+  annotation was always painted correctly, which is why this only ever showed during a drag. The
+  preview now fills with the colour you chose.
+- **The About box did not name its version.** It reads the running build's version rather than a
+  typed-in number, so it cannot disagree with what you installed.
+
 ### Toolchain
 
 - The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
