@@ -555,7 +555,7 @@ fn a_mark_over_drawing_keeps_its_marks_so_the_choice_is_still_the_users() {
 }
 
 #[test]
-fn the_outcome_reaches_the_frontend_as_vectorPathsRemaining() {
+fn the_outcome_reaches_the_frontend_as_vector_paths_remaining() {
     // The panel reads `outcome.vectorPathsRemaining`; the struct field is `vector_paths_remaining`.
     // That gap is bridged by `#[serde(rename_all = "camelCase")]`, and a rename that stopped
     // applying -- a hand-written `rename` on the struct, a field moved to a sub-struct, a
