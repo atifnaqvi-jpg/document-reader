@@ -36,6 +36,12 @@ jobs:
   build-windows:
     name: Build Windows installer
     runs-on: windows-latest
+    # Measured healthy at 523 s on 2026-11-12 (run 43133327347). "Assert the PDFium tests
+    # actually ran" hung here for 62 min on 8d12b49 (run 43125163499) while the identical step
+    # passed in 65 s on this run. Unbounded, that hang would have occupied the runner until the
+    # 6 h cap and produced no installer and no diagnosis. 45 min covers a cold cargo cache plus
+    # the 137 s installer build with roughly 5x headroom.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4

@@ -204,9 +204,16 @@ fi
 # The apt-stall guard adds one in `tests/ci_workflow.rs`.
 # Measured, not incremented: 944 passed with PDFIUM_LIBRARY_PATH unset, 1050 with --include-ignored.
 # Now 944/106 and 1050/0.
-PIN_PLAIN_PASSED=948
-PIN_PLAIN_IGNORED=106
-PIN_IGNORED_PASSED=1054
+# `tests/ci_workflow.rs` and `tests/release_workflow.rs` add two more, both PDFium-independent:
+# the Windows job's `timeout-minutes: 30` and the release job's `timeout-minutes: 45`. They exist
+# because the `--include-ignored` step on Windows was measured hanging for 25 and 62 minutes on
+# the same commit where it passed in 198 s, and an unbounded hang reports `in_progress` until
+# GitHub's 6 h cap -- telling nobody the tree is unverified and blocking `rerun-failed-jobs`.
+# Measured, not incremented: 959 passed with PDFIUM_LIBRARY_PATH unset, 1066 with --include-ignored.
+# Ignored is 107 in the plain shape and 0 in the include-ignored shape: 959 + 107 = 1066.
+PIN_PLAIN_PASSED=959
+PIN_PLAIN_IGNORED=107
+PIN_IGNORED_PASSED=1066
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

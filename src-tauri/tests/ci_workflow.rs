@@ -381,8 +381,8 @@ fn the_linux_job_pins_the_measured_passed_floor() {
     let tests_step = tests_step.split("- name:").next().unwrap_or(tests_step);
 
     assert!(
-        tests_step.contains(r#"if [ "$passed" -lt 957 ]"#),
-        "the Linux job must pin the non-PDFium baseline at the measured 957. \
+        tests_step.contains(r#"if [ "$passed" -lt 959 ]"#),
+        "the Linux job must pin the non-PDFium baseline at the measured 959. \
          A floor below the current count cannot detect a test that stopped being collected."
     );
 }
@@ -495,5 +495,54 @@ fn a_stalled_dependency_install_fails_visibly_instead_of_hanging() {
         install.contains("attempt"),
         "the install must retry rather than fail on the first slow mirror; the step that hung \
          three times was transient, not broken"
+    );
+}
+
+/// The Windows job's `--include-ignored` step has two failure modes, and only one of them
+/// produces a red check.
+///
+/// Measured 2026-11-12 at `8d12b49`, four attempts on the same binary: two died with
+/// `0xc0000005 STATUS_ACCESS_VIOLATION` in `textedit_gates` after ~30 of 65 tests, two hung
+/// (25 min in CI, 62 min in the release run), and one passed in 198 s. The crash is the
+/// documented intermittent and is at least *visible*. The hang is the dangerous one: the step
+/// declared no `timeout-minutes`, so it reported `in_progress` until GitHub's 6 h cap — a
+/// six-hour silence that says nothing and, because GitHub refuses to re-run a running
+/// workflow, also blocks the recovery.
+///
+/// The bound is measured, not guessed: the whole job took 380 s on run 43126273588. 30 min is
+/// roughly five times that, so a cold cache and a slow runner still fit.
+///
+/// This test does not claim the flake is fixed. It asserts the flake may no longer be silent.
+///
+/// Mutation-verified: deleting `timeout-minutes: 30` from `ci.yml`'s `windows-check` job fails
+/// this test. Moving it to a different job also fails it, because the assertion reads the
+/// `windows-check` body specifically rather than the file as a whole.
+#[test]
+fn the_windows_job_is_bounded_so_a_hung_suite_fails_instead_of_going_quiet() {
+    let text = ci_workflow();
+    let windows_job = text
+        .split("  windows-check:")
+        .nth(1)
+        .expect("the workflow must define the Windows job");
+    // The next job at this indent ends this one; there is none after it today, but slicing on
+    // the *next* job keeps the assertion honest if one is added below.
+    let job_body = windows_job
+        .split("\n  frontend:")
+        .next()
+        .unwrap_or(windows_job);
+
+    assert!(
+        job_body.contains("timeout-minutes: 30"),
+        "the Windows job must carry a `timeout-minutes: 30` bound. Its `--include-ignored` step \
+         has hung for 25-62 minutes on a commit that passed in 198 s on another attempt; \
+         unbounded, that reports `in_progress` until the 6 h job cap and blocks re-runs."
+    );
+
+    // A bound on the wrong job would satisfy the string check above while leaving the hanging
+    // step unbounded, so assert this job actually contains the step that hangs.
+    assert!(
+        job_body.contains("Assert the PDFium tests actually ran"),
+        "the `windows-check` job must still contain the `--include-ignored` step the timeout is \
+         there to bound; if that step moved, move the timeout with it"
     );
 }

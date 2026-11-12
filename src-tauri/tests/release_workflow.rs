@@ -715,3 +715,38 @@ jobs:
 ";
     assert_eq!(publish_input(commented, "prerelease"), None);
 }
+
+/// The release job must be bounded, for a sharper reason than `ci.yml`'s equivalent: a release
+/// build that hangs does not merely fail to report — it produces no installer at all, and the
+/// run sits at `in_progress` until GitHub's 6 h cap.
+///
+/// Measured on `8d12b49`, same commit, three attempts at the `Assert the PDFium tests actually
+/// ran` step: 65 s when it passed (run 43133327347), and 62 min hung in run 43125163499. That
+/// is a ~57x spread on identical bytes, which is why this is a stability bound rather than a
+/// performance one.
+///
+/// Mutation-verified: deleting `timeout-minutes: 45` from `release-windows.yml` fails this test.
+#[test]
+fn the_release_build_is_bounded_so_a_hung_suite_cannot_hold_the_runner() {
+    let text = workflow();
+    let job = text
+        .split("  build-windows:")
+        .nth(1)
+        .expect("the workflow must define the Windows build job");
+    // Steps start at indent 4; the job body is everything before the next top-level job.
+    let job_body = job.split("\njobs:").next().unwrap_or(job);
+
+    assert!(
+        job_body.contains("timeout-minutes: 45"),
+        "the release job must carry a `timeout-minutes: 45` bound. Its `--include-ignored` step \
+         has hung for 62 minutes where the same step took 65 s on another attempt, and an \
+         unbounded hang both withholds the installer and reports `in_progress` until the cap."
+    );
+
+    // The bound is only meaningful if the step it protects is still in this job.
+    assert!(
+        job_body.contains("Assert the PDFium tests actually ran"),
+        "the build job must still contain the `--include-ignored` step the timeout bounds; if \
+         that step moved to another job, move the timeout with it"
+    );
+}

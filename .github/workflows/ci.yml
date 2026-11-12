@@ -347,8 +347,11 @@ jobs:
           # a user reaches, `+1` on the serialized key the frontend actually reads), and no test
           # removed. 948 + 9 = 957, which is what actually ran; the ignored count above is
           # unchanged because every one of them runs without PDFium.
-          if [ "$passed" -lt 957 ]; then
-            echo "::error::only $passed tests ran; 957 is the non-PDFium baseline. A test stopped being collected."
+          # 959, measured on 2026-11-12: two more PDFium-independent tests, one in
+          # `tests/ci_workflow.rs` and one in `tests/release_workflow.rs`, pinning the Windows job
+          # timeouts. See `tests/ci_workflow.rs` for why an unbounded hang is worse than a red.
+          if [ "$passed" -lt 959 ]; then
+            echo "::error::only $passed tests ran; 959 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
@@ -376,6 +379,13 @@ jobs:
   windows-check:
     name: Windows compile check + render smoke (shipping target)
     runs-on: windows-latest
+    # Measured healthy at 380 s on 2026-11-12 (run 43126273588). The `--include-ignored` step
+    # below has since been observed to hang, not only crash: 25 min in CI and 62 min in the
+    # release workflow, on the same commit that passed in two minutes on another attempt.
+    # Without a bound a hang reports `in_progress` until GitHub's 6 h cap, which tells nobody
+    # the tree is unverified and blocks `rerun-failed-jobs` for the whole time. 30 min is ~5x
+    # the healthy run, so a slow runner still fits while a hang becomes a named failure.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
