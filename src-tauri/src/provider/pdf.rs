@@ -187,6 +187,10 @@ impl Drop for PdfiumGate {
 /// A document handle handed out to a render: shared ownership of the loaded document.
 pub type SharedDocument = Arc<Mutex<PdfDocument<'static>>>;
 
+/// One cached document: the shared handle, the LRU tick of its last use, and the password that
+/// unlocked it (see [`PasswordHandle`] — it is held for the borrow, not read).
+type CacheEntry = (SharedDocument, u64, Option<PasswordHandle>);
+
 /// Open `PdfDocument` handles keyed by `(path, content_hash)` (P1-D5), so page
 /// turns do not re-open and re-parse the file.
 ///
@@ -205,10 +209,11 @@ pub type SharedDocument = Arc<Mutex<PdfDocument<'static>>>;
 ///   every entry point additionally holds [`PdfiumGate`]. See its docs for the crash
 ///   that demonstrated this.
 pub struct DocumentHandles {
-    /// The `Option<PasswordHandle>` is the password that unlocked this document, held so the
-    /// `PdfDocument`'s borrow of it stays valid for as long as the entry lives. It is deliberately
-    /// not read: dropping it early would free bytes a live document points at.
-    entries: Mutex<HashMap<String, (SharedDocument, u64, Option<PasswordHandle>)>>,
+    /// Each entry is a [`CacheEntry`]: the handle, its LRU tick, and the password that unlocked
+    /// it. The password is held so the `PdfDocument`'s borrow of it stays valid for as long as the
+    /// entry lives. It is deliberately not read: dropping it early would free bytes a live
+    /// document points at.
+    entries: Mutex<HashMap<String, CacheEntry>>,
     clock: Mutex<u64>,
 }
 
