@@ -47,6 +47,16 @@ than left as a dangling reference.
 Applying is one undo entry and one new file. Applying twice to the same marks is a reported no-op
 rather than a second pass over a document that no longer contains the text.
 
+**What redaction removes, and what it does not.** Text runs, images (whole — a mark touching one
+pixel takes the entire image), and annotations. **It does not remove vector graphics.** A chart, a
+logo, or a filled shape drawn under a mark is still in the file afterwards, because removing paths
+means arbitrary path surgery rather than deleting a text-showing operator, and a half-version of it
+would silently leave ink behind. Applying a mark that covers only vector drawing therefore
+**warns and writes nothing**, naming the drawing that would remain and keeping your marks so the
+choice stays yours. A mark that removes some text *and* also covers drawing is applied, and the
+report then names the drawing that is still there. If the region matters, flatten or rasterise it
+before it reaches you: this build cannot take it out.
+
 ### Signatures
 
 Sign with a `.pfx`/`.p12` file, or pick a certificate from the Windows certificate store. The

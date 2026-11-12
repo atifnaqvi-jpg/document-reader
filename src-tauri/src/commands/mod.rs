@@ -2127,6 +2127,9 @@ pub struct RedactOutcome {
     pub images_removed: usize,
     /// Objects dropped by the reachability sweep afterwards (D-RD4).
     pub objects_dropped: usize,
+    /// Paths still drawn under a mark after apply, because §8 excludes vector graphics. Non-zero
+    /// means the output still shows something the user expected gone, and the UI must say so.
+    pub vector_paths_remaining: usize,
     /// Marks cleared from the DB after the write succeeded.
     pub marks_cleared: u64,
 }
@@ -2165,6 +2168,21 @@ pub fn redact_apply_with(db: &Db, document_id: &str) -> Result<RedactOutcome, Ap
     let mut document = load_document(db, document_id)?;
     let report = crate::editor::redact::apply_redactions(&mut document, &marks)?;
 
+    // A mark whose only content is vector drawing removes nothing (§8: path surgery is out of
+    // scope), and that must be said in those words. It has to be tested *before* the
+    // "already redacted" branch below, because that message would be a lie here: nothing was
+    // ever removed, so the file still shows exactly what the user marked. The marks are kept,
+    // unlike the no-op case, because the user has a decision left to make -- they are looking at
+    // content this build will not take away.
+    if report.nothing_to_apply() && report.vector_paths_remaining() > 0 {
+        return Err(AppError::RedactionIncomplete(format!(
+            "nothing was removed: the {} path(s) drawn under these mark(s) are vector graphics, \
+             which this build does not redact. Only text, images and annotations are removed, so \
+             the markings themselves remain visible in the document. Your mark(s) have been kept.",
+            report.vector_paths_remaining()
+        )));
+    }
+
     if report.nothing_to_apply() {
         // The marks are still cleared: they describe content the file no longer has, and leaving
         // them would make a subsequent apply look meaningful when it is not.
@@ -2188,6 +2206,7 @@ pub fn redact_apply_with(db: &Db, document_id: &str) -> Result<RedactOutcome, Ap
             .sum(),
         images_removed: report.pages.iter().map(|page| page.images_removed).sum(),
         objects_dropped: report.pages.iter().map(|page| page.objects_dropped).sum(),
+        vector_paths_remaining: report.vector_paths_remaining(),
         marks_cleared,
     })
 }

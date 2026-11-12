@@ -162,6 +162,10 @@ pub struct PageRedaction {
     pub redact_annotations_stripped: usize,
     /// Objects dropped by the reachability sweep afterwards (D-RD4).
     pub objects_dropped: usize,
+    /// Vector path-painting operations still drawing under a mark, which apply does **not**
+    /// remove (§8). Counted so the caller can name what will remain instead of leaving it to be
+    /// discovered by looking at the output file.
+    pub vector_paths_remaining: usize,
 }
 
 /// What one whole-document apply removed: every page's report plus the sanitize pass.
@@ -179,6 +183,15 @@ impl ApplyRedaction {
         self.pages
             .iter()
             .map(|page| page.runs_removed + page.xobject_runs_removed)
+            .sum()
+    }
+
+    /// Total path-painting operations still drawing under a mark (see
+    /// [`count_vector_paths_under_marks`]). Non-zero means apply left visible content behind.
+    pub fn vector_paths_remaining(&self) -> usize {
+        self.pages
+            .iter()
+            .map(|page| page.vector_paths_remaining)
             .sum()
     }
 
@@ -515,6 +528,9 @@ pub fn redact_page(
     // with no text under it is still a mark the user asked to apply.
     report.annotations_removed = remove_intersecting_annotations(document, page, rects)?;
     report.images_removed = remove_intersecting_images(document, page, rects)?;
+    // Paths stay (§8). Counted after the removals, so a path that only *looked* painted because
+    // it was inside an image that has now gone is not reported as still there.
+    report.vector_paths_remaining = count_vector_paths_under_marks(document, page, rects)?;
 
     if doomed.is_empty() {
         report.objects_dropped = sweep_unreachable(document)?.len();
@@ -826,6 +842,281 @@ fn prune_unused_xobjects(
     }
 
     Ok(())
+}
+
+/// Counts path-painting operations that still draw under a mark, which apply does **not** remove.
+///
+/// §8 puts "redaction of vector graphics (a filled path under a mark)" out of scope: only a
+/// path that is *a text-showing operation* is deleted, and arbitrary path surgery is not
+/// attempted. D-RD3's fail-safe ("remove more, never less") cannot be applied here, because the
+/// honest alternative to removing a path is not removing it — so the requirement the design does
+/// place on us is the last clause of that bullet: *"the mark list says so"*. This function is how
+/// the caller knows there is something to say.
+///
+/// The walk mirrors `remove_intersecting_images`: replay `q`/`Q`/`cm` so each painting operation
+/// is judged through the transform in force, and descend into Form XObjects because a mark over a
+/// logo is a mark over a path whether that path sits in the page stream or in a form.
+///
+/// Three deliberate over-counts, each in the safe direction for a warning:
+///
+/// * A curve's control points are included in its extent, though the curve itself may not reach
+///   them (a Bézier lies inside its control hull, so the hull is a superset).
+/// * A form's `/BBox` is ignored, so content a form clips away still counts.
+/// * A path is judged by the points that built it. Stroke **width** is not modelled, so a hairline
+///   whose centreline misses the mark but whose width overlaps it is not counted. That is the one
+///   direction this walk can under-report, and it is stated rather than hidden.
+pub fn count_vector_paths_under_marks(
+    document: &Document,
+    page: u32,
+    rects: &[Rect],
+) -> Result<usize, AppError> {
+    if rects.is_empty() {
+        return Ok(0);
+    }
+    let page_id = textlocate::page_id(document, page)?;
+    let content = textlocate::decoded_content(document, page_id)?;
+    let mut walk = VectorWalk::new(document, page_id);
+    walk.stream(&content, 0, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], rects)
+}
+
+/// Operators that append a point to the current path. `h` and `n` add nothing.
+fn is_path_segment(operator: &str) -> bool {
+    matches!(operator, "m" | "l" | "c" | "v" | "y" | "re")
+}
+
+/// Operators that paint the current path. `W`/`W*` only set a clip and paint nothing.
+fn is_path_paint(operator: &str) -> bool {
+    matches!(
+        operator,
+        "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*"
+    )
+}
+
+/// The state of one descent through page and Form XObject content.
+struct VectorWalk<'a> {
+    document: &'a Document,
+    /// Resource dictionaries in force, outermost first: a form's own `/Resources` answers for
+    /// the names it defines and the enclosing one answers the rest (ISO 32000-1 §8.10).
+    levels: Vec<&'a lopdf::Dictionary>,
+    /// Form ids already entered on this path, for cycle detection.
+    form_ids: Vec<ObjectId>,
+}
+
+impl<'a> VectorWalk<'a> {
+    fn new(document: &'a Document, page_id: ObjectId) -> Self {
+        let levels = document
+            .get_object(page_id)
+            .ok()
+            .and_then(|object| object.as_dict().ok())
+            .and_then(|page| {
+                page.get(b"Resources")
+                    .ok()
+                    .and_then(|object| document.dereference(object).ok())
+                    .and_then(|(_, object)| object.as_dict().ok())
+            })
+            .into_iter()
+            .collect();
+        Self {
+            document,
+            levels,
+            form_ids: Vec::new(),
+        }
+    }
+
+    /// Walks one content stream and returns how many painted paths touch `rects`.
+    ///
+    /// `initial` is the transform already in force when the stream begins: identity for a page,
+    /// and `parent cm × form /Matrix` for a form.
+    fn stream(
+        &mut self,
+        content: &Content<Vec<lopdf::content::Operation>>,
+        depth: usize,
+        initial: [f32; 6],
+        rects: &[Rect],
+    ) -> Result<usize, AppError> {
+        let mut found = 0usize;
+        let mut saved: Vec<[f32; 6]> = Vec::new();
+        let mut matrix = initial;
+        // The extent of the path being built, in device space. A path is not part of the
+        // graphics state, so `q`/`Q` do not save or restore it; points are transformed as they
+        // are added, which is also what makes a `cm` between segments behave.
+        let mut extent: Option<Rect> = None;
+
+        for operation in &content.operations {
+            let operator = operation.operator.as_str();
+            match operator {
+                "q" => saved.push(matrix),
+                "Q" => {
+                    if let Some(previous) = saved.pop() {
+                        matrix = previous;
+                    }
+                }
+                "cm" => {
+                    if let Some(next) = matrix_from_operands(&operation.operands) {
+                        matrix = multiply(matrix, next);
+                    }
+                }
+                "n" => extent = None,
+                "Do" => {
+                    let Some(Object::Name(name)) = operation.operands.first() else {
+                        continue;
+                    };
+                    found += self.form(name, depth, matrix, rects)?;
+                }
+                _ if is_path_segment(operator) => {
+                    for point in path_points(operator, &operation.operands) {
+                        let device = Point2::new(
+                            matrix[0] * point.0 + matrix[2] * point.1 + matrix[4],
+                            matrix[1] * point.0 + matrix[3] * point.1 + matrix[5],
+                        );
+                        extent = Some(match extent {
+                            None => Rect {
+                                x0: device.x,
+                                y0: device.y,
+                                x1: device.x,
+                                y1: device.y,
+                            },
+                            Some(rect) => Rect {
+                                x0: rect.x0.min(device.x),
+                                y0: rect.y0.min(device.y),
+                                x1: rect.x1.max(device.x),
+                                y1: rect.y1.max(device.y),
+                            },
+                        });
+                    }
+                }
+                _ if is_path_paint(operator) => {
+                    if let Some(rect) = extent {
+                        // `s`, `b` and `b*` close the subpath before painting, so the closing
+                        // segment can reach back to where the subpath started. Its ends are
+                        // already in the extent, and a straight closing segment stays inside
+                        // their bounding box, so nothing extra is needed here.
+                        if rects.iter().any(|mark| rect.intersects(mark)) {
+                            found += 1;
+                        }
+                    }
+                    extent = None;
+                }
+                _ => {}
+            }
+        }
+        Ok(found)
+    }
+
+    /// Counts inside one `Do` target, if it is a form this walk may enter.
+    fn form(
+        &mut self,
+        name: &[u8],
+        depth: usize,
+        matrix: [f32; 6],
+        rects: &[Rect],
+    ) -> Result<usize, AppError> {
+        let Some((object_id, stream)) = self.xobject(name) else {
+            return Ok(0);
+        };
+        if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Form") {
+            return Ok(0);
+        }
+        // Beyond the shared nesting cap, or already on this path: not entered, and not counted.
+        // Refusing here cannot hide content, because a path this walk does not reach is a path
+        // the report does not claim — the warning is about what is *known* to remain.
+        if depth >= textlocate::MAX_XOBJECT_DEPTH || self.form_ids.contains(&object_id) {
+            return Ok(0);
+        }
+        let Ok(bytes) = stream.decompressed_content() else {
+            return Ok(0);
+        };
+        let Ok(content) = Content::decode(&bytes) else {
+            return Ok(0);
+        };
+
+        // A form's own /Resources joins the levels; the rest fall through to the enclosing set.
+        let own = stream
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|object| self.document.dereference(object).ok())
+            .and_then(|(_, object)| object.as_dict().ok());
+        let pushed = own.is_some();
+        if let Some(dictionary) = own {
+            self.levels.push(dictionary);
+        }
+        self.form_ids.push(object_id);
+
+        // A form's /Matrix maps its space into the parent's, and the `Do` itself is subject to
+        // the `cm` in force, so the two compose before the content is walked. Missing or
+        // malformed, the form's space is the parent's.
+        let form_matrix = match stream.dict.get(b"Matrix") {
+            Ok(object) => {
+                let resolved = self
+                    .document
+                    .dereference(object)
+                    .map(|(_, resolved)| resolved)
+                    .unwrap_or(object);
+                resolved
+                    .as_array()
+                    .ok()
+                    .and_then(|array| matrix_from_operands(array))
+            }
+            Err(_) => None,
+        }
+        .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let composed = multiply(matrix, form_matrix);
+
+        let result = self.stream(&content, depth + 1, composed, rects);
+
+        self.form_ids.pop();
+        if pushed {
+            self.levels.pop();
+        }
+        result
+    }
+
+    /// Resolves a `/XObject` entry through the resource dictionaries in force.
+    fn xobject(&self, name: &[u8]) -> Option<(ObjectId, &'a lopdf::Stream)> {
+        self.levels.iter().rev().find_map(|level| {
+            let entry = level.get(b"XObject").ok()?;
+            let dictionary = self.document.dereference(entry).ok()?.1.as_dict().ok()?;
+            let object = dictionary.get(name).ok()?;
+            let (id, object) = self.document.dereference(object).ok()?;
+            // An inline stream has no id; nothing on a cycle path can be, so it is skipped.
+            Some((id?, object.as_stream().ok()?))
+        })
+    }
+}
+
+/// The operand points an operator contributes, in the path's own user space.
+///
+/// For `re` the four operands are `x y width height`; the corners are returned rather than the
+/// rectangle, which the extent accumulation then boxes exactly.
+fn path_points(operator: &str, operands: &[Object]) -> Vec<(f32, f32)> {
+    let numbers = operands.iter().filter_map(number);
+    if operator == "re" {
+        let values: Vec<f32> = numbers.collect();
+        if values.len() != 4 {
+            return Vec::new();
+        }
+        let (x, y, width, height) = (values[0], values[1], values[2], values[3]);
+        return vec![
+            (x, y),
+            (x + width, y),
+            (x, y + height),
+            (x + width, y + height),
+        ];
+    }
+    let values: Vec<f32> = numbers.collect();
+    values
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect()
+}
+
+fn number(operand: &Object) -> Option<f32> {
+    match operand {
+        Object::Integer(value) => Some(*value as f32),
+        Object::Real(value) => Some(*value),
+        _ => None,
+    }
 }
 
 /// Whether an image drawn through `matrix` can touch any mark (D-RD3: unreadable is yes).

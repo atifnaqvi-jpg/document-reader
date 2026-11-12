@@ -595,6 +595,11 @@ export interface RedactOutcome {
   imagesRemoved: number;
   /** Objects dropped by the reachability sweep afterwards. */
   objectsDropped: number;
+  /**
+   * Paths still drawn under a mark after apply, because vector graphics are out of scope
+   * (P3.2 §8). Non-zero means the copy still shows something the user expected gone.
+   */
+  vectorPathsRemaining: number;
   /** Marks cleared from the database. */
   marksCleared: number;
 }

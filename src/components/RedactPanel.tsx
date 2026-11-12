@@ -178,6 +178,11 @@ export function RedactPanel({ documentId }: { documentId: string | null }) {
         Applying writes a new file beside the original and leaves the original untouched. This
         cannot be undone, and it is why the text it removes does not come back.
       </p>
+      <p className="muted">
+        Redaction removes text, images and annotations. It does not remove vector graphics — a
+        chart, a logo or a filled shape drawn under a mark stays in the file —
+        and applying such a mark is refused with a warning rather than silently leaving it.
+      </p>
 
       {outcome ? (
         <div className="redact-outcome" role="status">
@@ -189,6 +194,13 @@ export function RedactPanel({ documentId }: { documentId: string | null }) {
             <li>{outcome.objectsDropped} object(s) dropped</li>
             <li>{outcome.marksCleared} mark(s) cleared</li>
           </ul>
+          {outcome.vectorPathsRemaining > 0 ? (
+            <p className="redact-error" role="alert">
+              {outcome.vectorPathsRemaining} path(s) of vector drawing under your marks were{" "}
+              <strong>not</strong> removed: this build redacts text, images and annotations, but
+              not vector graphics, so that drawing is still visible in “{outcome.path}”.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>

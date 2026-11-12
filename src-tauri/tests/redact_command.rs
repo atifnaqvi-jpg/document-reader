@@ -441,3 +441,114 @@ fn a_rectangle_arriving_unnormalised_is_normalised_by_the_command() {
         "the command must store the rectangle corner-ordered"
     );
 }
+
+/// A one-page PDF that paints a filled rectangle and no text, written to disk.
+///
+/// D3's fixture: the user marked something, the file contains no text at that place, and what is
+/// there is drawing. There is nothing for apply to delete.
+fn drawing_on_disk(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(name);
+
+    let mut document = Document::with_version("1.7");
+    let content_id = document.add_object(Stream::new(
+        dictionary! {},
+        b"0 0 0 rg\n80 120 100 60 re f\n".to_vec(),
+    ));
+    let pages_id = document.new_object_id();
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => Object::Reference(content_id),
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => Object::Reference(pages_id),
+    });
+    document.trailer.set("Root", Object::Reference(catalog_id));
+    document.save(&path).expect("write source");
+    (dir, path)
+}
+
+/// The rectangle covering the drawn box in `drawing_on_disk`.
+fn drawing_rect() -> Rect {
+    Rect::new(70.0, 100.0, 200.0, 200.0)
+}
+
+#[test]
+fn a_mark_covering_only_vector_drawing_warns_instead_of_claiming_success() {
+    // The D3 defect, at the command boundary a user actually reaches. Before this, the apply
+    // wrote a file, reported "0 runs, 0 images, 0 annotations" and looked like a success while
+    // the drawing was still on the page -- a redaction the user believes happened. §8 excludes
+    // path surgery, so the fix is not to remove it: it is to refuse the *claim* and say what
+    // stays. Anything else is the silent failure D-RD2 exists to forbid.
+    let (_dir, path) = drawing_on_disk("drawing.pdf");
+    let db = Db::open_in_memory().unwrap();
+    let id = register(&db, &path);
+
+    redact_mark_with(&db, &id, 0, drawing_rect()).expect("mark");
+    let outcome = redact_apply_with(&db, &id);
+
+    let error = outcome
+        .expect_err("a mark over vector drawing must not be reported as a successful redaction");
+    let message = error.to_string();
+    assert!(
+        message.contains("vector graphics"),
+        "the warning must name vector graphics as the reason: {message}"
+    );
+    assert!(
+        message.contains("remain visible"),
+        "the warning must say the markings stay visible rather than leaving it to be discovered: \
+         {message}"
+    );
+    assert!(
+        !message.contains("already been redacted"),
+        "the already-redacted wording would be false here: nothing was ever removed: {message}"
+    );
+
+    // No file was written: the user has not been given a copy that looks redacted.
+    let copies: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.contains("redacted"))
+        })
+        .collect();
+    assert!(
+        copies.is_empty(),
+        "a refused apply must not leave a half-redacted copy behind"
+    );
+}
+
+#[test]
+fn a_mark_over_drawing_keeps_its_marks_so_the_choice_is_still_the_users() {
+    // The counterpart to I-RD6's "clear the marks" rule. There, the content was already gone, so
+    // keeping the marks would imply pending work. Here the content is still there and this build
+    // will not remove it, so clearing the marks would destroy the user's work and hide the
+    // problem: they would have nothing left to act on and no reminder of what is still visible.
+    let (_dir, path) = drawing_on_disk("kept.pdf");
+    let db = Db::open_in_memory().unwrap();
+    let id = register(&db, &path);
+
+    redact_mark_with(&db, &id, 0, drawing_rect()).expect("mark");
+    assert!(redact_apply_with(&db, &id).is_err());
+
+    let marks = redact_marks_with(&db, &id).expect("list marks");
+    assert_eq!(
+        marks.len(),
+        1,
+        "the mark must survive the warning, so the user can see what was left and decide"
+    );
+}

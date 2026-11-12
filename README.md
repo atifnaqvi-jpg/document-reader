@@ -31,7 +31,11 @@ read only from the document itself or from certificates the user imports.
   save path (AES-128/rev 4).
 - **Redact:** true removal — the content is deleted from the file, never
   painted over; metadata sanitize; reachability GC with xref integrity so
-  nothing dangles (in flight for v1.2.0).
+  nothing dangles (in flight for v1.2.0). Removal covers text runs, image
+  XObjects and annotations. **It does not cover vector graphics:** a filled
+  path, chart or logo drawn under a mark stays in the file, and a mark that
+  covers only such drawing is refused with a warning naming what remains
+  rather than quietly reported as a success.
 - **Sign:** offline PFX/PKCS#12 import, CMS/PKCS#7 detached signatures, DocMDP
   certification, and signature badges — strictly no network (in flight for
   v1.2.0). Signing writes a new file beside the original and never rewrites it.

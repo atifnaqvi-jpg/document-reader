@@ -91,6 +91,7 @@ describe("the redaction commands as invoke.ts sends them", () => {
       annotationsRemoved: 1,
       imagesRemoved: 0,
       objectsDropped: 3,
+      vectorPathsRemaining: 0,
       marksCleared: 1,
     }));
 
@@ -213,6 +214,70 @@ describe("RedactPanel", () => {
     );
   });
 
+  it("says out loud that vector drawing under a mark was not removed", async () => {
+    // D3. The backend counts paths it deliberately did not remove (§8). A panel that showed only
+    // "0 text runs, 0 images, 0 annotations" would read as a complete redaction while the drawing
+    // is still on the page -- the exact silent-leave-behind the pulse flagged. The count has to
+    // become a sentence the user cannot mistake for success.
+    let marks = [makeMark()];
+    backend.on("redact_marks", () => marks);
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("redact_apply", () => {
+      marks = [];
+      return {
+        path: "C:/docs/chart (redacted 1).pdf",
+        runsRemoved: 1,
+        annotationsRemoved: 0,
+        imagesRemoved: 0,
+        objectsDropped: 0,
+        vectorPathsRemaining: 2,
+        marksCleared: 1,
+      };
+    });
+
+    renderPanel();
+
+    await userEvent.click(await screen.findByRole("button", { name: /apply 1 mark/i }));
+
+    // Read the alert's whole text: the sentence is broken by <strong>, so no single text node
+    // carries it and a getByText on a fragment would pass on a half-rendered warning.
+    const alert = await screen.findByRole("alert");
+    const text = alert.textContent ?? "";
+    expect(text).toMatch(/2 path\(s\) of vector drawing/i);
+    expect(text).toMatch(/not removed/i);
+    expect(text).toMatch(/not vector graphics/i);
+    expect(text).toMatch(/still visible/i);
+  });
+
+  it("does not warn about vector drawing when nothing was left behind", async () => {
+    // The other half: a warning that always fires is a warning nobody reads. `0` must render no
+    // warning at all, or every ordinary text redaction would claim to have failed.
+    let marks = [makeMark()];
+    backend.on("redact_marks", () => marks);
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("redact_apply", () => {
+      marks = [];
+      return {
+        path: "C:/docs/plain (redacted 1).pdf",
+        runsRemoved: 3,
+        annotationsRemoved: 0,
+        imagesRemoved: 0,
+        objectsDropped: 0,
+        vectorPathsRemaining: 0,
+        marksCleared: 1,
+      };
+    });
+
+    renderPanel();
+
+    await userEvent.click(await screen.findByRole("button", { name: /apply 1 mark/i }));
+    await waitFor(() => expect(screen.getByText(/Wrote C:\/docs\/plain/i)).toBeTruthy());
+
+    expect(screen.queryByText(/path\(s\) of vector drawing/i)).toBeNull();
+  });
+
   it("reloads the marks and shows the path after applying", async () => {
     let marks = [makeMark()];
     backend.on("redact_marks", () => marks);
@@ -226,6 +291,7 @@ describe("RedactPanel", () => {
         annotationsRemoved: 0,
         imagesRemoved: 0,
         objectsDropped: 0,
+        vectorPathsRemaining: 0,
         marksCleared: 1,
       };
     });

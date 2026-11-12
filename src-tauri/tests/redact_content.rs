@@ -12,7 +12,7 @@ use lopdf::{dictionary, Document, Object, Stream};
 use std::path::PathBuf;
 
 use document_reader_lib::editor::object_gc::dangling_references;
-use document_reader_lib::editor::redact::{redact_page, Rect};
+use document_reader_lib::editor::redact::{count_vector_paths_under_marks, redact_page, Rect};
 
 const SECRET: &str = "TOPSECRETVALUE";
 const KEPT: &str = "KEEPME";
@@ -827,4 +827,184 @@ fn a_hit_becomes_a_mark_that_removes_the_text() {
         "the whole run goes: partial-run glyph removal is not what D-RD2 asks for"
     );
     assert!(contains(&bytes, "KEEPME"), "the other run must survive");
+}
+
+/// A one-page PDF whose content stream paints a filled rectangle and nothing else.
+///
+/// This is the D3 fixture: a mark over *drawing* rather than over text. §8 says apply does not
+/// remove it, so the only correct behaviour is to report that it is still there.
+fn vector_fixture(content: &str) -> Document {
+    let mut doc = Document::with_version("1.7");
+
+    let content_id = doc.new_object_id();
+    doc.objects.insert(
+        content_id,
+        Stream::new(dictionary! {}, content.as_bytes().to_vec()).into(),
+    );
+
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    doc.objects.insert(
+        page_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => Object::Reference(content_id),
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+        }),
+    );
+
+    let catalog_id = doc.new_object_id();
+    doc.objects.insert(
+        catalog_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        }),
+    );
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+
+    doc
+}
+
+#[test]
+fn a_filled_path_under_a_mark_is_counted_as_remaining() {
+    // D3. The rectangle covers the mark exactly; apply deletes no operator, so the ink is still
+    // in the file. The count is what lets the command warn instead of writing a file that looks
+    // redacted and is not.
+    let mark = Rect::new(70.0, 100.0, 200.0, 200.0);
+    let doc = vector_fixture("0 0 0 rg\n80 120 100 60 re f\n");
+    let report = apply_redactions(&mut doc.clone(), &[(0, vec![mark])]).expect("apply");
+
+    assert_eq!(
+        report.vector_paths_remaining(),
+        1,
+        "a filled `re` under the mark must be counted as still drawn"
+    );
+    assert_eq!(
+        report.runs_removed(),
+        0,
+        "there is no text to remove, which is exactly why the count matters"
+    );
+    assert!(
+        report.nothing_to_apply(),
+        "nothing was deleted, so the caller must not treat this as a successful redaction"
+    );
+}
+
+#[test]
+fn a_path_outside_every_mark_is_not_counted() {
+    // The other half of the oracle: a warning that fires on every document is noise, and the
+    // user learns to ignore it. A path well clear of the mark must not be counted.
+    let mark = Rect::new(300.0, 500.0, 400.0, 600.0);
+    let doc = vector_fixture("0 0 0 rg\n80 120 100 60 re f\n");
+
+    assert_eq!(
+        count_vector_paths_under_marks(&doc, 0, &[mark]).expect("count"),
+        0,
+        "a path that does not touch the mark is not remaining content"
+    );
+}
+
+#[test]
+fn the_transform_in_force_decides_whether_a_path_is_under_the_mark() {
+    // A path drawn in user space at 0,0 can land anywhere on the page once `cm` and `q`/`Q` are
+    // applied. Judging the raw operands instead of the transformed ones would count this stroke
+    // at the origin and miss that it is painted at 350,550 -- the same class of bug the image
+    // pass already replays matrices to avoid.
+    let mark = Rect::new(300.0, 500.0, 460.0, 640.0);
+    let doc = vector_fixture("q 1 0 0 1 350 550 cm\n0 0 m 40 40 l S\nQ\n");
+
+    assert_eq!(
+        count_vector_paths_under_marks(&doc, 0, &[mark]).expect("count"),
+        1,
+        "the stroke is painted inside the mark only after its `cm` is applied"
+    );
+
+    // And the same bytes with the translation removed must stop counting, which is what proves
+    // the matrix was actually used rather than coincidentally right.
+    let untranslated = vector_fixture("q 1 0 0 1 0 0 cm\n0 0 m 40 40 l S\nQ\n");
+    assert_eq!(
+        count_vector_paths_under_marks(&untranslated, 0, &[mark]).expect("count"),
+        0,
+        "without the translation the stroke is at the origin, outside the mark"
+    );
+}
+
+#[test]
+fn a_path_inside_a_form_is_counted_through_the_forms_matrix() {
+    // A logo is usually a Form XObject, and a form's /Matrix places its content. Counting only
+    // the page stream would report nothing for the most common way a vector graphic reaches a
+    // page, and the warning would never fire where it matters most.
+    let mark = Rect::new(300.0, 500.0, 460.0, 640.0);
+
+    let mut doc = vector_fixture("q /Fm1 Do Q\n");
+
+    let form_id = doc.new_object_id();
+    let form = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            // Translates the form's own 0,0 to 330,520, inside the mark.
+            "Matrix" => vec![1.into(), 0.into(), 0.into(), 1.into(), 330.into(), 520.into()],
+        },
+        b"0 0 0 rg\n10 10 50 50 re f\n".to_vec(),
+    );
+    doc.objects.insert(form_id, form.into());
+
+    // `get_pages` is 1-based; page 0 is key 1.
+    let page_id = doc.get_pages()[&1];
+    doc.get_object_mut(page_id)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "Resources",
+            dictionary! {
+                "XObject" => dictionary! { "Fm1" => Object::Reference(form_id) },
+            },
+        );
+
+    assert_eq!(
+        count_vector_paths_under_marks(&doc, 0, &[mark]).expect("count"),
+        1,
+        "a filled path inside a form, placed by the form's /Matrix, must be counted"
+    );
+}
+
+#[test]
+fn text_painting_operators_are_not_counted_as_vector_graphics() {
+    // A warning that fires on ordinary text would be worse than none: every text redaction
+    // would claim to have left something behind. Text is removed, so it must not be counted.
+    let mark = Rect::new(70.0, 690.0, 200.0, 706.0);
+    let doc = fixture();
+
+    assert_eq!(
+        count_vector_paths_under_marks(&doc, 0, &[mark]).expect("count"),
+        0,
+        "the secret is drawn with Tj/Td, which apply deletes; it is not remaining content"
+    );
+}
+
+#[test]
+fn a_clip_path_that_paints_nothing_is_not_counted() {
+    // `re W n` builds a path solely to clip. Nothing is painted, so nothing remains; counting it
+    // would warn about content that was never visible.
+    let mark = Rect::new(70.0, 100.0, 200.0, 200.0);
+    let doc = vector_fixture("80 120 100 60 re W n\n");
+
+    assert_eq!(
+        count_vector_paths_under_marks(&doc, 0, &[mark]).expect("count"),
+        0,
+        "a clip with no painting operator leaves no ink under the mark"
+    );
 }
