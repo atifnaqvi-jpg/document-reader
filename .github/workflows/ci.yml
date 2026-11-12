@@ -342,12 +342,13 @@ jobs:
           # ignored-including flag even in prose, and the guard
           # `the_linux_job_does_not_force_pdfium_tests_without_a_library` enforces that as a
           # substring check over the whole step. It caught this comment on the first run.)
-          # 956, measured on 2026-11-11 for D3: eight new tests in `tests/redact_content.rs` and
+          # 957, measured on 2026-11-11 for D3: nine new tests in `tests/redact_content.rs` and
           # `tests/redact_command.rs` (`+6` vector oracles on the module, `+2` on the command that
-          # a user reaches), and no test removed. 948 + 8 = 956, which is what actually ran; the
-          # ignored count above is unchanged because every one of them runs without PDFium.
-          if [ "$passed" -lt 956 ]; then
-            echo "::error::only $passed tests ran; 956 is the non-PDFium baseline. A test stopped being collected."
+          # a user reaches, `+1` on the serialized key the frontend actually reads), and no test
+          # removed. 948 + 9 = 957, which is what actually ran; the ignored count above is
+          # unchanged because every one of them runs without PDFium.
+          if [ "$passed" -lt 957 ]; then
+            echo "::error::only $passed tests ran; 957 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 

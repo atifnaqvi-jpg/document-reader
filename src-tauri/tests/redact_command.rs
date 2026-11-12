@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use document_reader_lib::commands::{
     redact_apply_with, redact_mark_with, redact_marks_with, redact_search_with, redact_unmark_with,
+    RedactOutcome,
 };
 use document_reader_lib::db::{documents, Db};
 use document_reader_lib::editor::redact::Rect;
@@ -550,5 +551,35 @@ fn a_mark_over_drawing_keeps_its_marks_so_the_choice_is_still_the_users() {
         marks.len(),
         1,
         "the mark must survive the warning, so the user can see what was left and decide"
+    );
+}
+
+#[test]
+fn the_outcome_reaches_the_frontend_as_vectorPathsRemaining() {
+    // The panel reads `outcome.vectorPathsRemaining`; the struct field is `vector_paths_remaining`.
+    // That gap is bridged by `#[serde(rename_all = "camelCase")]`, and a rename that stopped
+    // applying -- a hand-written `rename` on the struct, a field moved to a sub-struct, a
+    // serializer change -- would leave both sides compiling and the warning silently `undefined`
+    // in the UI, i.e. never rendered at zero and never true at two. So serialize the real struct
+    // rather than trusting the attribute, and assert the exact key the frontend uses.
+    let outcome = RedactOutcome {
+        path: "C:/docs/a.pdf".to_string(),
+        runs_removed: 0,
+        annotations_removed: 0,
+        images_removed: 0,
+        objects_dropped: 0,
+        vector_paths_remaining: 2,
+        marks_cleared: 1,
+    };
+
+    let json = serde_json::to_value(&outcome).expect("the outcome must serialize");
+
+    assert_eq!(
+        json["vectorPathsRemaining"], 2,
+        "the frontend reads `vectorPathsRemaining`; got {json}"
+    );
+    assert!(
+        json.get("vector_paths_remaining").is_none(),
+        "the snake_case name must not also appear: {json}"
     );
 }
