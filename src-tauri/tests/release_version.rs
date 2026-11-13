@@ -868,3 +868,66 @@ fn the_parity_matrix_promotes_a10_only_with_a_recorded_installer() {
          hand-test provenance would exist only in the matrix cell that depends on it"
     );
 }
+
+/// B7 and B9 may not say `Have` unless their rows and the notes name the build a human ran.
+///
+/// The same rule A10 follows, for the same reason: the status column describes a *shipped*
+/// build, not code reachable from a command. Both rows sat at `Missing` while their code was
+/// merged and tested, because no tagged build contained them; they flip only on a hand-run
+/// installer.
+///
+/// This is the second and third row to be promoted this way, so the check is a loop over a
+/// declared set rather than a copy of the A10 body. That matters because the failure mode is
+/// *silent*: a row promoted without provenance still renders, still reads as done, and a
+/// reviewer has no reason to look for a dispatch id that was never written.
+///
+/// Mutation-verified: setting either status cell back to `Missing` makes the assertion vacuous
+/// (returns early), so the guard is proved by removing a dispatch id from a promoted row and
+/// by removing the same id from the notes — each fails with the message naming what is gone.
+#[test]
+fn the_parity_matrix_promotes_b7_and_b9_only_with_a_recorded_installer() {
+    let root = repo_root();
+    let plan = read(&root.join("docs/P2.7-TEXT-EDITING-PARITY-PLAN.md"));
+    let notes = read(&root.join("docs/RELEASE-NOTES.md"));
+
+    // The 1.2.0 hand-test, verified against the artifact rather than assumed: the exe inside
+    // artifact 13920020055 is 11,091,275 bytes with this digest, built from b2d0b3b.
+    const DISPATCH: &str = "43164026953";
+    const COMMIT: &str = "b2d0b3b";
+    const DIGEST: &str = "989e2dfb";
+
+    for id in ["B7", "B9"] {
+        let prefix = format!("| {id} |");
+        let row = plan
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("the parity matrix must carry a {id} row"));
+
+        if !row.contains("**Have**") {
+            // `Missing` needs no provenance; the guard exists for the promotion.
+            continue;
+        }
+
+        for needle in [DISPATCH, COMMIT, DIGEST] {
+            assert!(
+                row.contains(needle),
+                "{id} is promoted to `Have`, but its row does not name {needle}. The status \
+                 column claims what a shipped build does, so the promotion has to carry the \
+                 dispatch, the commit and the digest that make it a claim about a build rather \
+                 than about code"
+            );
+        }
+
+        // The evidence must exist in the notes too, or the row cites a hand-test nobody wrote
+        // down and the claim is unfalsifiable from the tree.
+        assert!(
+            notes.contains(DISPATCH),
+            "{id}'s row names dispatch {DISPATCH} but docs/RELEASE-NOTES.md never records it; \
+             the hand-test provenance would exist only in the cell that depends on it"
+        );
+        assert!(
+            notes.contains(DIGEST),
+            "{id}'s row names digest {DIGEST} but docs/RELEASE-NOTES.md never records it"
+        );
+    }
+}

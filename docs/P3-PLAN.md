@@ -30,7 +30,7 @@ Charter: local-first (DECISIONS §9.1). Version cadence: one minor bump per phas
 |---|---|---|---|---|
 | **Rename housekeeping** ✅ | Product name + bundle identifier → **DocuPro** | R5 | Accepted consequence (DECISIONS §9.5): the identifier is the Windows upgrade identity, so existing hand-test installs update by reinstall and both entries appear in Add/Remove — deliberate now, costly later. **Delivered and hand-tested 2026-11-03** on the installer from dispatch `41651299040` at `330a4ad`; tagged `v1.0.1` there | 1.0.1 |
 | **P3.1 — Annotations breadth** ✅ | Palette to ~15 types (highlight family: highlight/underline/strikeout/squiggly; note family: sticky/textbox/callout/typewriter; ink; line/arrow; rect/oval/polygon-family shapes), comment-manager pane (list/sort/filter/statuses), reply chains, XFDF import/export | — | Annotations stay **real PDF annotations** written by the lopdf path (P2-D3), DB remains the source of truth (P2-D4), FTS5 push and jump-to-page keep (P2-D5/D5c), undo keeps its coalescing rules (P2-D7). Sharing stays Out (charter). **CLOSED at v1.1.0** — see below | 1.1.0 |
-| **P3.2 — Protect & redact + offline signatures** | Password + permissions **on save**; true redaction (mark/apply) incl. search-and-redact text patterns; sanitize / remove-hidden-info; PKCS#7 sign + verify, certify (DocMDP), certificate selection from the Windows store | R3 | Redaction and signatures carry **correctness obligations**: named invariants up front in the phase design (per the B-1 note). R3: offline only — no TSA call, the document hash never leaves the machine; timestamping/trust-services stay Out until separately ruled. Redaction ≠ delete-pages+flatten; the design must prove content removal, not visual hiding | 1.2.0 |
+| **P3.2 — Protect & redact + offline signatures** ✅ | Password + permissions **on save**; true redaction (mark/apply) incl. search-and-redact text patterns; sanitize / remove-hidden-info; PKCS#7 sign + verify, certify (DocMDP), certificate selection from the Windows store | R3 | Redaction and signatures carry **correctness obligations**: named invariants up front in the phase design (per the B-1 note). R3: offline only — no TSA call, the document hash never leaves the machine; timestamping/trust-services stay Out until separately ruled. Redaction ≠ delete-pages+flatten; the design must prove content removal, not visual hiding  **Delivered and hand-tested 2026-11-13** on the installer from dispatch `43164026953` at `b2d0b3b` (`DocuPro_1.2.0_x64-setup.exe`, 11,091,275 bytes, sha-256 `989e2dfb…c2597c30`). The one case that did not complete is vector drawing under a mark, which is the **decided** behaviour (§8) and now has its own future row in §2 — not a defect. | 1.2.0 |
 | **P3.3 — Forms** | AcroForm fill (text/checkbox/radio/list/dropdown) + save through the edited-copy discipline (P2-D2); FDF/XFDF import/export; Fill-and-Sign visual signatures (drawn/typed/image) | — | pdfium-render form FFI spike first (its create-annot/field APIs are `pub(crate)` per P2-DESIGN F1/F7 precedent); lopdf writer path where pdfium cannot; authoring (create fields, tab/calculation order) and barcode fields are optional rows, each needing its own design ruling | 1.3.0 |
 | **P3.4 — Organize completion + compress** | Page **insert** and document merge (clears B1b; retires `pages::merge` dead code), combine files, crop, page numbering/Bates-light; compress/optimize (linearization + image downsampling + object-stream cleanup) | R4 | Compress runs in a **bundled qpdf sidecar process** (Apache-2.0): bundling, invocation and crash containment frozen in the phase design before code; the editor's own writer never shells out silently | 1.4.0 |
 | **P3.5 — OCR** | Recognize text on-device (tesseract + bundled language packs), produce searchable PDFs (image page + invisible text layer behind the extraction path), suspects-correction UX deferred | R2 | Entirely behind the `TextExtractor` trait seam (DECISIONS Q3 seam); no network calls, ever (charter). The detect-and-surface behaviour for image-only PDFs is superseded by recognition but the surface-not-fail rule keeps | 1.5.0 |
@@ -62,6 +62,27 @@ defective text.
 parity matrix in `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md` remains the ledger for that, and rows
 still marked `Missing` stay `Missing`.
 
+### P3.2 — CLOSED at v1.2.0
+
+Closed 2026-11-13 on the two conditions the phase protocol requires, both recorded rather than
+asserted:
+
+| Condition | Evidence |
+|---|---|
+| Gate green, both shapes | plain `959 passed / 107 ignored`, `--include-ignored` `1066 passed / 0 ignored`; vitest 196 tests / 15 files; clippy clean with `-D warnings`; tsc and vite build clean |
+| User hand-tested the installer | build-only dispatch `43164026953` at `b2d0b3b` → artifact `13920020055`, `DocuPro_1.2.0_x64-setup.exe` (**11,091,275 bytes**, sha-256 `989e2dfb…c2597c30`). Verdict: install and About version pass; protected-document prompt and open pass; highlight palette names and drag preview pass; signing with a `.pfx` and its password, anchor import, and the valid/unsigned badges pass; certification `P=1` refusal and `P=3` annotation permission pass; edit-in-place and search smoke pass |
+| Tag | `v1.2.0` — see the tag record below |
+| Published release | verified after the tag run; full release (`prerelease: false`) with the DocuPro-named installer attached |
+
+**The one case that did not complete is the decided behaviour.** A mark covering only vector
+drawing refused, wrote nothing, named the path count, kept the marks, and claimed no removal. The
+user ruled it is correct as shipped (option A, 2026-11-13). It is logged above as its own future
+capability with the clipping question open.
+
+**What closing does not mean:** P3.2 delivered protect, redaction and offline signatures — not
+full Acrobat security parity. Timestamping, trust services, LTV, PKCS#11/HSM and Windows-store-key
+signing remain out or unbuilt, as the design's §8 states.
+
 ## 2. Optional-later (named, not scheduled)
 
 Compare files; print pipeline + print comment summaries; PDF/A save + veraPDF
@@ -83,6 +104,31 @@ size for the new run, or extend onto the following line if one follows;
 reflow (P2.8 is line-level by frozen scope C-2, so this is a later, separately
 designed capability); (c) copy-to-clipboard affordance in the refusal message
 so the typed replacement can be pasted straight into an annotation note.
+
+
+### Vector redaction — designed capability, not scheduled (ruled 2026-11-13, option A)
+
+**What 1.2.0 does, and why that is the decision rather than a gap.** Applying a mark that covers
+only vector drawing **refuses, writes nothing, keeps the marks, names the number of paths that
+would remain, and claims no removal** (`redact.rs::count_vector_paths_under_marks`, surfaced in
+`RedactPanel.tsx:197`). That is P3.2 design §8 stated as behaviour. The user hand-tested the
+1.2.0 installer on 2026-11-13, hit exactly this case, and **ruled option A: 1.2.0 ships with the
+honest refusal; vector redaction becomes a later phase with its own design.**
+
+**Why it cannot be done by extending the current walk.** The text path deletes a *text-showing
+operator*; an image is removed *whole* (D-RD3/D-RD7). A filled path is neither. Removing ink that
+lies under a rectangle means splitting the path's geometry — and the honest question there is not
+"how do I delete the operator" but **"what replaces the part of the path I remove"**. That is the
+**clipping question, and it is left open here on purpose**: a clip to the complement of the mark
+rectangle changes what the path paints and can change stroke joins, line caps and dash phase at
+the new boundary; whether the correct answer is a clip, a geometric re-intersection, or a
+rasterise-the-region fallback has not been measured, and guessing it in a plan row is exactly the
+failure this programme keeps catching.
+
+**What this row is not.** It is not a 1.2.0 defect and it is not a silent omission: the refusal is
+visible, it states the count, and the release notes say so in the 1.2.0 section. It becomes a
+phase when its design answers the clipping question with measurements, per the standing
+stage gate.
 
 ## 3. Out of scope (standing)
 

@@ -108,17 +108,29 @@ matching fails instead of passing.
 - **Dual-licensed MIT OR Apache-2.0.**
 - **Text-scan guards normalise line endings**, so they hold on Windows checkouts.
 
-### Status: development version, not a release
+### Status: hand-tested, tagged, released
 
-No tag exists for this version and none should be created until the installer has been run by a
-human. What exists is a build to test:
+The installer below was run by a human on **2026-11-13**, and the tag was created **at the commit
+that built it** — `b2d0b3b`. This section is the record of that build, not of a tree:
 
-- **Installer:** `DocuPro_1.2.0_x64-setup.exe`, **11,089,015 bytes**, SHA-256
-  `2eaebaa217c1d66a477e7503671958659d180ea8ce0064e0b7345922066cc52a`.
-- **Built by** `release-windows.yml` dispatch `43075237167`, attempt 2, from `27138bc`.
-- **Attempt 1 of that run failed** with the known `STATUS_ACCESS_VIOLATION` in `textedit_gates`
-  (third reproduction; recorded in `AGENTS.md`). The installer comes from the same-SHA re-run,
-  which is the policy the design mandates — no claim in this section rests on a single Windows run.
+- **Installer:** `DocuPro_1.2.0_x64-setup.exe`, **11,091,275 bytes**, SHA-256
+  `989e2dfb0c3db683649dbc85c54150ba06d180038c929e64643b6058c2597c30`.
+- **Built by** `release-windows.yml` dispatch `43164026953`, attempt 1, from `b2d0b3b`.
+- **Tag:** `v1.2.0` at `b2d0b3b` — the same commit, so the published asset and the hand-tested
+  bytes are the same build. No rebuild-then-tag.
+
+**What the hand-test covered, in the user's words and verdicts:** install and the About version,
+a protected document prompting for its password and opening, the highlight palette names and the
+drag preview, signing with a `.pfx` and its password with anchor import and both the `valid` and
+`unsigned` badges, certification levels `P=1` (refusal) and `P=3` (annotation permitted), and
+edit-in-place plus search as a smoke pass. **All passed.**
+
+**The one case that did not complete is the decided behaviour, not a defect.** A redaction mark
+covering only vector drawing refused, wrote nothing, named the number of paths that would remain,
+kept the marks, and claimed no removal — which is exactly what *Redact* above says it will do.
+The user ruled that 1.2.0 ships with the honest refusal and that vector redaction becomes a later
+phase with its own design. It is logged in `docs/P3-PLAN.md` §2 with the clipping question left
+open rather than guessed.
 
 ### Fixed after hand-testing
 
