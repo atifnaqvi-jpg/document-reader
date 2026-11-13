@@ -213,11 +213,15 @@ fi
 # `the_parity_matrix_promotes_b7_and_b9_only_with_a_recorded_installer`. One test, counted once
 # in each shape; ignored stays 107, which is the check that matters -- no PDFium-backed test was
 # lost while a documentation-only change landed.
-# Measured, not incremented: 960 passed with PDFIUM_LIBRARY_PATH unset, 1067 with --include-ignored.
-# Ignored is 107 in the plain shape and 0 in the include-ignored shape: 960 + 107 = 1067.
-PIN_PLAIN_PASSED=960
+# Measured, not incremented: 961 passed with PDFIUM_LIBRARY_PATH unset, 1068 with --include-ignored.
+# Ignored is 107 in the plain shape and 0 in the include-ignored shape: 961 + 107 = 1068.
+#
+# 2026-11-13 (tag side, before v1.2.0): +1 in both shapes, 960/107 -> 961/107 and 1067/0 ->
+# 1068/0, for `the_release_body_discloses_that_vector_drawing_survives_redaction`. Ignored stays
+# 107 again -- the release body's text is guarded without running anything that needs PDFium.
+PIN_PLAIN_PASSED=961
 PIN_PLAIN_IGNORED=107
-PIN_IGNORED_PASSED=1067
+PIN_IGNORED_PASSED=1068
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

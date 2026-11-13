@@ -179,6 +179,9 @@ jobs:
               time. The copy is reopened with the password before you are told it worked.
             - **Redact.** Marked content is deleted, not covered: glyphs, the images a mark touches,
               and the annotations above them. A copy-paste finds nothing there afterwards.
+              **Vector drawing is not removed.** A chart, a logo or a line drawing under a mark
+              is not deleted: such a redaction refuses, writes nothing, and reports how many
+              paths would have remained, rather than claiming a removal it did not make.
             - **Signatures.** Sign with a `.pfx`, or choose a certificate from the Windows store.
               A badge reports `valid`, `modified`, `unknown` or `unsigned`, and lists what was and
               was not checked -- including "revocation: not checked" when there is no list.

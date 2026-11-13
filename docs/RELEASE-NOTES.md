@@ -108,16 +108,43 @@ matching fails instead of passing.
 - **Dual-licensed MIT OR Apache-2.0.**
 - **Text-scan guards normalise line endings**, so they hold on Windows checkouts.
 
-### Status: hand-tested, tagged, released
+### Status: hand-tested and tagged; the tag is two commits past the build
 
-The installer below was run by a human on **2026-11-13**, and the tag was created **at the commit
-that built it** — `b2d0b3b`. This section is the record of that build, not of a tree:
+The installer below was run by a human on **2026-11-13**. This section is the record of that
+build, not of a tree:
 
 - **Installer:** `DocuPro_1.2.0_x64-setup.exe`, **11,091,275 bytes**, SHA-256
   `989e2dfb0c3db683649dbc85c54150ba06d180038c929e64643b6058c2597c30`.
 - **Built by** `release-windows.yml` dispatch `43164026953`, attempt 1, from `b2d0b3b`.
-- **Tag:** `v1.2.0` at `b2d0b3b` — the same commit, so the published asset and the hand-tested
-  bytes are the same build. No rebuild-then-tag.
+- **Tag:** `v1.2.0` on the commit carrying this section. Naming that SHA in this file would
+  change the commit it names, so it is given as a measured distance instead:
+  `git rev-list --count b2d0b3b..HEAD` returned 2 when this was written, and
+  `git describe --tags --exact-match` is the authority.
+
+**The tag is not the hand-tested commit, and the delta is stated rather than glossed.** The
+hand-test verdict, the promotion of B7 and B9, and this section were all written *after* the
+build, because a human runs the installer before anyone can record that they did. Tagging
+`b2d0b3b` would publish notes that deny they describe a release and cite the previous build's
+checksum. So the tag follows the record instead of the build, exactly as `v1.1.0`'s did:
+
+| Path | Why it moved | Can it change the installer? |
+|---|---|---|
+| `docs/RELEASE-NOTES.md` | this section | No — prose |
+| `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`, `docs/P2.7-STOCK-TAKE.md` | B7 and B9 to `Have`, with their provenance | No — prose |
+| `docs/P3-PLAN.md` | vector redaction logged as decided behaviour | No — prose |
+| `scripts/ralph/gate.sh` | pins raised for the two new guards | No — the floor only rises |
+| `src-tauri/tests/release_version.rs` | the B7/B9 provenance guard | No — a test file |
+| `src-tauri/tests/release_workflow.rs` | the guard holding the published body to this limitation | No — a test file |
+| `.github/workflows/release-windows.yml` | the published body's redaction paragraph | No installer change, but **it does change what the release page says** |
+
+No file under `src-tauri/src/` or `src/` is touched, which is what makes the hand-test verdict
+apply to the shipped installer rather than to some earlier build.
+
+**The published asset is a fresh build, not the bytes a human ran.** A tag run executes the whole
+workflow — it does not upload the dispatch's artifact — so the `.exe` on the Releases page is
+compiled again from the tagged commit. The claim this section makes is about the **source
+commit**, which is exact, and it cannot make the binary reproducible: `v1.0.1` differs from its
+own hand-tested artifact by 221 bytes and `v1.0.0` by 3,748, from identical commits.
 
 **What the hand-test covered, in the user's words and verdicts:** install and the About version,
 a protected document prompting for its password and opening, the highlight palette names and the

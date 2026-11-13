@@ -750,3 +750,51 @@ fn the_release_build_is_bounded_so_a_hung_suite_cannot_hold_the_runner() {
          that step moved to another job, move the timeout with it"
     );
 }
+
+/// The published body must disclose the redaction limit, because the notes are one link away.
+///
+/// `docs/RELEASE-NOTES.md` states the vector limitation in its *Redact* section and the phase
+/// record repeats it, so nothing in the tree looked wrong. The release body -- the paragraph a
+/// user reads on the Releases page, and the only thing most of them read at all -- advertised
+/// redaction as "deleted, not covered" with no limit attached. That is the v1.0.1 stale-headline
+/// defect in substance rather than in form: correct notes, and a headline claiming more than
+/// the build does.
+///
+/// The check is on the *sentence that carries the claim*, not the body at large: a bare
+/// `contains("vector")` would be satisfied by the phase's name appearing anywhere, which is the
+/// "whole-body `contains`" mistake `the_release_body_names_the_product_it_ships` records. So the
+/// limit must appear inside the redaction bullet itself.
+#[test]
+fn the_release_body_discloses_that_vector_drawing_survives_redaction() {
+    let body = publish_body(&workflow()).expect("the publish step must carry a `body:`");
+
+    let bullet = body
+        .lines()
+        .position(|line| line.contains("**Redact.**"))
+        .map(|start| {
+            // The bullet's own first line also begins with `- **`, so it cannot go through the
+            // continuation filter -- that filter would reject the line the claim is on and leave
+            // an empty string that no needle can match. Take it unconditionally, then extend.
+            let mut rest = body.lines().skip(start);
+            let mut collected: Vec<&str> =
+                vec![rest.next().expect("the position came from this iterator")];
+            collected.extend(rest.take_while(|line| {
+                !line.trim().is_empty() && !line.trim_start().starts_with("- **")
+            }));
+            collected.join("\n")
+        })
+        .expect(
+            "the release body must carry a `**Redact.**` bullet; if redaction is no longer \
+             advertised there, this guard is looking for nothing and must be rewritten, not \
+             deleted",
+        );
+
+    for needle in ["Vector", "not removed"] {
+        assert!(
+            bullet.contains(needle),
+            "the release body's redaction bullet does not say vector drawing is not removed \
+             (looked for {needle:?}). The app refuses such a redaction rather than claiming it, \
+             and a user who reads only this page would not know. The bullet says: {bullet:?}"
+        );
+    }
+}
