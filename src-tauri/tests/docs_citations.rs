@@ -129,7 +129,9 @@ fn locked_version(lock: &str, name: &str) -> Option<String> {
         if line.trim() != format!("name = \"{name}\"") {
             continue;
         }
-        if let Some(version) = lines.peek().and_then(|next| next.trim().strip_prefix("version = "))
+        if let Some(version) = lines
+            .peek()
+            .and_then(|next| next.trim().strip_prefix("version = "))
         {
             return Some(version.trim_matches('"').to_string());
         }
