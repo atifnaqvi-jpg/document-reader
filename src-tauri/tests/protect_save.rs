@@ -92,41 +92,71 @@ fn source_pdf(dir: &Path) -> PathBuf {
     path
 }
 
-/// Opens `path` with PDFium, supplying `password` if given.
+/// Opens `path` through the **app's** PDFium and returns the page count, or a refusal.
 ///
-/// Returns the page count on success. A `None` password is an explicit "open without a
-/// password", which is the assertion for a wrong-password refusal.
+/// This used to build its own `Pdfium::new(...)` here. That deadlocked the whole test binary
+/// roughly half the time, and it was the cause of the Windows `--include-ignored` hangs that
+/// were previously misdiagnosed as a teardown crash (`K20`).
+///
+/// The mechanism is in `pdfium-render 0.8.37`, not in this app: with the `thread_safe`
+/// feature, `FPDF_InitLibrary` takes a **process-global** `static PDFIUM_THREAD_MARSHALL`
+/// mutex and `FPDF_DestroyLibrary` is the only thing that releases it. So at most one `Pdfium`
+/// may be live per process. `crate::provider::pdf` already knows this and holds exactly one in
+/// a `OnceLock` that is deliberately never dropped — its comment says "Do not reintroduce
+/// `Pdfium::new(...)` at a call site". This file did anyway, through a test helper, and the
+/// deadlock was therefore only reachable when two tests in this binary ran concurrently: the
+/// one below that goes through the app path (leaking the `OnceLock` instance and so holding
+/// the lock forever) and one of the two that used the old helper. Whichever arrived second
+/// blocked in `Pdfium::new` with no timeout and no output, which is why `ci.yml` could only
+/// ever report a 20-minute step timeout rather than a named failure.
+///
+/// Measured before the fix on this machine: 22 of 40 runs of this binary at `--test-threads=6`
+/// hung, and 2 of 20 with only the two interacting tests selected. The probe that isolates it
+/// is two lines — call `PdfProvider::page_count`, then `Pdfium::new` — and it blocks 100% of
+/// the time.
+///
+/// Going through the app's instance is also the *better* oracle: it is the reader the product
+/// actually ships, so this stops testing a second PDFium configuration that users never run.
 fn pdfium_open(path: &Path, password: Option<&str>) -> Result<usize, String> {
-    use pdfium_render::prelude::*;
+    use document_reader_lib::editor::session;
+    use document_reader_lib::model::AppError;
+    use document_reader_lib::provider::PdfProvider;
 
-    // The override is what CI and this workstation set. The fallback differs by platform
-    // because the bundled file does too (`pdfium.dll` on Windows, the `.so` here), and a
-    // hardcoded Linux name would silently make the Windows job report "library missing"
-    // rather than exercise the guard.
-    if let Ok(library_path) = std::env::var("PDFIUM_LIBRARY_PATH") {
-        let bindings = Pdfium::bind_to_library(&library_path)
-            .map_err(|error| format!("PDFIUM_UNAVAILABLE: {error}"))?;
-        let pdfium = Pdfium::new(bindings);
-        let document = pdfium
-            .load_pdf_from_file(&path.display().to_string(), password)
-            .map_err(|error| format!("open failed: {error}"))?;
-        return Ok(document.pages().len() as usize);
-    }
-
-    let bundled = if cfg!(windows) {
-        "pdfium.dll"
+    // The app reads remembered passwords from the process-wide store rather than taking one
+    // per call, so a password supplied here has to go in the same way the UI puts it in.
+    let key = path.to_string_lossy().to_string();
+    let store = session::shared();
+    if let Some(password) = password {
+        store.remember(&key, session::SessionPassword::new(password));
     } else {
-        "resources/libpdfium.so"
-    };
-    let bindings =
-        Pdfium::bind_to_library(bundled).map_err(|error| format!("PDFIUM_UNAVAILABLE: {error}"))?;
-    let pdfium = Pdfium::new(bindings);
+        store.forget(&key);
+    }
+    // A guard rather than a bare call: the password must be gone before the next test opens a
+    // file at the same path, or a wrong-password assertion could pass on a stale entry.
+    let _clear = PasswordClear { store, key };
 
-    let document = pdfium
-        .load_pdf_from_file(&path.display().to_string(), password)
-        .map_err(|error| format!("open failed: {error}"))?;
+    match PdfProvider::page_count(path) {
+        Ok(pages) => Ok(pages as usize),
+        Err(AppError::PdfiumUnavailable(error)) => Err(format!("PDFIUM_UNAVAILABLE: {error}")),
+        // A wrong password and "no password supplied" are different refusals, and the tests
+        // below distinguish them; both mean "it did not open", which is what `Err` says here.
+        Err(AppError::WrongPassword) | Err(AppError::PasswordRequired) => {
+            Err("open failed: password refused".to_string())
+        }
+        Err(other) => Err(format!("open failed: {other}")),
+    }
+}
 
-    Ok(document.pages().len() as usize)
+/// Removes a password from the process-wide store when the read is done.
+struct PasswordClear {
+    store: std::sync::Arc<document_reader_lib::editor::session::PasswordStore>,
+    key: String,
+}
+
+impl Drop for PasswordClear {
+    fn drop(&mut self) {
+        self.store.forget(&self.key);
+    }
 }
 
 /// **I-PR1**: the protected output opens in PDFium with the user password.
@@ -428,4 +458,83 @@ fn the_app_opens_the_protected_file_it_wrote_once_it_has_the_password() {
         Ok(_) => panic!("a protected document must not render without its password"),
     }
     let _ = dir;
+}
+
+/// **The deadlock cannot come back**: no test binary may hold the app's `Pdfium` *and*
+/// construct its own.
+///
+/// `pdfium-render`'s `thread_safe` feature takes a process-global `static` mutex in
+/// `FPDF_InitLibrary` and releases it only in `FPDF_DestroyLibrary`. A `Pdfium` that is
+/// constructed and dropped is therefore safe — the next one waits a moment and proceeds — but
+/// one that is *never* dropped holds that lock for the life of the process. The app does exactly
+/// that on purpose (`provider/pdf.rs` keeps one in a `OnceLock`), which is correct: it is the
+/// single instance every render funnels through. The defect was this file building a second one
+/// in `pdfium_open`, so the two together deadlocked whenever they ran concurrently.
+///
+/// That is what the Windows `--include-ignored` hangs were, previously misdiagnosed as a
+/// teardown crash (K20). Measured on 2026-10-14: 22 of 40 runs of this binary at
+/// `--test-threads=6` hung before the fix, 0 of 160 after, and restoring the old helper hung
+/// 17 of 30.
+///
+/// The rule is deliberately narrower than "no `Pdfium::new` anywhere". `tests/incremental_pdfium.rs`
+/// and `tests/redact_pdfium.rs` construct one per helper call and drop it, never touching the app
+/// path, so they cannot reach the deadlock and are left alone. What must not happen is a file that
+/// does *both*: that is a coin-flip hang on any machine with more than one test thread.
+///
+/// This is a source check because the failure has no runtime signature. A deadlock prints no
+/// failure line, so `0 failed` and `N passed` never arrive; a timeout is the only symptom, and a
+/// timeout cannot say which test or which lock. This names it at build time instead.
+#[test]
+fn no_test_holds_the_apps_pdfium_and_builds_another() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    // Split so this guard's own source does not match itself.
+    let needle = concat!("Pdfium::", "new(");
+    let mut offenders: Vec<String> = Vec::new();
+
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("the tests directory is readable")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect();
+    files.sort();
+
+    for path in files {
+        let source = std::fs::read_to_string(&path).expect("a test file is readable");
+        let mut constructs = Vec::new();
+        let mut uses_app = false;
+
+        for (number, line) in source.lines().enumerate() {
+            // Comments discuss this rule at length; only code counts.
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains(needle) {
+                constructs.push(format!("{}:{}", number + 1, code.trim()));
+            }
+            // Anything that reaches the process-wide instance: the provider's statics and the
+            // `ReaderProvider` methods all funnel through `pdfium()`'s `OnceLock`.
+            if code.contains("PdfProvider::")
+                || code.contains("ReaderProvider")
+                || code.contains("render_cached")
+            {
+                uses_app = true;
+            }
+        }
+
+        if uses_app && !constructs.is_empty() {
+            offenders.push(format!(
+                "{}:\n    {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                constructs.join("\n    ")
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these test files both drive the app's never-dropped `Pdfium` and construct another one. \
+         pdfium-render's thread_safe mutex is process-global and released only by \
+         `FPDF_DestroyLibrary`, so the second `Pdfium` blocks forever and the binary hangs with \
+         no failure line. Open through `PdfProvider` instead; if the test needs a password, put \
+         it in `session::shared()` the way the UI does:\n{}",
+        offenders.join("\n")
+    );
 }

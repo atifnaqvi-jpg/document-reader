@@ -229,9 +229,14 @@ fi
 # 962/107 -> 963/107 and 1069/0 -> 1070/0, for
 # `the_pdfium_assertion_step_is_bounded_not_only_its_job`. Text-only, no PDFium, ignored stays
 # 107 -- measured, not incremented.
-PIN_PLAIN_PASSED=963
+#
+# 2026-11-14 (the Windows hang, diagnosed): +1 in both shapes, 963/107 -> 964/107 and
+# 1070/0 -> 1071/0, for `no_test_holds_the_apps_pdfium_and_builds_another`. It reads the test
+# sources as text, so it needs no PDFium and ignored stays 107 -- measured, not incremented.
+# This one is a fix, not a feature: the count moved because the defect it guards was real.
+PIN_PLAIN_PASSED=964
 PIN_PLAIN_IGNORED=107
-PIN_IGNORED_PASSED=1070
+PIN_IGNORED_PASSED=1071
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
