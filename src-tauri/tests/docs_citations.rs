@@ -85,6 +85,169 @@ fn crate_stems() -> BTreeSet<String> {
     stems
 }
 
+/// The dependency crates a governed document is allowed to cite.
+///
+/// A design may legitimately describe a dependency's API — `pdfium-render`'s field accessors and
+/// `lopdf`'s writer are the subject of P3.3, not incidental mentions — so a citation that resolves
+/// against the crate source is as honest as one that resolves against this tree. Indexing every
+/// dependency would mean reading hundreds of crates to check a handful of tokens; naming the cited
+/// ones keeps the scan bounded (13.8 MB here) and makes widening it a deliberate act.
+const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
+
+/// Symbols a governed design names as tests or APIs **it intends to create**, with the document
+/// that names them.
+///
+/// This is an exception list that invalidates itself: an entry is only allowed while the symbol is
+/// absent. The moment the named test lands, the guard fails and demands the entry's removal, so the
+/// list cannot rot into a permanent hole. It exists because a design is governed from the moment it
+/// is written (§ `GOVERNED_DOCS`) and necessarily names acceptance tests that do not exist yet.
+const PLANNED_SYMBOLS: [(&str, &str); 1] = [(
+    "the_checkbox_ticks_in_a_real_viewer",
+    "docs/P3.3-forms-DESIGN.md",
+)];
+
+/// Symbols a governed document cites **in order to assert that they are absent**, with the reason
+/// the absence is load-bearing.
+///
+/// A design that says "there is no `as_combo_box_field_mut`" is making an exact, checkable claim —
+/// the claim that a field type is unreachable — and it is the opposite of a bad citation. Checking
+/// it as if it were a citation of an existing symbol would demand the doc stop recording the gap
+/// that shapes the phase. So the guard verifies the assertion rather than exempting it: the token
+/// must still be absent, and the day a dependency supplies it the guard fails and says the
+/// document's claim of unreachability is now wrong. That is a real check, not a hole in one.
+const ASSERTED_ABSENT: [(&str, &str, &str); 1] = [(
+    "as_combo_box_field_mut",
+    "docs/P3.3-forms-DESIGN.md",
+    "combo box and list box fields are unreachable for filling in pdfium-render 0.8.37",
+)];
+
+/// The version `Cargo.lock` pins for `name`, so a dependency citation is checked against the source
+/// that actually builds rather than whichever version happens to sit in the registry cache.
+fn locked_version(lock: &str, name: &str) -> Option<String> {
+    let mut lines = lock.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim() != format!("name = \"{name}\"") {
+            continue;
+        }
+        if let Some(version) = lines.peek().and_then(|next| next.trim().strip_prefix("version = "))
+        {
+            return Some(version.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// Every `.rs` file of the cited dependencies, read from unpacked crate sources.
+///
+/// There is no `vendor/` directory in this repository and no cargo source replacement: the ground
+/// truth is the registry cache that `cargo` itself unpacked, located through `CARGO_HOME`. The
+/// default is overridden by `DOCS_CITATIONS_DEP_ROOTS` (colon-separated) purely so the mutation
+/// tests can point the guard at a deliberately damaged copy instead of the shared cache.
+fn dependency_sources() -> Vec<(PathBuf, String)> {
+    let roots: Vec<PathBuf> = match std::env::var_os("DOCS_CITATIONS_DEP_ROOTS") {
+        Some(paths) => std::env::split_paths(&paths).collect(),
+        None => {
+            let cargo_home = std::env::var_os("CARGO_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "neither CARGO_HOME nor HOME is set, so crate sources cannot be located; \
+                         a guard that cannot see the dependencies must not report success"
+                    )
+                });
+            let lock = read(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock"));
+            let registry = cargo_home.join("registry/src");
+            let mut found = Vec::new();
+            for name in CITED_CRATES {
+                let version = locked_version(&lock, name).unwrap_or_else(|| {
+                    panic!("Cargo.lock does not pin `{name}`, which a governed doc cites")
+                });
+                let wanted = format!("{name}-{version}");
+                let mut this_crate = None;
+                if let Ok(shards) = std::fs::read_dir(&registry) {
+                    for shard in shards.flatten() {
+                        let candidate = shard.path().join(&wanted);
+                        if candidate.is_dir() {
+                            this_crate = Some(candidate);
+                            break;
+                        }
+                    }
+                }
+                found.push(this_crate.unwrap_or_else(|| {
+                    panic!(
+                        "crate source for `{wanted}` is not unpacked under {}, so a citation to it \
+                         cannot be checked; run `cargo fetch`",
+                        registry.display()
+                    )
+                }));
+            }
+            found
+        }
+    };
+
+    let mut files = Vec::new();
+    let mut stack: Vec<PathBuf> = roots;
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = read(&path);
+                files.push((path, text));
+            }
+        }
+    }
+    files
+}
+
+/// Whether `token` is an identifier the tree or a cited dependency actually contains.
+///
+/// A dependency match requires the token to appear as a whole word, so `set_value` is not satisfied
+/// by `set_value_impl` and a citation cannot be rescued by a longer name that merely contains it.
+fn token_is_present(token: &str, tree: &[(PathBuf, String)], deps: &[(PathBuf, String)]) -> bool {
+    let holds = |(_, source): &(PathBuf, String)| {
+        source.match_indices(token).any(|(at, _)| {
+            let before = source[..at].chars().next_back();
+            let after = source[at + token.len()..].chars().next();
+            let wordish = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            !wordish(before) && !wordish(after)
+        })
+    };
+    tree.iter().any(holds) || deps.iter().any(holds)
+}
+
+/// Whether `cited` names a file inside a cited dependency, compared as a path suffix.
+///
+/// A design writes `checkbox.rs` or `pdf/document/page/field/private.rs` rather than the absolute
+/// registry path, so the citation is honest when some dependency file ends with those components.
+/// Matching on components rather than on a string keeps `field.rs` from being satisfied by
+/// `a_field.rs`.
+fn dependency_holds_path(cited: &str, deps: &[(PathBuf, String)]) -> bool {
+    let components: Vec<&str> = cited.split('/').filter(|s| !s.is_empty()).collect();
+    // `.../field/checkbox.rs` abbreviates an elided prefix, so the claim it makes is exactly that
+    // some dependency file *ends* with the components after the ellipsis. Anything before it is
+    // dropped rather than treated as a directory literally named `...`.
+    let wanted: Vec<&str> = match components.iter().rposition(|c| *c == "...") {
+        Some(at) => components[at + 1..].to_vec(),
+        None => components,
+    };
+    if wanted.is_empty() {
+        return false;
+    }
+    deps.iter().any(|(path, _)| {
+        let actual: Vec<&str> = path
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        actual.len() >= wanted.len() && actual[actual.len() - wanted.len()..] == wanted[..]
+    })
+}
+
 /// Byte spans covered by `~~…~~`, paired outermost-first. An unclosed `~~` yields no span, so a
 /// typo cannot silently exempt the rest of a document.
 fn strikethrough_spans(text: &str) -> Vec<(usize, usize)> {
@@ -180,7 +343,8 @@ fn cited_paths(text: &str) -> Citations {
 /// crate API that moved, is wrong before a line of code exists. `docs/P3.1-annotations-DESIGN.md`
 /// is the case in point: writing it turned up that `docs/P2-DESIGN.md` F1 had overstated the
 /// `pub(crate)` boundary, which is exactly the drift this list is here to catch.
-const GOVERNED_DOCS: [&str; 11] = [
+const GOVERNED_DOCS: [&str; 12] = [
+    "docs/P3.3-forms-DESIGN.md",
     "docs/P3.2-protect-redact-signatures-DESIGN.md",
     "docs/P3.2-FACTS-cms-signing.md",
     "docs/P3-rename-housekeeping-DESIGN.md",
@@ -198,12 +362,41 @@ const GOVERNED_DOCS: [&str; 11] = [
 fn docs_cite_only_identifiers_that_exist() {
     let root = repo_root();
     let sources = rust_sources();
+    let deps = dependency_sources();
     let mut unresolved = Vec::new();
 
     for doc in GOVERNED_DOCS {
         let text = read(&root.join(doc));
         for token in cited_identifiers(&text, 2).live {
-            let present = sources.iter().any(|(_, source)| source.contains(&token))
+            if PLANNED_SYMBOLS
+                .iter()
+                .any(|(symbol, owner)| *symbol == token && *owner == doc)
+            {
+                // Allowed only while genuinely absent — see `PLANNED_SYMBOLS`. If the design's name
+                // for a future test has since appeared, the exemption is dead and must be removed,
+                // otherwise it silently covers a symbol that no longer needs covering.
+                assert!(
+                    !token_is_present(&token, &sources, &deps),
+                    "{doc} names `{token}` as a planned symbol, but it now exists; remove its \
+                     `PLANNED_SYMBOLS` entry so the guard checks it like any other citation"
+                );
+                continue;
+            }
+            if let Some((_, _, because)) = ASSERTED_ABSENT
+                .iter()
+                .find(|(symbol, owner, _)| *symbol == token && *owner == doc)
+            {
+                // The document claims this symbol does not exist. Verify the claim instead of
+                // exempting it: if a dependency now supplies the symbol, the doc's reasoning is
+                // obsolete and the guard must say so rather than let the claim stand.
+                assert!(
+                    !token_is_present(&token, &sources, &deps),
+                    "{doc} asserts `{token}` is absent because {because}, but it now exists; the \
+                     document's claim is obsolete and its `ASSERTED_ABSENT` entry must go"
+                );
+                continue;
+            }
+            let present = token_is_present(&token, &sources, &deps)
                 || root
                     .join("src-tauri/tests")
                     .join(format!("{token}.rs"))
@@ -211,7 +404,8 @@ fn docs_cite_only_identifiers_that_exist() {
                 || root
                     .join("src-tauri/examples")
                     .join(format!("{token}.rs"))
-                    .exists();
+                    .exists()
+                || dependency_holds_path(&format!("{token}.rs"), &deps);
             if !present {
                 unresolved.push(format!("{doc}: `{token}`"));
             }
@@ -230,6 +424,9 @@ fn docs_cite_only_identifiers_that_exist() {
 /// edit that adds or removes a line above it. Both such pointers in these documents had already
 /// drifted (one landed on `.first()`, the other on a struct field), which is exactly what makes
 /// them worse than no pointer at all: they look verifiable.
+///
+/// The same is true of `.md:95`: a markdown line number is stale by construction for the same
+/// reason and was the only way a pointer survived this guard, which tested `.rs:` alone.
 #[test]
 fn governed_docs_point_at_symbols_not_line_numbers() {
     let root = repo_root();
@@ -237,10 +434,15 @@ fn governed_docs_point_at_symbols_not_line_numbers() {
     for doc in GOVERNED_DOCS {
         let text = read(&root.join(doc));
         for (index, line) in text.lines().enumerate() {
-            if let Some(at) = line.find(".rs:") {
-                let numbered = line[at + 4..].starts_with(|c: char| c.is_ascii_digit());
-                if numbered {
-                    offenders.push(format!("{doc}:{} — {}", index + 1, line.trim()));
+            for suffix in [".rs:", ".md:"] {
+                let mut from = 0;
+                while let Some(found) = line[from..].find(suffix) {
+                    let at = from + found + suffix.len();
+                    if line[at..].starts_with(|c: char| c.is_ascii_digit()) {
+                        offenders.push(format!("{doc}:{} — {}", index + 1, line.trim()));
+                        break;
+                    }
+                    from = at;
                 }
             }
         }
@@ -259,6 +461,7 @@ fn governed_docs_point_at_symbols_not_line_numbers() {
 fn governed_docs_cite_only_paths_that_exist() {
     let root = repo_root();
     let stem_names = crate_stems();
+    let deps = dependency_sources();
     let mut missing = Vec::new();
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for doc in GOVERNED_DOCS {
@@ -266,10 +469,15 @@ fn governed_docs_cite_only_paths_that_exist() {
         for path in cited_paths(&text).live {
             let present = if path.contains('/') {
                 // Paths in a crate-level design doc are written against the crate root
-                // (`examples/x.rs`) as often as against the repository root (`docs/y.md`).
-                root.join(&path).exists() || crate_root.join(&path).exists()
+                // (`examples/x.rs`) as often as against the repository root (`docs/y.md`), and a
+                // citation into the crate's own modules (`editor/save.rs`) is written against
+                // neither — it is src-root relative.
+                root.join(&path).exists()
+                    || crate_root.join(&path).exists()
+                    || crate_root.join("src").join(&path).exists()
+                    || dependency_holds_path(&path, &deps)
             } else {
-                stem_names.contains(&path)
+                stem_names.contains(&path) || dependency_holds_path(&path, &deps)
             };
             if !present {
                 missing.push(format!("{doc}: `{path}`"));

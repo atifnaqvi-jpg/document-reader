@@ -49,3 +49,55 @@ lopdf and assert the refusal — so **no gate is untested**:
 
 `sample.pdf` predates this matrix and remains the best-case regression fixture for the
 earlier phases.
+
+## Forms fixtures (P3.3)
+
+Unlike the P2.4 matrix above, these are **not** built by `testpdf.rs`. They are produced by
+real third-party writers, because the point of the fixture is a spelling this repository would
+not have chosen to write.
+
+| Fixture | Producer | What it must provoke |
+|---------|----------|----------------------|
+| `libreoffice-checkbox-form.pdf` | LibreOffice 24.2.7.2, `--convert-to 'pdf:writer_pdf_Export:{"ExportFormFields":{"type":"boolean","value":"true"}}'` on an HTML form | A checkbox whose **on state is `/Yes` while its single appearance stream is keyed `/yes`**. Also `/NeedAppearances true`. |
+
+### Why the LibreOffice checkbox fixture exists
+
+**This fixture is the reason the writer accepts the lower-case `/yes` state.**
+
+LibreOffice writes the widget's value as the **name `/Yes`** and its default as `/DV /Yes`,
+but names the *appearance* stream **`/yes`** — lower case:
+
+```
+/V /Yes          /DV /Yes          /N << /yes 26 0 R /Off 27 0 R >>          /AS /Yes
+```
+
+ISO 32000-1 requires `/AS` to name a key present in `/AP /N`, and here it does not, by case.
+A writer that assumes the state name is spelled one way — `/Yes`, or `/On`, or upper case
+generally — picks the wrong key, or writes `/AS` naming a stream that no viewer can find, and
+the box renders unticked while the value reads back correct. The design ruling (P3.3 D-F3) is
+therefore that `/V` and `/AS` are taken as **names from the field's own `/AP /N` keys**, never
+from a hardcoded spelling. This file is the evidence for that decision, so it stays in the tree
+rather than being regenerated into a tidier shape.
+
+The three spellings the writer must survive are `/On`, `/Yes`, and `/yes`. The control fixture
+for `/Yes`/`/Off` is produced by `reportlab`; this one supplies the odd case.
+
+**Personal data:** none. The fields are `fullname` (empty) and `agree`. No `/Author`, `/Title`
+or `/Subject` is set; the only metadata is `/Producer LibreOffice 24.2` and a creation date,
+which is the producer identity this README relies on.
+
+**Regenerate** (output is not byte-identical — LibreOffice stamps a creation date and object
+numbers vary, so regenerate only to replace the file deliberately, and re-check the `/N` keys
+afterwards):
+
+```bash
+cat > /tmp/form.html <<'HTML'
+<html><body><h1>Fixture</h1><form>
+<p>Name: <input type="text" name="fullname" value=""></p>
+<p>Agree: <input type="checkbox" name="agree" value="yes" checked></p>
+</form></body></html>
+HTML
+soffice --headless \
+  --convert-to 'pdf:writer_pdf_Export:{"ExportFormFields":{"type":"boolean","value":"true"}}' \
+  --outdir /tmp /tmp/form.html
+```
