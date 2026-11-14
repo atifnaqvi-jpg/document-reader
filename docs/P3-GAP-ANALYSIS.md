@@ -86,7 +86,7 @@ ours, listed in §4) / **Out** (charter or rejected).
 ### C. Forms (report §2.3)
 | Capability | State | Notes |
 |---|---|---|
-| AcroForm fill + save | Missing | **P3.3**; pdfium-render's form FFI needs the spike the P2 design already demanded (its §1 facts F1/F7) |
+| AcroForm fill + save | Missing | **P3.3**; design `docs/P3.3-forms-DESIGN.md`. The old "form FFI spike (P2 §1 facts F1/F7)" note was **measured wrong 2026-11-13** — F1/F7 are annotation-creation and true redaction, not forms; text fill works through the public API. Buttons do not: `set_checked` in pdfium-render 0.8.37 returns `Ok` and writes a string-typed `/V` with no `/AS`, so the writer is ours (ruled 2026-11-14) |
 | FDF/XFDF/XML import-export | Missing | P3.3/P3.1 pair |
 | Field authoring (create fields, tab/calculation order) | Missing | optional later; design spike first |
 | Barcode fields (PDF417/QR) | Missing | optional later |
@@ -94,7 +94,7 @@ ours, listed in §4) / **Out** (charter or rejected).
 ### D. Fill & Sign (report §2.4)
 | Capability | State | Notes |
 |---|---|---|
-| Drawn/typed/image signature overlay | Missing | P3.3; visual-only, feasible with the existing page-object machinery |
+| Drawn/typed/image signature overlay | Missing | **P3.3a** — ruled 2026-11-14 to be its own phase, the one after forms (it shares no machinery with AcroForm); visual-only, feasible with the existing page-object machinery |
 | Auto-detect form fields | Missing | P3.3 optional row |
 
 ### E. Security (report §2.5)
@@ -173,8 +173,8 @@ gaps → polish.
 1. **P2.8 remainder** (in flight; silent wrongness class if left half-done) → A10 → 1.0.0.
 2. Capability gaps, in the user-ruled order (DECISIONS §9 + `docs/P3-PLAN.md`):
    P3.1 annotations breadth → P3.2 protect/redact + offline signatures →
-   P3.3 forms → P3.4 organize completion + compress → P3.5 OCR → P3.6 view
-   modes.
+   P3.3 forms → **P3.3a Fill & Sign** (inserted 2026-11-14) → P3.4 organize
+   completion + compress → P3.5 OCR → P3.6 view modes.
 3. Optional-later list and the two Out-forever lists close the matrix.
 
 No *silent wrongness* item is currently known open besides P2.8: the shipped
