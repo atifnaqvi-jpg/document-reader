@@ -499,6 +499,13 @@ fn the_release_body_names_the_product_it_ships() {
 /// six to. It reads the body out of the publish step's `with:` block via `publish_input`, which
 /// already skips comments, so a version mentioned in the explanatory comment above the block
 /// cannot satisfy it.
+///
+/// **Scoped to the headline, measured 2026-11-14.** This used to assert against the whole body,
+/// and that was enough while every body named exactly one version. The 1.2.1 reservation body
+/// names two -- it says what shipped is 1.2.0 -- so reverting its headline to
+/// `**DocuPro 1.2.0**` left the assertion green: measured, the mutant lived. That is the
+/// identical defect `the_release_body_names_the_product_it_ships` already records for the
+/// product name, one field over, so it gets the identical fix rather than a second lesson.
 #[test]
 fn the_release_body_names_the_version_being_published() {
     let text = workflow();
@@ -507,10 +514,18 @@ fn the_release_body_names_the_version_being_published() {
     );
 
     let version = publish_version();
+
+    let headline = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .expect("the release body is empty");
     assert!(
-        body.contains(&version),
-        "the release body must name {version}, the version in Cargo.toml. It says: {body:?}. \
-         A hardcoded headline published v1.0.1 under 1.0.0's description."
+        headline.contains(&version),
+        "the release body's headline must name {version}, the version in Cargo.toml. It says: \
+         {headline:?}. A hardcoded headline published v1.0.1 under 1.0.0's description. The \
+         whole body is checked no longer: a body that also names the previous release satisfies \
+         a body-wide search while telling the reader the wrong version is shipping."
     );
 }
 

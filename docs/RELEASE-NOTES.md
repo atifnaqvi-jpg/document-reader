@@ -7,6 +7,38 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 1.2.1 — development version, **not a release**
+
+**There is no 1.2.1 installer, no 1.2.1 tag, and this section describes no shipped build.** It
+exists because of a guard, not because of a decision to ship.
+
+`the_tree_version_is_ahead_of_every_published_tag` refuses any commit whose version carriers
+still name a published tag. Once `v1.2.0` existed, the next post-tag commit — the P3.3 forms
+design — could not land while the tree still said `1.2.0`: an untagged commit claiming `1.2.0` is
+indistinguishable from the release itself, and the release-notes guard would then pass against a
+section describing a different tree. That is the same situation v1.1.1 was created to solve
+(`033399c`), and this is the same answer.
+
+So **1.2.1 is a development reservation**: the six carriers move here so post-1.2.0 work can
+land, and the number is spent when the next real phase ships its own section. **Do not tag it.**
+
+**What moved with the bump, and why it had to.** `the_release_body_names_the_version_being_published`
+holds the publish body to `Cargo.toml`, so the body headline moves too — a body still headed
+"DocuPro 1.2.0" under a 1.2.1 tree is precisely the stale-headline defect v1.0.1 shipped. The body
+now says 1.2.1 **is a development version and not a release**, and points a reader at the 1.2.0
+section for what actually shipped.
+
+**What is in this tree that 1.2.0 does not have:** `docs/P3.3-forms-DESIGN.md` (a design, no
+code), the P3.3a row split, corrected form facts in `docs/P3-GAP-ANALYSIS.md` §C/§D, and the
+`--include-ignored` step bound that the moved `v1.2.0` tag carries. **No `src-tauri/src/` or
+`src/` file differs from `v1.2.0`.**
+
+The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml` and the one every gate ran
+on for this tree — the same pair 1.2.0 recorded, unchanged by a version-string bump.
+
+---
+
 ## 1.2.0
 
 **DocuPro 1.2.0 — protect, redact and sign.** The three things a PDF reader is expected to do to

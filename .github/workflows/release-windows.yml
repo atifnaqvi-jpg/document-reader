@@ -189,38 +189,31 @@ jobs:
           # v1.0.0, v1.0.1 and v1.1.0 all linked to a page that never mentioned their release.
           # A tag ref cannot rot the same way: the notes at the tag are the notes for it.
           #
-          # 1.2.0 is the P3.2 release: protect, redact and signatures. The body below names it
-          # because `the_release_body_names_the_version_being_published` holds this string to the
-          # version in Cargo.toml, and a body still claiming a previous version under a newer tree
-          # is the stale-headline defect (v1.0.1 published that way). Whoever bumps to 1.3.0
-          # rewrites this whole block for that phase -- the guard is what makes them.
+          # 1.2.1 is a development number and must never be tagged. The body below names it
+          # anyway, because `the_release_body_names_the_version_being_published` holds this
+          # string to the version in Cargo.toml, and a body still claiming 1.2.0 under a 1.2.1
+          # tree is the stale-headline defect (v1.0.1 published that way). Whoever bumps to
+          # 1.3.0 for the forms phase rewrites this whole block for that phase -- the guard is
+          # what makes them. 1.2.0's own body is preserved in `docs/RELEASE-NOTES.md` §1.2.0,
+          # which is the page the published v1.2.0 release links to.
           body: |
-            **DocuPro 1.2.0** — protect, redact and sign.
+            **DocuPro 1.2.1** — development version, **not a release**.
 
-            This release makes the app able to change a document's *security*, not only its text:
+            Nothing here is published: there is no 1.2.1 installer and no 1.2.1 tag. This number
+            is a reservation, moved onto the tree so work after 1.2.0 can land at all — a guard
+            refuses any untagged commit whose version still names a published tag, which would
+            otherwise make post-release work indistinguishable from the release itself.
 
-            - **Protect with a password.** Writes a protected copy beside the original, with an
-              opening password, a separate owner password, and each permission set one box at a
-              time. The copy is reopened with the password before you are told it worked.
-            - **Redact.** Marked content is deleted, not covered: glyphs, the images a mark touches,
-              and the annotations above them. A copy-paste finds nothing there afterwards.
-              **Vector drawing is not removed.** A chart, a logo or a line drawing under a mark
-              is not deleted: such a redaction refuses, writes nothing, and reports how many
-              paths would have remained, rather than claiming a removal it did not make.
-            - **Signatures.** Sign with a `.pfx`, or choose a certificate from the Windows store.
-              A badge reports `valid`, `modified`, `unknown` or `unsigned`, and lists what was and
-              was not checked -- including "revocation: not checked" when there is no list.
-              **`unknown` is the normal answer offline**: `valid` needs a trust anchor you imported
-              yourself, because nothing is fetched.
-
-            Signing with a Windows-store key is *not* implemented; such certificates can be listed
-            and chosen, and the dialog says so at that point. Revocation data is never downloaded.
-
-            See
+            **1.2.0 is what shipped.** See
             [the release notes](https://github.com/atifnaqvi-jpg/document-reader/blob/${{ github.ref_name }}/docs/RELEASE-NOTES.md)
-            for what changed, what is still refused, and the phase's acceptance record.
+            §1.2.0 for password protection, redaction, and offline CMS signatures. The
+            redaction limit is unchanged and still true:
 
-            Windows installer for DocuPro ${{ github.ref_name }}.
+            - **Redact.** Marked content is deleted, not covered — a black rectangle over live
+              text is a redaction a copy-paste defeats. **Vector drawing is not removed.** A
+              chart, a logo or a line drawing under a mark is not deleted: such a redaction
+              refuses, writes nothing, and reports how many paths would have remained, rather
+              than claiming a removal it did not make.
 
-            Download the `.exe` below and run it. Per-user install, no admin
-            rights needed. PDFium is bundled, so PDF support works out of the box.
+            If this page exists, a tag was pushed that should not have been: 1.2.1 is not
+            meant to be tagged.
