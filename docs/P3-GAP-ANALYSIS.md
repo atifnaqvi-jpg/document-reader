@@ -8,33 +8,42 @@ source `docs/reference/document-reader-capabilities.md`
 (referred to below as "the report"). Every "verified" claim below was checked
 against the tree, the tag list, or the test files on 2026-11-01.
 
+**Revised 2026-11-14** at `8e84703` (version 1.2.1) so that the inventory stops
+reporting shipped capabilities as missing: §1, §B, §E and §H were stale by three
+shipped phases (P2.8, P3.1, P3.2). The revision is mechanical — state cells and the
+facts they rest on — and changes no plan row, no ruling and no scope. Every changed
+cell is grounded in the tree or a tag rather than in recollection; where a claim was
+already true it is left alone. Sections still dated 2026-11-01 have not been
+re-verified since.
+
 ---
 
 ## 1. Where the programme stands (verified)
 
-- **Shipped:** P0 → P2.7.6 complete, plus **P2.7.7 (Type0/CID embedding) which
-  landed inside 0.9.0** — writer `dcffa91` and `da360fc`, CID-run routing ahead
-  of MECH-A in `6caaedd`. `v0.9.0` is tagged on `6caaedd` and published; the
-  release record lives in `docs/RELEASE-NOTES.md` §0.9.0, including the
-  corrected build → hand-confirm → tag order.
-- **In flight:** P2.8 (line-level reflow, target 1.0.0). Design frozen
-  (`39d2b26`); reflow case (a) landed (`b260966`); refusal rows R8b/R-1a/R-1b/R-2c
-  pinned; kerned-line fixtures landed (`6809678`); ink-position guards prove
-  only-edited-text moves (`9471313`). Remaining: the other reflow cases and
-  acceptance row A10, then the 1.0.0 closeout under the same
-  build → hand-confirm → tag order.
-- **Test posture:** 612 Rust tests plus the vitest suite; 70 of the Rust tests
-  are PDFium-gated `#[ignore]`s that only run with a real library (Windows CI
-  runs them via `--include-ignored`; the Linux job asserts the exact ignored
-  count). Guards cover the CI itself, the docs citations, the fixture tree, and
-  the release-version carriers.
-- **Open ledger (small):** page **insert** is missing and `pages::merge` is dead
-  code (B1b); U-3 (the page-operation leg of multi-level undo) is tracked in the
-  parity plan; the Windows CI teardown crash (`STATUS_ACCESS_VIOLATION`) has two
-  timestamped reproductions (`40908435884` attempt 1, `41278018858` on a
-  documentation-only commit with `324c131` passing the same job twenty minutes
-  earlier) — together they rule out anything code-dependent; the cause remains
-  unidentified (record: AGENTS.md, `docs/RELEASE-NOTES.md` §0.9.1).
+- **Shipped:** P0 → P2.7.6, **P2.7.7** (Type0/CID embedding) inside 0.9.0, **P2.8** (line-level
+  reflow) closed at `v1.0.0`, **P3.1** annotations breadth at `v1.1.0`, and **P3.2** protect,
+  redaction and offline signatures at `v1.2.0`. The P2.7.7 record is `docs/RELEASE-NOTES.md`
+  §0.9.0, including the corrected build → hand-confirm → tag order.
+- **In flight:** nothing. **P3.3 forms** is the next phase and has a design
+  (`docs/P3.3-forms-DESIGN.md`) awaiting sign-off; no code is written for it. The phase order
+  after it is P3.3a, P3.4, P3.5, P3.6 (`docs/P3-PLAN.md` §1).
+- **Test posture:** **964** plain / **107** ignored, and **1071** with `--include-ignored`
+  (measured 2026-11-14; the Linux job pins 107 ignored, the Windows job asserts 0 after
+  `--include-ignored`). Plus 196 vitest tests in 15 files. Guards cover the CI itself, the docs
+  citations, the fixture tree, and the release-version carriers.
+- **Open ledger (small):** page **insert** is missing and `pages::merge` is dead code (B1b); U-3
+  (the page-operation leg of multi-level undo) is tracked in the
+  parity plan; the Windows `STATUS_ACCESS_VIOLATION` has two timestamped reproductions
+  (`40908435884` attempt 1, `41278018858` on a documentation-only commit with `324c131` passing
+  the same job twenty minutes earlier) — together they rule out anything code-dependent. The
+  cause remains unidentified (record: AGENTS.md, `docs/RELEASE-NOTES.md` §0.9.1). **A third
+  candidate was examined on 2026-11-14 and is *not* added to that record:** release run
+  `43075237167` failed attempt 1 and passed attempt 2 on the same SHA `27138bc`, which looks like
+  the same signature, but the failing job is **"Build Windows installer"** — the packaging
+  workflow, not the Rust test suite — so it is a separate intermittent and is recorded separately
+  rather than folded in. **Also distinct from the Windows CI *hang* diagnosed and fixed on
+  2026-11-14** (`c71a270`): a global `Pdfium` mutex taken twice in one process, a different defect
+  in a different binary, which does not explain the crash.
 - ~~Dead helper `text_without_rise()` has zero callers (T1).~~ **Closed.** Struck
   2026-11-01 after the loop's challenge: `text_without_rise` was deleted in
   `dcffa91`, shipped inside 0.9.0. It is the third time this item resurfaced as
@@ -76,9 +85,9 @@ ours, listed in §4) / **Out** (charter or rejected).
 | Capability | State | Notes |
 |---|---|---|
 | Real PDF annotations (create/update/list/delete/undo), PDFium renders them | Have | `editor/annotate.rs` rebuilds every annotation from the DB on save (P2-D3/D8) |
-| Tool breadth | Partial | highlight + sticky note ship; underline geometry exists in the frontend; strikeout/squiggly/callout/textbox/ink/line/arrow/shapes/stamps are Missing → **P3.1** |
-| Comment manager (list/sort/filter/statuses), reply chains | Missing | P3.1 |
-| XFDF/FDF import-export | Missing | P3.1 (paired with P3.3 forms data) |
+| Tool breadth | Partial | **P3.1 shipped 13 concrete types** (D-A1): markup `highlight`/`underline`/`strikeout`/`squiggly`; text `note`/`textbox`/`callout`/`typewriter`; drawing `ink`/`line`/`arrow`/`rect`/`oval` — the full enum is `AnnotationKind` in `src-tauri/src/model/mod.rs`, written as real PDF annotations by the `lopdf` path. `polygon`/`cloud` are **named, not scheduled** (D-A1: they need a vertex-handles geometry editor nothing else in the palette requires). `stamps` remain Missing → optional-later |
+| Comment manager (list/sort/filter/statuses), reply chains | Have | **P3.1 shipped it**: `src/components/CommentPane.tsx` sorts by page/author/date/type/status and filters by status; statuses are the four `AnnotationStatus` values persisted by `db::annotations::set_status`; reply chains are `/IRT`-linked (`annotate.rs`) and indented in the pane |
+| XFDF/FDF import-export | Partial | **XFDF landed in P3.1** (D-A9/D-A10, `src-tauri/src/editor/xfdf.rs`, commands `export_xfdf`/`import_xfdf`/`save_xfdf`). **FDF is not implemented and, by ruling of 2026-11-14, will not be in 1.3.0** — refused by name with XFDF named as supported (`docs/DECISIONS.md` §10 R7); reachable as a designed row if a real need appears. Form-*data* XFDF is P3.3's, distinct from this annotation XFDF |
 | Measurement (2D) tools | Missing | optional-later |
 | Print comment summaries | Missing | needs a print pipeline; optional-later |
 | Shared reviews, collab sync | Out | charter (§2.9) |
@@ -101,9 +110,9 @@ ours, listed in §4) / **Out** (charter or rejected).
 | Capability | State | Notes |
 |---|---|---|
 | Open encrypted PDFs; explicit decrypt-a-copy with password memory | Have | `editor/protect.rs` (three-part policy), `decrypt_copy`, `PasswordStore` |
-| Set password + permissions on save | Missing | **P3.2**; correctness-obligation feature |
-| True redaction (mark/apply), sanitize / remove hidden info | Missing | **P3.2**; redaction is not delete+flatten and must be said so in the design; pdfium-render exposes no redaction, so the writer is our own |
-| PKCS#7 sign / verify, certification badges | Missing | **P3.2**, offline mode per R3 (no TSA call, doc hash never leaves the machine) |
+| Set password + permissions on save | **Have** (1.2.0, P3.2; hand-tested 2026-11-13) | `editor/protect.rs`; writes a protected copy through the P2-D2 discipline and verifies it before reporting success. Reached from *File > Protect…* |
+| True redaction (mark/apply), sanitize / remove hidden info | **Have** (1.2.0, P3.2; hand-tested 2026-11-13) | Content is **deleted, not covered**, with the sanitize list applied and reachability GC after it (D-RD2..D-RD7, I-RD1..I-RD7). **Vector drawing under a mark is refused**, naming the path count, and that is the decided behaviour (option A, ruled 2026-11-13), not a defect — the clipping question is left open in `docs/P3-PLAN.md` §2 |
+| PKCS#7 sign / verify, certification badges | **Have** (1.2.0, P3.2; hand-tested 2026-11-13) | Offline detached CMS over a reserved `/Contents` gap appended as a second revision; PFX import, offline verify, the four-state badge (`valid`/`modified`/`unknown`/`unsigned`), CRL-based revocation that states "not checked" when it has none, and DocMDP level refusal (D-SG6/D-SG7). **Not claimed:** signing with a Windows-store private key |
 | RFC 3161 timestamping, AATL/EU trust services, LTV | Out for now | R3 keeps them out until separately ruled |
 | Security policies, IRM/MSRMS | Out | cloud/DRM charter |
 
@@ -126,15 +135,15 @@ veraPDF would serve PDF/UA-style checks when standards work happens.
 | Compress / Optimize | Missing → P3.4 via qpdf sidecar (R4) |
 | Create/Export PDF (Office, HTML2PDF) | Missing; heavy worker work; optional-later |
 | Scan & OCR | Missing → P3.5 (R2) behind `TextExtractor` |
-| Protect / Redact | Missing → P3.2 |
-| Certificates | Missing → P3.2 (offline, R3) |
+| Protect / Redact | **Have** (1.2.0, P3.2) — one tool, two panels: *Protect…* writes a password/permission copy, *Redact* marks and applies true content removal |
+| Certificates | **Have** (1.2.0, P3.2), with one gap named rather than glossed: signing from a **PFX** (import a `.pfx`/`.p12` and its password), offline verification, the four-state badge, and certification (DocMDP). The **Windows store is read and listed** (`editor/signature/winstore.rs`, `identity.rs`) and a certificate whose private key the store holds is shown as `can_sign` — but **signing with a store-held private key is not implemented**, so that certificate cannot yet be used to produce a signature. Listed, not silently hidden |
 | Index/Catalog | Divergent (D-8): the library's FTS5 index serves the local scale better |
 | Print Production / PDF Standards | Missing; optional-later (veraPDF) |
 | Compare Files | Missing; optional-later |
 | Rich Media / 3D / Flash-era | Out (report §4.2.16: lowest ROI) |
 | Action Wizard / custom tools | Out (tied to the JS/plugin story) |
 | Prepare Form | Missing → P3.3 |
-| Stamp / Measure / JS developer / A11y wizards | Missing → P3.1 partial, rest optional-later |
+| Stamp / Measure / JS developer / A11y wizards | **Missing** — stamps did not ship in P3.1 (D-A1's 13 types exclude them); measure and the JS developer tool are optional-later; the A11y wizards belong to the accessibility suite |
 | Unified Share / Send & Track / Mobile Link | Out (charter) |
 
 ### I. Cloud services (report §2.9)
@@ -170,17 +179,19 @@ Extends the stock-take's list (D-1…D-6 in `docs/P2.7-STOCK-TAKE.md` §3):
 The rule (stock-take §4): silent wrongness → refusals users hit → capability
 gaps → polish.
 
-1. **P2.8 remainder** (in flight; silent wrongness class if left half-done) → A10 → 1.0.0.
+1. **No silent-wrongness item is open.** P2.8 closed at `v1.0.0` (A10 hand-confirmed), so the
+   "half-done reflow" class this row used to carry is retired.
 2. Capability gaps, in the user-ruled order (DECISIONS §9 + `docs/P3-PLAN.md`):
-   P3.1 annotations breadth → P3.2 protect/redact + offline signatures →
-   P3.3 forms → **P3.3a Fill & Sign** (inserted 2026-11-14) → P3.4 organize
-   completion + compress → P3.5 OCR → P3.6 view modes.
+   P3.1 annotations breadth ✅ → P3.2 protect/redact + offline signatures ✅ →
+   **P3.3 forms** (next; design awaiting sign-off) → P3.3a Fill & Sign (inserted
+   2026-11-14) → P3.4 organize completion + compress → P3.5 OCR → P3.6 view modes.
 3. Optional-later list and the two Out-forever lists close the matrix.
 
-No *silent wrongness* item is currently known open besides P2.8: the shipped
-refusals (`rotated-text`, `run-mismatch`, `nested-xobject`, `GLYPHS_NOT_COVERABLE`,
+The shipped refusals (`rotated-text`, `run-mismatch`, `nested-xobject`, `GLYPHS_NOT_COVERABLE`,
 `TYPE0_EMBED_UNIMPLEMENTED` retirements) are honest and tested, and P2.7.4's
-transform work closed the mis-measurement class the stock take recorded.
+transform work closed the mis-measurement class the stock take recorded. The one
+open defect is the intermittent Windows `STATUS_ACCESS_VIOLATION` in §1, which is a
+crash rather than a silent wrong answer and does not invalidate any shipped claim.
 
 ## 6. What this inventory does NOT plan
 

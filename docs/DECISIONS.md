@@ -240,3 +240,63 @@ document; do not re-ask.*
 
 Requirements source for the parity target: the Adobe feature/capability survey at
 `docs/reference/document-reader-capabilities.md`.
+
+---
+
+## 10. Amendments (2026-11-14, user rulings — P3.3 forms)
+
+> Same precedent as §9: these extend the frozen decisions and settle questions a phase design
+> left open. They bind from P3.3 onward.
+
+6. **R6 — a certified document permits form fill at every level that permits it at all, and
+   `P=3` is not the threshold.** A field value is not page content, so filling a form on a
+   certified document is judged by the level's own permission table, not refused as a
+   content change.
+
+   The normative basis is **ISO 32000-1 §12.8.2.2**, whose DocMDP transform parameters
+   dictionary is **Table 254**. Its `/P` entry reads: `1` no changes permitted; `2` form
+   filling, instantiating page templates, and signing; `3` the same as `2`, plus annotation
+   creation, deletion and modification. Form filling is therefore named explicitly at
+   **`P=2` as well as `P=3`** — it is not a permission `P=3` adds, and treating `P=3` as the
+   only level that allows it would refuse a `P=2` document the specification says may be
+   filled.
+
+   The reasoning beyond the citation: refusal would make forms unusable on every certified
+   file, and certification is the feature this product just shipped. The recoverable
+   direction is not always "refuse" — here a refusal would break the ordinary use of a
+   signed document while protecting nothing the certifier asked for. This settles the question
+   `docs/P3.3-forms-DESIGN.md` D-F7 left open and **replaces** that decision's
+   refuse-until-ruled default.
+
+   **Consistency note, checked rather than assumed:** `src-tauri/src/editor/signature/editpolicy.rs`
+   already answers this question this way. Its `permits` gives `FormFillAndSignatures` exactly
+   `EditKind::FormFill`, and `AnnotationsToo` `EditKind::FormFill | EditKind::Annotation`, and
+   `the_permitted_edit_matrix_matches_the_specification` pins the full matrix. The design's
+   default was therefore *stricter than shipped behaviour*: implementing it as drafted would
+   have introduced a refusal the product does not currently make at `P=2` or `P=3`. The
+   ruling aligns the design with the code that exists instead of adding a second, quieter
+   answer.
+
+7. **R7 — XFDF only. FDF is refused, by name, and the refusal is a decision, not an
+   omission.** P3.3 ships XFDF form-data import and export. FDF — the binary container — is
+   not implemented, in 1.3.0 or in the export/import surface.
+
+   The reasoning: FDF is a legacy binary container whose parser would double the format
+   surface of this feature for one import path, and XFDF already covers what P3.1's
+   annotation interchange established (`src-tauri/src/editor/xfdf.rs`, D-A9/D-A10). Two
+   parsers that must agree is a second place for a silent divergence to live.
+
+   The refusal is **user-facing wording, not a silent skip**: a `.fdf` input is refused with
+   the format named and XFDF named as what is supported. A file a user believes may be
+   imported and is quietly ignored is the "green pass wearing a label" failure this charter
+   bans, in its input form.
+
+   **This amends `docs/P3.3-forms-DESIGN.md` §2**, which had FDF "IN, but paired" with XFDF
+   as one work item on the argument that a half-format is not a format. That argument loses
+   to the surface-area one, and the amendment is recorded here rather than by editing the
+   design's reasoning out of sight.
+
+   **FDF may return as a designed row.** It is refused for this phase on cost, not excluded
+   for principle, so if a real need appears (a counterparty's system that emits only FDF) it
+   returns as its own planned capability with its own design — the same shape P3.3a took when
+   Fill & Sign was split out. Ledgered as an optional-later row in `docs/P3-PLAN.md` §2.
