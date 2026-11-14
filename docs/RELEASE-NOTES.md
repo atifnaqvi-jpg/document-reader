@@ -108,7 +108,7 @@ matching fails instead of passing.
 - **Dual-licensed MIT OR Apache-2.0.**
 - **Text-scan guards normalise line endings**, so they hold on Windows checkouts.
 
-### Status: hand-tested and tagged; the tag is two commits past the build
+### Status: hand-tested and tagged; the tag is three commits past the build
 
 The installer below was run by a human on **2026-11-13**. This section is the record of that
 build, not of a tree:
@@ -118,7 +118,7 @@ build, not of a tree:
 - **Built by** `release-windows.yml` dispatch `43164026953`, attempt 1, from `b2d0b3b`.
 - **Tag:** `v1.2.0` on the commit carrying this section. Naming that SHA in this file would
   change the commit it names, so it is given as a measured distance instead:
-  `git rev-list --count b2d0b3b..HEAD` returned 2 when this was written, and
+  `git rev-list --count b2d0b3b..HEAD` returned 3 when this was written, and
   `git describe --tags --exact-match` is the authority.
 
 **The tag is not the hand-tested commit, and the delta is stated rather than glossed.** The
@@ -132,13 +132,24 @@ checksum. So the tag follows the record instead of the build, exactly as `v1.1.0
 | `docs/RELEASE-NOTES.md` | this section | No — prose |
 | `docs/P2.7-TEXT-EDITING-PARITY-PLAN.md`, `docs/P2.7-STOCK-TAKE.md` | B7 and B9 to `Have`, with their provenance | No — prose |
 | `docs/P3-PLAN.md` | vector redaction logged as decided behaviour | No — prose |
-| `scripts/ralph/gate.sh` | pins raised for the two new guards | No — the floor only rises |
+| `scripts/ralph/gate.sh` | pins raised for the guards below | No — the floor only rises |
 | `src-tauri/tests/release_version.rs` | the B7/B9 provenance guard | No — a test file |
-| `src-tauri/tests/release_workflow.rs` | the guard holding the published body to this limitation | No — a test file |
-| `.github/workflows/release-windows.yml` | the published body's redaction paragraph | No installer change, but **it does change what the release page says** |
+| `src-tauri/tests/release_workflow.rs` | the guards holding the published body to the redaction limit, and the `--include-ignored` step to a bound | No — a test file |
+| `.github/workflows/release-windows.yml` | the published body's redaction paragraph; later, the bound on the `--include-ignored` step | No installer change, but **it does change what the release page says and whether the run can publish at all** |
 
 No file under `src-tauri/src/` or `src/` is touched, which is what makes the hand-test verdict
 apply to the shipped installer rather than to some earlier build.
+
+**The tag was moved once, and the reason is a workflow defect rather than a code change.** The
+first `v1.2.0` tag published **no release at all**: `GET /releases/tags/v1.2.0` returned 404 and
+all three triggered runs ended `cancelled`. The `Assert the PDFium tests actually ran` step runs
+the whole `--include-ignored` suite, carried no bound of its own, and sits *before*
+`Build installer` — so when the documented Windows hang hit it, the job's 45 min budget was
+spent inside that one step: run `43512136886` was cancelled at 40.7 min having built nothing, and
+the two `ci.yml` counterparts were cancelled at 30.1 min the same way. The step now carries
+`timeout-minutes: 20` and `continue-on-error: true`, with the tradeoff written where the bound is
+declared. The moved tag is what carries that fix, and this section is the record of it: prose, a
+test and the workflow only — still nothing under `src-tauri/src/` or `src/`.
 
 **The published asset is a fresh build, not the bytes a human ran.** A tag run executes the whole
 workflow — it does not upload the dispatch's artifact — so the `.exe` on the Releases page is

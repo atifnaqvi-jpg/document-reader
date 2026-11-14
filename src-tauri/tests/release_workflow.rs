@@ -751,6 +751,78 @@ fn the_release_build_is_bounded_so_a_hung_suite_cannot_hold_the_runner() {
     );
 }
 
+/// The `--include-ignored` assertion must carry its *own* bound, and must not hold the release.
+///
+/// The job-level `timeout-minutes: 45` is the backstop, and on 2026-11-14 it was not enough.
+/// The step has no bound of its own and runs *before* `Build installer`, so when it hung, the
+/// job's budget was spent inside it: run 43512136886 was cancelled at 40.7 min in this step
+/// having built nothing, published nothing (`GET /releases/tags/v1.2.0` returned 404), and left
+/// the tag pointing at a release that did not exist. The two `ci.yml` counterparts were
+/// cancelled at 30.1 min the same way. A job-level bound turns a hang into a *late* failure;
+/// only a step-level bound turns it into an early one with the installer still to come.
+///
+/// `continue-on-error` is asserted on the same step for the same reason in reverse: the hang is
+/// a documented, undiagnosed flake (`b2d0b3b`: 25 min, 62 min, plus the K20
+/// `STATUS_ACCESS_VIOLATION`), and a release must not be withheld by a flake the programme has
+/// chosen not to fix yet. It is asserted *with* the timeout so the pair cannot drift apart --
+/// `continue-on-error` on an unbounded step would sit in a hang until the runner cap.
+///
+/// Mutation-verified: deleting `timeout-minutes: 20`, deleting `continue-on-error: true`, and
+/// moving the step after `Build installer` each fail this test.
+#[test]
+fn the_pdfium_assertion_is_bounded_and_cannot_hold_the_release() {
+    let text = workflow();
+
+    // Slice to the step, not the job: the job carries `timeout-minutes: 45`, which a whole-job
+    // `contains` would happily accept as the step's bound. That is the "whole-body `contains`"
+    // mistake `the_release_body_names_the_product_it_ships` records, one level down.
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| {
+            line.trim_start()
+                .starts_with("- name: Assert the PDFium tests")
+        })
+        .expect(
+            "the release workflow must still contain the `Assert the PDFium tests actually ran` \
+             step; if it was renamed, rename this guard's needle rather than deleting the guard",
+        );
+    let step_indent = lines[start].len() - lines[start].trim_start().len();
+    // The step's own `- name:` line sits at *exactly* `step_indent`, so a `take_while` over the
+    // whole slice would reject line one and return an empty string that no needle can match --
+    // the same bug the redaction guard records. Take the header unconditionally, then extend.
+    let mut step: Vec<&str> = vec![lines[start]];
+    step.extend(lines[start + 1..].iter().take_while(|line| {
+        line.trim().is_empty() || (line.len() - line.trim_start().len()) > step_indent
+    }));
+    let step = step.join("\n");
+
+    assert!(
+        step.contains("timeout-minutes: 20"),
+        "the `--include-ignored` step must carry its own `timeout-minutes: 20`. Its job bound \
+         (45 min) is spent *inside* this step when it hangs, and the step runs before the \
+         installer is built, so a hang there publishes nothing at all. Step block was: {step:?}"
+    );
+    assert!(
+        step.contains("continue-on-error: true"),
+        "the `--include-ignored` step must be `continue-on-error: true`, so a hang is recorded \
+         as the known K20 flake instead of withholding the release. Step block was: {step:?}"
+    );
+
+    // The bound and the forgiveness are only worth having if the step still precedes the build:
+    // placed after it, a hang would cancel the job with the installer built but unpublished.
+    let build = lines
+        .iter()
+        .position(|line| line.trim() == "- name: Build installer")
+        .expect("the release workflow must still have a `Build installer` step");
+    assert!(
+        start < build,
+        "`Assert the PDFium tests actually ran` must run *before* `Build installer`, which is \
+         why an unbounded hang there produced no installer at all (run 43512136886). If the \
+         order changed, this guard's reasoning changed with it -- re-derive it, do not relax it"
+    );
+}
+
 /// The published body must disclose the redaction limit, because the notes are one link away.
 ///
 /// `docs/RELEASE-NOTES.md` states the vector limitation in its *Redact* section and the phase
