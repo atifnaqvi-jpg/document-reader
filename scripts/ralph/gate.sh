@@ -224,9 +224,14 @@ fi
 # and 1068/0 -> 1069/0, for
 # `the_pdfium_assertion_is_bounded_and_cannot_hold_the_release`. It reads release-windows.yml as
 # text, so it needs no PDFium and ignored stays 107 -- measured, not incremented.
-PIN_PLAIN_PASSED=962
+#
+# 2026-11-14 (after v1.2.0 published, CI hung twice at 30.1 min): +1 in both shapes,
+# 962/107 -> 963/107 and 1069/0 -> 1070/0, for
+# `the_pdfium_assertion_step_is_bounded_not_only_its_job`. Text-only, no PDFium, ignored stays
+# 107 -- measured, not incremented.
+PIN_PLAIN_PASSED=963
 PIN_PLAIN_IGNORED=107
-PIN_IGNORED_PASSED=1069
+PIN_IGNORED_PASSED=1070
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

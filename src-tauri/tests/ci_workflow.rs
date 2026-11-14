@@ -546,3 +546,72 @@ fn the_windows_job_is_bounded_so_a_hung_suite_fails_instead_of_going_quiet() {
          there to bound; if that step moved, move the timeout with it"
     );
 }
+
+/// The assertion step must carry its own bound, not only the job's.
+///
+/// The guard above is satisfied by the *job* bound — a whole-job `contains` cannot tell a
+/// step-level `timeout-minutes` from a job-level one. That gap was measured on 2026-11-14: runs
+/// 43550684995 and 43548978550 both entered this step, ran it past 19 minutes against a healthy
+/// 185 s, and were cancelled with the job at **30.1 min**. A job-level bound turns a hang into
+/// a *late* cancellation, and a cancelled job cannot be `rerun-failed-jobs`d — so the tree reads
+/// unverified for half an hour and then cannot be retried without a fresh push. The release
+/// workflow got exactly this step-level fix on 2026-11-13; CI did not, because the first three
+/// failures were seen there.
+///
+/// `continue-on-error` is deliberately *not* asserted here, unlike the release workflow: a
+/// release must not be withheld by a flake, but a branch gate must not pass quietly either. A
+/// timed-out suite here fails, and says so.
+///
+/// Mutation-verified: deleting the step's `timeout-minutes: 20` fails this test while leaving
+/// the job-level `timeout-minutes: 30` in place, which is the case the guard above accepts.
+#[test]
+fn the_pdfium_assertion_step_is_bounded_not_only_its_job() {
+    let text = ci_workflow();
+    let lines: Vec<&str> = text.lines().collect();
+
+    let start = lines
+        .iter()
+        .position(|line| {
+            line.trim_start()
+                .starts_with("- name: Assert the PDFium tests")
+        })
+        .expect(
+            "ci.yml must still contain the `Assert the PDFium tests actually ran` step; if it \
+             was renamed, rename this guard's needle rather than deleting the guard",
+        );
+    let step_indent = lines[start].len() - lines[start].trim_start().len();
+    // The header line sits at exactly `step_indent`, so a `take_while` over the whole slice
+    // would reject line one and yield an empty string no needle can match. Take it
+    // unconditionally, then extend -- the same bug the redaction guard records.
+    let mut step: Vec<&str> = vec![lines[start]];
+    step.extend(lines[start + 1..].iter().take_while(|line| {
+        line.trim().is_empty() || (line.len() - line.trim_start().len()) > step_indent
+    }));
+    let step = step.join("\n");
+
+    assert!(
+        step.contains("timeout-minutes: 20"),
+        "the `--include-ignored` step must carry its own `timeout-minutes: 20`; the job's 30 min \
+         is spent *inside* this step when it hangs, and a job-level cancellation blocks \
+         `rerun-failed-jobs`. Step block was: {step:?}"
+    );
+
+    // The bound must not have been bought with silence: a `continue-on-error` here would let a
+    // hung Windows suite report green, which is the "unseen skip" the charter bans.
+    //
+    // Comments are stripped first. The step's own comment *explains* that `continue-on-error` is
+    // not set here, and a raw `contains` read that sentence as the setting itself -- measured:
+    // the guard failed against the very comment describing why it should pass. A guard that
+    // cannot tell code from prose about code is the same defect as one satisfied by prose.
+    let settings: String = step
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !settings.contains("continue-on-error"),
+        "the CI assertion step must NOT set `continue-on-error` -- unlike the release workflow, \
+         where a hang must not withhold a tag, here a timed-out suite has to fail the branch \
+         gate rather than pass it. Step settings were: {settings:?}"
+    );
+}
