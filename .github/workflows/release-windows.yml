@@ -109,8 +109,12 @@ jobs:
       # crash), not a slow build. 20 min is ~40x the healthy step and still leaves the installer
       # ~25 min of the job's 45.
       #
-      # `continue-on-error: true` because the release must not be held hostage by a flake this
-      # programme has not diagnosed: a timeout is recorded in the log as the known K20 flake
+      # The hang behind these cancellations was diagnosed on 2026-11-14 -- `protect_save` built a
+      # second `Pdfium`, which blocks forever on pdfium-render's process-global init mutex -- and
+      # fixed in `c71a270`. This bound stays as the backstop for a deadlock anywhere else.
+      #
+      # `continue-on-error: true` because the release must not be held hostage by a flake: a
+      # timeout is recorded in the log as the known flake
       # and the installer still builds and publishes. The tradeoff is stated rather than hidden
       # -- this also downgrades a *genuine* failure of the assertion below (tests silently
       # ignored, or too few ran) to a warning, which is the silent-skip shape the step exists

@@ -95,8 +95,8 @@ fn source_pdf(dir: &Path) -> PathBuf {
 /// Opens `path` through the **app's** PDFium and returns the page count, or a refusal.
 ///
 /// This used to build its own `Pdfium::new(...)` here. That deadlocked the whole test binary
-/// roughly half the time, and it was the cause of the Windows `--include-ignored` hangs that
-/// were previously misdiagnosed as a teardown crash (`K20`).
+/// roughly half the time, and it is the mechanism behind the Windows `--include-ignored` hangs
+/// recorded as K20.
 ///
 /// The mechanism is in `pdfium-render 0.8.37`, not in this app: with the `thread_safe`
 /// feature, `FPDF_InitLibrary` takes a **process-global** `static PDFIUM_THREAD_MARSHALL`
@@ -471,10 +471,17 @@ fn the_app_opens_the_protected_file_it_wrote_once_it_has_the_password() {
 /// single instance every render funnels through. The defect was this file building a second one
 /// in `pdfium_open`, so the two together deadlocked whenever they ran concurrently.
 ///
-/// That is what the Windows `--include-ignored` hangs were, previously misdiagnosed as a
-/// teardown crash (K20). Measured on 2026-10-14: 22 of 40 runs of this binary at
-/// `--test-threads=6` hung before the fix, 0 of 160 after, and restoring the old helper hung
-/// 17 of 30.
+/// That is the mechanism behind the Windows `--include-ignored` **hangs** recorded as K20.
+///
+/// It does **not** explain K20's other symptom, the `STATUS_ACCESS_VIOLATION`, and this fix must
+/// not be read as closing that. The recorded crashes were in `textedit_gates`, which at the
+/// crashing commit (`8d12b49`) contained no `Pdfium::new` at all -- checked with `git grep`, not
+/// assumed -- so it cannot have built a second instance and is untouched by this change. The
+/// crash stays open and undiagnosed. The ruling that no Windows-only claim may rest on a single
+/// run still stands.
+///
+/// Measured on 2026-11-14: 22 of 40 runs of this binary at `--test-threads=6` hung before the
+/// fix, 0 of 160 after, and restoring the old helper hung 17 of 30.
 ///
 /// The rule is deliberately narrower than "no `Pdfium::new` anywhere". `tests/incremental_pdfium.rs`
 /// and `tests/redact_pdfium.rs` construct one per helper call and drop it, never touching the app

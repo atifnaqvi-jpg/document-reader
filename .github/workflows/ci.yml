@@ -499,8 +499,13 @@ jobs:
         # `continue-on-error` is deliberately NOT set here, unlike the release workflow. There a
         # hang must not hold a publishing tag hostage. Here the suite is the only thing between
         # the branch and a merge, so a timed-out suite must fail the gate honestly rather than
-        # pass quietly. None of this diagnoses K20 (the Windows PDFium teardown
-        # `STATUS_ACCESS_VIOLATION`), which is a different, still-open flake.
+        # pass quietly.
+        #
+        # The cause of these hangs was found on 2026-11-14 and is not a slow runner: `protect_save`
+        # built a second `Pdfium`, which blocks forever on pdfium-render's process-global init
+        # mutex. Fixed in `c71a270`; this bound stays as the backstop, because a deadlock anywhere
+        # else would still present identically. K20's `STATUS_ACCESS_VIOLATION` is a *different*
+        # symptom in a different file and remains open.
         timeout-minutes: 20
         env:
           PDFIUM_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/pdfium.dll
