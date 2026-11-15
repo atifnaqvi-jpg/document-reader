@@ -7,6 +7,90 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 1.3.0 — **not yet released**
+
+**This section is written before the bump, as the section above requires.** The six carriers move to
+1.3.0 in the commit that follows this one; there is no 1.3.0 tag and no 1.3.0 installer yet.
+
+**DocuPro 1.3.0 — fill in forms.** The file goes in blank and comes back filled. Text fields,
+checkboxes, radio groups, combo boxes and list boxes all take a value, and the value survives in
+the saved file rather than only on screen.
+
+Windows-only, as before, and offline as before.
+
+### Fill a form
+
+Open a form and type. Each field is validated against the document *before* anything is written: an
+unknown field name, a read-only field, or a value outside a checkbox's or a combo box's legal set
+refuses the whole fill and produces no file. A half-applied fill would leave you with a document
+changed in ways you did not ask for, which is worse than a refusal you can read.
+
+The saved copy is verified before you are told it worked. After writing, the file is reopened and
+every field read back; if a value did not stick, you are told which field and what it still says,
+and the original is untouched. This is not defensive habit — the PDF library underneath returns
+success from `set_checked` while changing nothing in at least one measured case, so "the write
+returned Ok" is not evidence the document changed.
+
+### Forms in protected documents
+
+Filling a document that carries a **certification signature** is now gated on what that signature
+permits. A document certified as "no changes allowed" refuses the fill with a message naming the
+level; certifications that permit form filling allow it. Reading a certified document always works —
+only filling is gated.
+
+### The checkbox tick
+
+A checkbox filled by this build shows its tick in a real viewer, not just in the file's dictionary.
+That distinction is the whole story of this feature:
+
+Most form files are exported with a flag telling the viewer to *regenerate* every field's appearance
+itself. Fill one of those and the tick appears whether or not the writer put anything in the
+appearance stream — which means a writer that only updates the field's value looks perfect in every
+test that reads values back, and looks perfect in that particular viewer, and is still wrong.
+
+So the tick is verified by rendering. A test fills a checkbox and compares the pixels inside the
+widget rectangle before and after: **0 dark pixels before, 212 after**. Two deliberately broken
+versions of the writer were built to confirm the test fails on them — one that never selects an
+appearance at all, and one that selects the wrong one, where the value reads back correctly and no
+tick is drawn. The second is the failure this test exists for.
+
+**What that test does not claim**, and what this note therefore does not either: it proves our
+writer selects the right appearance and that the renderer draws it. It does not prove Acrobat or
+Preview agree, and it does not cover the exported-flag case above, where a viewer ignores the
+file's appearance entirely and draws its own from the value.
+
+### Import and export form data
+
+Form values can be written to XFDF, the XML form-data format every viewer that writes FDF can also
+write, and imported back into another copy of the same form. A value that leaves one document and
+arrives in a fresh one is the only way to show that the writer and the interchange format agree
+about field names, so that is what the test does rather than asserting the parser in isolation.
+
+**FDF is refused by name.** It is the older binary container for the same data, and a second
+binary parser doubles the format surface for one import path. The refusal names XFDF as what is
+supported, and it is decided by the file's content rather than its extension — renaming a `.fdf` to
+`.xfdf` does not change the bytes and does not get it past the refusal.
+
+### What is not here
+
+Field *authoring* — creating fields, editing tab order or calculation order — is not in this
+release, and neither are XFA forms, barcode fields, form flattening, or send-for-signature. XFA and
+barcode fields are refused by name rather than attempted, because a partial write to an XFA form
+produces a file that opens, shows the old values, and looks like a save that silently failed.
+
+Fill & Sign (drawing a signature image onto a page) is its own phase after this one. It shares no
+machinery with form filling and would have doubled this release's testing surface.
+
+### Verifying it
+
+The gate runs 997 tests without the renderer and 1105 with it — the difference is the renderer-gated
+set, which includes the pixel test above.
+
+The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**;
+verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, which is the pair 1.2.0
+and 1.2.1 recorded and no change in this release touches it — the bump is a version string, not a
+toolchain move.
+
 ## 1.2.1 — development version, **not a release**
 
 **There is no 1.2.1 installer, no 1.2.1 tag, and this section describes no shipped build.** It
