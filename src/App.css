@@ -440,10 +440,14 @@ button:disabled {
   border-radius: 2px;
 }
 
+/* Opaque, deliberately (P3.3 D7). The widget's own appearance is drawn in the raster underneath,
+   so a translucent box lets that text show through as a faded ghost behind the one being typed —
+   both renderings of the same value visible at once, one slightly offset. An opaque box means the
+   overlay's string is the only one on screen. */
 .form-widget-text {
   padding: 0 2px;
   color: #111;
-  background: rgba(255, 255, 255, 0.85);
+  background: #fff;
 }
 
 .form-widget-text:focus {
