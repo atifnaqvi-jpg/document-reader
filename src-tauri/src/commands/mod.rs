@@ -832,6 +832,52 @@ pub fn fill_form_field(
     })
 }
 
+/// Fills any number of fields in **one** write, to one versioned copy (P3.3 D8).
+///
+/// The save discipline says the user decides when a file appears, so the UI collects edits in
+/// memory and reaches the writer once, on an explicit save. `fill_form_field` is one field per
+/// call by design — it is what a commit-on-blur surface used — and calling it N times would
+/// produce N versioned copies for one user action. This command is the batch the save path needs:
+/// one call, one file, one re-read.
+///
+/// An empty batch is refused by the engine before anything is written ( checks it
+/// first), so no unchanged copy can appear; the check is not duplicated here because a second
+/// guard no test can reach is a guard nobody maintains.
+///
+/// Same gate as the single-field command, and for the same reason: this writes form data, so it
+/// is `EditKind::FormFill` (permitted at `P=2`/`P=3`, refused at `P=1` per the 2026-11-14 ruling).
+#[tauri::command]
+pub fn save_form_fields(
+    db: State<'_, Db>,
+    document_id: String,
+    values: Vec<crate::editor::forms::FillValue>,
+) -> Result<FillResult, AppError> {
+    let original_path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &original_path,
+        crate::editor::signature::editpolicy::EditKind::FormFill,
+    )?;
+
+    let target = crate::editor::save::next_edited_path(Path::new(&original_path), |candidate| {
+        candidate.exists()
+    })?;
+    let outcome =
+        crate::editor::forms::fill_to(Path::new(&original_path), &target, &values, |candidate| {
+            candidate.exists()
+        })?;
+
+    // Re-read from the bytes on disk, exactly as the single-field command does: the caller shows
+    // the file's answer, never the strings it typed.
+    let written = std::fs::read(&outcome.path)
+        .map_err(|error| AppError::Other(format!("could not read {}: {error}", outcome.path)))?;
+    let fields = crate::editor::forms::open_bytes(written)?.fields().to_vec();
+
+    Ok(FillResult {
+        path: outcome.path,
+        fields,
+    })
+}
+
 /// Re-inserts a deleted annotation under its original id, for undo (P2-D7).
 ///
 /// Takes the whole row rather than rebuilding it from the current DB state: the row is

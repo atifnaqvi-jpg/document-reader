@@ -85,6 +85,7 @@ pub fn run() {
             commands::save_edits,
             commands::list_form_fields,
             commands::fill_form_field,
+            commands::save_form_fields,
             commands::overwrite_edits,
             commands::rotate_page,
             commands::delete_pages,

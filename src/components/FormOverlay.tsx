@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import type { FormField } from "../api/types";
 import type { PageMetrics } from "./AnnotationOverlay";
@@ -23,8 +23,19 @@ export interface FormOverlayProps {
   metrics: PageMetrics;
   /** Every field of the document; this component picks the widgets on `metrics.pageNumber`. */
   fields: FormField[];
-  /** Writes a field. Resolves `true` when the engine accepted the fill. */
-  onFill: (field: string, value: string) => Promise<boolean>;
+  /**
+   * Reports the values the user has changed but not yet saved (P3.3 D8).
+   *
+   * The overlay never writes. It reports what is pending so the surface can offer a Save, and the
+   * save is the only thing that produces a file — the P2 rule that the user decides when anything
+   * is written. An empty array means "nothing pending".
+   */
+  onPendingChange?: (values: { name: string; value: string }[]) => void;
+  /**
+   * Changes to this value mean "a save completed", so drafts are dropped and the values shown are
+   * the file's own (P3.3 D7/D8).
+   */
+  savedAt?: number;
 }
 
 /** One widget of one field, placed in rendered pixels. */
@@ -101,47 +112,47 @@ export function inertReason(field: FormField): string | null {
   return null;
 }
 
-export function FormOverlay({ metrics, fields, onFill }: FormOverlayProps) {
-  // The in-progress string per field. Text lives here until blur: a write per keystroke would
-  // produce a new file per character under the P2-D2 versioned-save discipline (design §10.3).
+export function FormOverlay({ metrics, fields, onPendingChange, savedAt = 0 }: FormOverlayProps) {
+  // Text the user has typed but not saved. Nothing here reaches the engine: the overlay collects
+  // edits in memory and the surface writes them once, on an explicit save (P3.3 D8, P2-D2).
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<Record<string, boolean>>({});
-  const [refused, setRefused] = useState<Record<string, string>>({});
-  // The last value each field was committed with, so a blur that re-fires after a commit does
-  // not write the same value again.
-  const committed = useRef<Record<string, string>>({});
+  // Buttons the user has toggled but not saved, keyed by field name. Local for the same reason.
+  const [toggled, setToggled] = useState<Record<string, boolean>>({});
 
-  const commit = useCallback(
-    async (field: FormField, value: string) => {
-      if (!isFillable(field)) return;
-      if (committed.current[field.name] === value) return;
-      setBusy((current) => ({ ...current, [field.name]: true }));
-      let accepted = false;
-      try {
-        accepted = await onFill(field.name, value);
-      } finally {
-        setBusy((current) => ({ ...current, [field.name]: false }));
-      }
-      if (accepted) {
-        committed.current[field.name] = value;
-        setRefused((current) => {
-          const next = { ...current };
-          delete next[field.name];
-          return next;
-        });
-        // Drop the draft only once the value is in the file: clearing it first would blank the
-        // box the user is looking at if the write then failed.
-        setDrafts((current) => {
-          const next = { ...current };
-          delete next[field.name];
-          return next;
-        });
-      } else {
-        setRefused((current) => ({ ...current, [field.name]: "This field could not be changed." }));
-      }
-    },
-    [onFill],
-  );
+  // A completed save clears the in-memory edits so the controls show the file's own values. The
+  // file is the truth; holding a stale draft over it would show a value the file may not contain.
+  const lastSaved = useRef(savedAt);
+  useEffect(() => {
+    if (savedAt === lastSaved.current) return;
+    lastSaved.current = savedAt;
+    setDrafts({});
+    setToggled({});
+  }, [savedAt]);
+
+  // Report pending edits upward whenever they change. The values are the *unsaved* ones only:
+  // a field the user returned to its stored value is not pending.
+  const pending = useMemo(() => {
+    const values: { name: string; value: string }[] = [];
+    for (const [name, value] of Object.entries(drafts)) {
+      const field = fields.find((candidate) => candidate.name === name);
+      if (field && value !== (field.value ?? "")) values.push({ name, value });
+    }
+    for (const [name, isSet] of Object.entries(toggled)) {
+      const field = fields.find((candidate) => candidate.name === name);
+      if (!field) continue;
+      const target = buttonFillValue(field);
+      if (target === null) continue;
+      const stored = buttonIsSet(field);
+      if (isSet !== stored) values.push({ name, value: isSet ? target : "Off" });
+    }
+    return values;
+  }, [drafts, toggled, fields]);
+
+  const onPendingChangeRef = useRef(onPendingChange);
+  onPendingChangeRef.current = onPendingChange;
+  useEffect(() => {
+    onPendingChangeRef.current?.(pending);
+  }, [pending]);
 
   const widgets = placeWidgets(fields, metrics);
 
@@ -180,7 +191,9 @@ export function FormOverlay({ metrics, fields, onFill }: FormOverlayProps) {
 
         if (field.fieldType === "Btn") {
           const target = buttonFillValue(field);
-          const checked = buttonIsSet(field);
+          // Local intent wins over the stored value while unsaved (P3.3 D8): a click changes what
+          // the user *wants*, and only a save changes the file.
+          const checked = toggled[field.name] ?? buttonIsSet(field);
           return (
             <button
               key={widget.key}
@@ -190,12 +203,10 @@ export function FormOverlay({ metrics, fields, onFill }: FormOverlayProps) {
               data-field={field.name}
               aria-label={field.name}
               aria-pressed={checked}
-              disabled={busy[field.name] === true || target === null}
+              disabled={target === null}
               onClick={() => {
-                // Toggling off needs the `Off` ruling (design §10.6), so a set button is inert
-                // rather than silently re-writing the same value.
-                if (target === null || checked) return;
-                void commit(field, target);
+                if (target === null) return;
+                setToggled((current) => ({ ...current, [field.name]: !checked }));
               }}
             />
           );
@@ -207,21 +218,17 @@ export function FormOverlay({ metrics, fields, onFill }: FormOverlayProps) {
             key={widget.key}
             type="text"
             className="form-widget form-widget-text"
-            style={box}
+            // Opaque on purpose (P3.3 D7). The raster underneath already draws this widget's own
+            // appearance, and a translucent control lets that text show through as a ghost behind
+            // the one the user is typing — two renderings of the same value, slightly offset. An
+            // opaque box means exactly one string is visible: this one.
+            style={{ ...box, background: "#fff" }}
             data-field={field.name}
             aria-label={field.name}
-            aria-invalid={refused[field.name] ? true : undefined}
             value={value}
-            disabled={busy[field.name] === true}
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
               setDrafts((current) => ({ ...current, [field.name]: event.target.value }))
             }
-            onBlur={(event) => void commit(field, event.target.value)}
-            onKeyDown={(event) => {
-              // Enter commits without leaving the field, so a form can be filled without
-              // clicking away between fields.
-              if (event.key === "Enter") void commit(field, event.currentTarget.value);
-            }}
           />
         );
       })}

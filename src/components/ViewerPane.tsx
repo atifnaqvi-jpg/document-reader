@@ -1,10 +1,10 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
-  fillFormField,
   getDocumentPageCount,
   getDocumentPageRender,
   listFormFields,
   pageImageSrc,
+  saveFormFields,
   toAppError,
 } from "../api/invoke";
 import type { AppError, FormField, LibraryEntry, RenderedPage } from "../api/types";
@@ -78,6 +78,17 @@ export const ViewerPane = forwardRef<ViewerHandle, {
    * page and the overlay mid-edit, which is a worse outcome than the refusal itself.
    */
   const [fillError, setFillError] = useState<AppError | null>(null);
+  /**
+   * Field values the user has changed but not saved (P3.3 D8).
+   *
+   * The overlay reports them and never writes, so this array is the whole of "there are unsaved
+   * form edits". It drives the Save control, and its emptiness is what makes Save meaningful: no
+   * pending values, nothing to write.
+   */
+  const [pendingFills, setPendingFills] = useState<{ name: string; value: string }[]>([]);
+  /** Bumped after each successful save so the overlay drops its drafts (P3.3 D7). */
+  const [formSavedAt, setFormSavedAt] = useState(0);
+  const [savingForm, setSavingForm] = useState(false);
   const {
     annotations,
     textEditMode,
@@ -108,6 +119,9 @@ export const ViewerPane = forwardRef<ViewerHandle, {
     // A refusal belongs to the document it was raised against, so it must not follow the user
     // to the next one.
     setFillError(null);
+    // Unsaved edits belong to the document too: carrying them onto another document would write
+    // one document's values into another's fields.
+    setPendingFills([]);
 
     if (!docId) return;
     let cancelled = false;
@@ -156,35 +170,36 @@ export const ViewerPane = forwardRef<ViewerHandle, {
   }, [docId]);
 
   /**
-   * Writes one field and adopts the file's own answer (P3.3 D6, design §10.3).
+   * Writes every pending field value in one file, when the user asks (P3.3 D8, P2-D2).
    *
-   * Resolves `true` when the engine accepted the fill, which is what lets the overlay keep the
-   * typed text instead of reverting it. The write goes to a **new** file (P2-D2), so this viewer's
-   * page image still shows the original — which is correct, because the original is unmodified.
-   * The overlay's values come from the copy, so the control the user just used shows what the
-   * file holds.
+   * Nothing else in this component writes. Typing and clicking are local state, because the P2
+   * rule is that the user decides when anything is written — a tick that produced a file was a
+   * write the user never requested. One call here means one versioned copy for one save, not one
+   * per field.
+   *
+   * The fields adopted are the ones re-read from the copy, so the controls show the file's answer
+   * rather than the strings typed. The page image still shows the original, which is correct: the
+   * original is unmodified.
    */
-  const handleFill = useCallback(
-    async (field: string, value: string): Promise<boolean> => {
-      if (!docId) return false;
-      try {
-        const result = await fillFormField(docId, field, value);
-        // The fields as re-read from the copy that was written. Adopting them rather than the
-        // typed string means the overlay shows what the file contains; the two can differ (a
-        // checkbox normalising a state spelling) and the file is the one that is true.
-        setFormFields(result.fields);
-        setFillError(null);
-        return true;
-      } catch (e) {
-        // A refusal is about the field or the document, not the viewer: the page stays mounted
-        // and the message joins it. `setError` here would replace the page with the notice and
-        // take the overlay — and the text the user is typing — with it.
-        setFillError(toAppError(e));
-        return false;
-      }
-    },
-    [docId],
-  );
+  const saveFormEdits = useCallback(async () => {
+    if (!docId || pendingFills.length === 0 || savingForm) return;
+    setSavingForm(true);
+    try {
+      const result = await saveFormFields(docId, pendingFills);
+      setFormFields(result.fields);
+      setPendingFills([]);
+      // Bumping this is what tells the overlay the save landed, so it drops its drafts and defers
+      // to the saved values (D7).
+      setFormSavedAt((current) => current + 1);
+      setFillError(null);
+    } catch (e) {
+      // A refusal is about the document, not the viewer: the page and the overlay stay mounted so
+      // the user's unsaved text is not destroyed by an error that is not about the text.
+      setFillError(toAppError(e));
+    } finally {
+      setSavingForm(false);
+    }
+  }, [docId, pendingFills, savingForm]);
 
   // A search hit asks the viewer to go to a specific page. Clamping happens here rather
   // than at the call site because `pageCount` is only authoritative after the count
@@ -357,6 +372,21 @@ export const ViewerPane = forwardRef<ViewerHandle, {
               ))}
             </select>
           </label>
+          {/* The only control that writes form data (P3.3 D8). Disabled with nothing pending,
+              because a save that writes an unchanged copy is a file the user did not ask for. */}
+          <button
+            type="button"
+            className="viewer-save-forms"
+            onClick={() => void saveFormEdits()}
+            disabled={pendingFills.length === 0 || savingForm}
+            title={
+              pendingFills.length === 0
+                ? "No unsaved form changes"
+                : `Save ${pendingFills.length} changed field${pendingFills.length === 1 ? "" : "s"} to a new copy`
+            }
+          >
+            {savingForm ? "Saving…" : "Save form edits"}
+          </button>
         </div>
         <dl className="metadata">
           <div>
@@ -432,7 +462,8 @@ export const ViewerPane = forwardRef<ViewerHandle, {
                   <FormOverlay
                     metrics={pageMetrics(rendered, page, zoom)}
                     fields={formFields}
-                    onFill={handleFill}
+                    onPendingChange={setPendingFills}
+                    savedAt={formSavedAt}
                   />
                 ) : null}
               </>

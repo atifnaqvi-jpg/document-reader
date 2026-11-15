@@ -203,69 +203,134 @@ describe("inertReason", () => {
   });
 });
 
-describe("the overlay reaches the engine", () => {
-  it("writes a text field on blur, and shows the value the file reported", async () => {
-    backend.on("fill_form_field", () => ({
+describe("the overlay collects edits without writing them", () => {
+  it("typing produces no write and no file, and the save produces exactly one", async () => {
+    // P3.3 D8: the user decides when a file appears. A tick or a keystroke used to write, which
+    // is a file the user never asked for. This test pins both halves: zero writes while editing,
+    // exactly one on the explicit save.
+    backend.on("save_form_fields", () => ({
       path: "/books/form-1.pdf",
-      fields: [textField({ value: "Ada Lovelace" })],
+      fields: [textField({ value: "Atif" })],
     }));
     await renderWithFields([textField()]);
 
     const input = screen.getByLabelText("fullname");
-    await userEvent.type(input, "Ada Lovelace");
-    // Still nothing has been written: typing alone must not produce a file per character
-    // (design §10.3, P2-D2).
-    expect(backend.callsTo("fill_form_field")).toHaveLength(0);
-
+    await userEvent.type(input, "Atif");
     await userEvent.tab();
 
-    await waitFor(() => expect(backend.callsTo("fill_form_field")).toHaveLength(1));
-    expect(backend.callsTo("fill_form_field")[0]).toEqual({
+    // No write of any kind while editing — not the single-field command, not the batch.
+    expect(backend.callsTo("fill_form_field")).toHaveLength(0);
+    expect(backend.callsTo("save_form_fields")).toHaveLength(0);
+
+    await userEvent.click(screen.getByRole("button", { name: /save form edits/i }));
+
+    await waitFor(() => expect(backend.callsTo("save_form_fields")).toHaveLength(1));
+    // One call, one file — the whole pending set in one write.
+    expect(backend.callsTo("save_form_fields")[0]).toEqual({
       documentId: "doc-1",
-      field: "fullname",
-      value: "Ada Lovelace",
+      values: [{ name: "fullname", value: "Atif" }],
     });
-    // The displayed value comes back from the file, not from the draft.
-    await waitFor(() => expect((screen.getByLabelText("fullname") as HTMLInputElement).value).toBe("Ada Lovelace"));
+    expect(backend.callsTo("fill_form_field")).toHaveLength(0);
   });
 
-  it("commits on Enter without leaving the field", async () => {
-    backend.on("fill_form_field", () => ({ path: "/books/form-1.pdf", fields: [textField({ value: "x" })] }));
-    await renderWithFields([textField()]);
-
-    await userEvent.type(screen.getByLabelText("fullname"), "x{Enter}");
-    await waitFor(() => expect(backend.callsTo("fill_form_field")).toHaveLength(1));
-  });
-
-  it("writes a checkbox using the document's own on-state", async () => {
-    backend.on("fill_form_field", () => ({
+  it("a checkbox toggle writes nothing, and the save writes once", async () => {
+    // D8 again, for the reported defect: ticking used to write immediately.
+    backend.on("save_form_fields", () => ({
       path: "/books/form-1.pdf",
       fields: [checkboxField({ value: "Yes" })],
     }));
     await renderWithFields([checkboxField()]);
 
     await userEvent.click(screen.getByRole("button", { name: "agree" }));
-    await waitFor(() => expect(backend.callsTo("fill_form_field")).toHaveLength(1));
-    // "Yes" here came from `states`, which came from the document's `/AP /N`. A hardcoded
-    // `/On` would fail against this fixture, which is why the fixture spells it "Yes".
-    expect(backend.callsTo("fill_form_field")[0].value).toBe("Yes");
+    expect(backend.callsTo("fill_form_field")).toHaveLength(0);
+    expect(backend.callsTo("save_form_fields")).toHaveLength(0);
+    // The tick is visible immediately, from local state alone.
+    expect(screen.getByRole("button", { name: "agree" }).getAttribute("aria-pressed")).toBe("true");
+
+    await userEvent.click(screen.getByRole("button", { name: /save form edits/i }));
+    await waitFor(() => expect(backend.callsTo("save_form_fields")).toHaveLength(1));
+    // "Yes" came from the document's own states, never a hardcoded `/On`.
+    expect(backend.callsTo("save_form_fields")[0].values).toEqual([{ name: "agree", value: "Yes" }]);
   });
 
-  it("surfaces a refusal by clearing nothing and marking the control invalid", async () => {
-    // A fillable field whose write the engine nevertheless refuses — the shape a certified
-    // document or a protected field produces. The text the user typed must not be presented as
-    // if it were saved.
-    backend.on("fill_form_field", () => {
-      throw { code: "FORM_FIELD_VALUE_NOT_ALLOWED", message: "that value is not allowed" };
+  it("save is disabled until something is actually changed", async () => {
+    backend.on("save_form_fields", () => ({ path: "/p.pdf", fields: [textField()] }));
+    await renderWithFields([textField()]);
+    expect((screen.getByRole("button", { name: /save form edits/i }) as HTMLButtonElement).disabled).toBe(true);
+
+    await userEvent.type(screen.getByLabelText("fullname"), "x");
+    expect((screen.getByRole("button", { name: /save form edits/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("typing a value back to the stored one leaves nothing pending", async () => {
+    backend.on("save_form_fields", () => ({ path: "/p.pdf", fields: [textField()] }));
+    await renderWithFields([textField({ value: "same" })]);
+    const input = screen.getByLabelText("fullname");
+
+    await userEvent.clear(input);
+    await userEvent.type(input, "same");
+    expect((screen.getByRole("button", { name: /save form edits/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("after a save the controls show the file's values, not the typed ones", async () => {
+    // P3.3 D7: once the save lands the overlay defers to the saved values. The engine may
+    // normalise what was typed, and the file is the one that is true.
+    backend.on("save_form_fields", () => ({
+      path: "/books/form-1.pdf",
+      fields: [textField({ value: "Normalised" })],
+    }));
+    await renderWithFields([textField()]);
+
+    await userEvent.type(screen.getByLabelText("fullname"), "typed");
+    await userEvent.click(screen.getByRole("button", { name: /save form edits/i }));
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("fullname") as HTMLInputElement).value).toBe("Normalised"),
+    );
+    // And nothing is pending again, so a second save cannot write an unchanged copy.
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: /save form edits/i }) as HTMLButtonElement).disabled).toBe(true),
+    );
+  });
+
+  it("surfaces a refusal beside the page and keeps the unsaved text", async () => {
+    // A refused save must not destroy what the user typed: the document is fine, the write was
+    // refused. `setError` would replace the page and take the overlay with it.
+    backend.on("save_form_fields", () => {
+      throw { code: "CERTIFIED_LEVEL_FORBIDS", message: "this document forbids the change" };
     });
     await renderWithFields([textField()]);
 
-    const input = screen.getByLabelText("fullname");
-    await userEvent.type(input, "nope");
-    await userEvent.tab();
+    await userEvent.type(screen.getByLabelText("fullname"), "keep me");
+    await userEvent.click(screen.getByRole("button", { name: /save form edits/i }));
 
-    await waitFor(() => expect(backend.callsTo("fill_form_field")).toHaveLength(1));
-    await waitFor(() => expect(input.getAttribute("aria-invalid")).toBe("true"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/forbids/i));
+    // The page and the typed text survive the refusal.
+    expect((screen.getByLabelText("fullname") as HTMLInputElement).value).toBe("keep me");
+    expect(screen.getByRole("group", { name: /form fields/i })).toBeTruthy();
+  });
+
+  it("exactly one rendering of a text value is visible", async () => {
+    // P3.3 D7: the raster underneath already draws the widget's appearance, so the overlay's box
+    // must be opaque. A translucent box shows both renderings — the typed text plus a faded ghost
+    // of the same value, offset. Asserted on the computed background because that is the mechanism.
+    await renderWithFields([textField()]);
+    const input = screen.getByLabelText("fullname");
+    await userEvent.type(input, "Atif");
+
+    const background = (input as HTMLElement).style.background;
+    expect(background).toBe("rgb(255, 255, 255)");
+    // Fully opaque: an alpha channel here would let the raster's own text show through.
+    expect(background).not.toMatch(/rgba/);
+  });
+
+  it("draws a checkbox as one control, not a control over a drawn tick", async () => {
+    // The same double-draw question for a button: the overlay's tick must be able to cover the
+    // widget's own appearance, so a checked control is a filled box rather than a translucent one.
+    await renderWithFields([checkboxField({ value: "Yes" })]);
+    const button = screen.getByRole("button", { name: "agree" });
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    expect(button.className).toContain("form-widget-checked");
   });
 
   it("draws a read-only field inert, with no input to type into", async () => {

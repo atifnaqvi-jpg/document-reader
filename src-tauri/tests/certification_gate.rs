@@ -117,6 +117,10 @@ const GOVERNED: &[(&str, &str)] = &[
     // this and is the kind ISO 32000-1 §12.8.2.2 permits at `P=1` only for a fill, so naming
     // `Content` instead would refuse a fill the certification allows.
     ("fill_form_field", "FormFill"),
+    // The batch the save path uses. Same edit, same kind: it writes form data to a new copy, so it
+    // must be governed exactly as the single-field command is. Listing it here is what makes the
+    // inverse guard (`no_command_calls_the_gate_without_being_listed`) able to see it at all.
+    ("save_form_fields", "FormFill"),
     // Content surgery. Refused at every level, `P=3` included.
     ("rotate_page", "Content"),
     ("delete_pages", "Content"),

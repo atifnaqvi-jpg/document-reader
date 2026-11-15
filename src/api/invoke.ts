@@ -283,6 +283,18 @@ export const fillFormField = (documentId: string, field: string, value: string) 
   invoke<FillResult>("fill_form_field", { documentId, field, value });
 
 /**
+ * Writes every pending field value in **one** file (P3.3 D8).
+ *
+ * The interactive surface collects edits in memory and calls this only when the user asks to
+ * save, because a file appearing without a request breaks the save discipline. One call, one
+ * versioned copy — calling `fillFormField` per field would produce one copy per field.
+ *
+ * An empty list is refused by the backend rather than writing an unchanged copy.
+ */
+export const saveFormFields = (documentId: string, values: { name: string; value: string }[]) =>
+  invoke<FillResult>("save_form_fields", { documentId, values });
+
+/**
  * Overwrites the original file in place with the document's annotations (P2-D2).
  *
  * A separate binding from `saveEdits` on purpose: the backend exposes it as a differently
