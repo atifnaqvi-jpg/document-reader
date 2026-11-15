@@ -1,12 +1,15 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
+  fillFormField,
   getDocumentPageCount,
   getDocumentPageRender,
+  listFormFields,
   pageImageSrc,
   toAppError,
 } from "../api/invoke";
-import type { AppError, LibraryEntry, RenderedPage } from "../api/types";
+import type { AppError, FormField, LibraryEntry, RenderedPage } from "../api/types";
 import { AnnotationOverlay } from "./AnnotationOverlay";
+import { FormOverlay } from "./FormOverlay";
 import { RedactionOverlay } from "./RedactionOverlay";
 import type { PageMetrics } from "./AnnotationOverlay";
 import { TextRunOverlay, EncryptedBanner } from "./TextEdit";
@@ -57,6 +60,24 @@ export const ViewerPane = forwardRef<ViewerHandle, {
   const [rendered, setRendered] = useState<RenderedPage | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [rendering, setRendering] = useState(false);
+  /**
+   * The document's form fields, loaded once per document (P3.3 D6).
+   *
+   * Read separately from the page render because a field's page is a property of the document,
+   * not of the page being shown: fetching it per page would re-walk `/AcroForm` on every turn
+   * and could still disagree between pages. An empty array means "no form", which is a normal
+   * state for most PDFs and must not surface an error.
+   */
+  const [formFields, setFormFields] = useState<FormField[]>([]);
+  /**
+   * The most recent fill refusal, reported **beside** the page (P3.3 D6).
+   *
+   * Kept apart from `error` on purpose. `error` means "this page could not be shown", and it
+   * replaces the page with a notice — correct for a render failure, wrong for a refused fill: the
+   * document is fine, the user's text simply was not written. Reusing `error` here unmounted the
+   * page and the overlay mid-edit, which is a worse outcome than the refusal itself.
+   */
+  const [fillError, setFillError] = useState<AppError | null>(null);
   const {
     annotations,
     textEditMode,
@@ -84,6 +105,9 @@ export const ViewerPane = forwardRef<ViewerHandle, {
     setRendered(null);
     setError(null);
     setPageCount(entry?.pages ?? null);
+    // A refusal belongs to the document it was raised against, so it must not follow the user
+    // to the next one.
+    setFillError(null);
 
     if (!docId) return;
     let cancelled = false;
@@ -106,6 +130,61 @@ export const ViewerPane = forwardRef<ViewerHandle, {
   // to the hit page after they had already navigated away.
   const pageCountRef = useRef<number | null>(null);
   pageCountRef.current = pageCount;
+
+  // The form's fields are a property of the document, so they load once per document rather
+  // than per page (P3.3 D6). A failure here is not fatal to viewing: the page still renders
+  // and only the interactive layer is missing, so the error is logged rather than raised over
+  // the page — a form reader that refuses to show the page because the form could not be read
+  // would be worse than one that shows it inert.
+  useEffect(() => {
+    setFormFields([]);
+    if (!docId) return;
+    let cancelled = false;
+    listFormFields(docId)
+      .then((fields) => {
+        if (!cancelled) setFormFields(fields);
+      })
+      .catch((e) => {
+        // A file the forms engine cannot parse is a flat-looking document, not an error state:
+        // `open_bytes` refuses XFA and malformed forms by name, and the viewer's job here is
+        // still to show the pages. The refusal is reported where a *fill* is requested.
+        console.warn("could not read the document's form fields", toAppError(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [docId]);
+
+  /**
+   * Writes one field and adopts the file's own answer (P3.3 D6, design §10.3).
+   *
+   * Resolves `true` when the engine accepted the fill, which is what lets the overlay keep the
+   * typed text instead of reverting it. The write goes to a **new** file (P2-D2), so this viewer's
+   * page image still shows the original — which is correct, because the original is unmodified.
+   * The overlay's values come from the copy, so the control the user just used shows what the
+   * file holds.
+   */
+  const handleFill = useCallback(
+    async (field: string, value: string): Promise<boolean> => {
+      if (!docId) return false;
+      try {
+        const result = await fillFormField(docId, field, value);
+        // The fields as re-read from the copy that was written. Adopting them rather than the
+        // typed string means the overlay shows what the file contains; the two can differ (a
+        // checkbox normalising a state spelling) and the file is the one that is true.
+        setFormFields(result.fields);
+        setFillError(null);
+        return true;
+      } catch (e) {
+        // A refusal is about the field or the document, not the viewer: the page stays mounted
+        // and the message joins it. `setError` here would replace the page with the notice and
+        // take the overlay — and the text the user is typing — with it.
+        setFillError(toAppError(e));
+        return false;
+      }
+    },
+    [docId],
+  );
 
   // A search hit asks the viewer to go to a specific page. Clamping happens here rather
   // than at the call site because `pageCount` is only authoritative after the count
@@ -337,16 +416,37 @@ export const ViewerPane = forwardRef<ViewerHandle, {
               />
             ) : textEditMode ? (
               <TextRunOverlay metrics={pageMetrics(rendered, page, zoom)} runs={pageRuns} />
-            ) : annotationsVisible ? (
-              <AnnotationOverlay
-                metrics={pageMetrics(rendered, page, zoom)}
-                annotations={annotations}
-              />
-            ) : null}
+            ) : (
+              <>
+                {annotationsVisible ? (
+                  <AnnotationOverlay
+                    metrics={pageMetrics(rendered, page, zoom)}
+                    annotations={annotations}
+                  />
+                ) : null}
+                {/* Forms sit above annotations and below redaction and text edit (§10-F1). A
+                    widget is a control the user types into, so it must win a click over a
+                    highlight drawn in the same place; a redaction mark must win over both,
+                    because it is the only one whose next action cannot be undone. */}
+                {formFields.length > 0 ? (
+                  <FormOverlay
+                    metrics={pageMetrics(rendered, page, zoom)}
+                    fields={formFields}
+                    onFill={handleFill}
+                  />
+                ) : null}
+              </>
+            )}
           </div>
         ) : null}
 
         {rendering ? <p className="muted">Rendering page…</p> : null}
+
+        {fillError ? (
+          <p className="form-error" role="alert">
+            {fillError.message}
+          </p>
+        ) : null}
       </div>
     </div>
   );

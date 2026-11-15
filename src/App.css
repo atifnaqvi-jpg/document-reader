@@ -413,6 +413,63 @@ button:disabled {
   pointer-events: none;
 }
 
+/* P3.3 D6. Same trick as .annotation-overlay: the container passes clicks through, and only
+   the widgets themselves take them. Without this, an empty area of the overlay would block
+   text selection and annotation clicks on every page that happens to carry a form. */
+.form-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* The page-stage sets `line-height: 0` to shrink-wrap the raster; form controls inherit it
+     and would collapse to a zero-height line box exactly as the note textarea did (see the
+     comment above .annotation-note-prompt textarea). Naming it here keeps every widget legible
+     without repeating it per control. */
+  line-height: normal;
+}
+
+.form-widget {
+  pointer-events: auto;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font: inherit;
+  /* A translucent highlight rather than a filled box: the widget's own appearance is already
+     drawn in the raster underneath, and covering it would hide what the document says. */
+  background: rgba(31, 111, 235, 0.12);
+  border: 1px solid rgba(31, 111, 235, 0.55);
+  border-radius: 2px;
+}
+
+.form-widget-text {
+  padding: 0 2px;
+  color: #111;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.form-widget-text:focus {
+  outline: 2px solid var(--accent, #1f6feb);
+  outline-offset: 1px;
+}
+
+.form-widget-button {
+  cursor: pointer;
+}
+
+.form-widget-checked {
+  background: rgba(31, 111, 235, 0.45);
+  border-color: var(--accent, #1f6feb);
+}
+
+/* Drawn but inert: a read-only field, or a type this build does not fill (§10.4, §10.6).
+   The dashed border is the difference the user needs — it says "this is a field" and "this is
+   not something you can change here" at the same time. */
+.form-widget-inert {
+  background: none;
+  border: 1px dashed rgba(120, 120, 120, 0.7);
+  pointer-events: none;
+  cursor: default;
+}
+
 .annotation-overlay.drawing {
   pointer-events: auto;
   cursor: crosshair;
@@ -1254,4 +1311,11 @@ button:disabled {
   margin: 0;
   font-size: 0.8em;
   color: var(--danger);
+}
+
+/* A refused fill joins the page rather than replacing it (P3.3 D6): the document is still
+   valid, so the notice sits beside the sheet instead of over it. */
+.form-error {
+  margin: 8px 0 0;
+  color: #b3261e;
 }
