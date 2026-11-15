@@ -29,6 +29,14 @@ required-features = ["testfixtures"]
 name = "make_p277_fixtures"
 required-features = ["testfixtures"]
 
+# P3.3 §7 W1: regenerates the `form-*.pdf` matrix. Its own binary for the same reason:
+# a phase's fixtures should be regenerable without rewriting another phase's artefact, and
+# the builders are shared through `src/editor/testpdf.rs` so the committed files and the
+# in-memory tests cannot drift.
+[[example]]
+name = "make_p33_fixtures"
+required-features = ["testfixtures"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -7,6 +7,7 @@ pub mod cid;
 pub mod embed;
 pub mod events;
 pub mod export;
+pub mod forms;
 pub mod gc;
 pub mod geometry;
 pub mod lopdf_write;

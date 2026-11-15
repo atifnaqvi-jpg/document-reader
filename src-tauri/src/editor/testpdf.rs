@@ -11,7 +11,7 @@
 //! those gates even where the committed-fixture path is limited.
 
 use lopdf::content::{Content, Operation};
-use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
+use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 
 /// A `Dictionary` from string pairs, for tests that need a font dictionary without a
 /// document around it.
@@ -3284,6 +3284,503 @@ pub fn type0_page_with_subset(
     document.trailer.set("Root", catalog_id);
     document.renumber_objects();
     document
+}
+
+// --- P3.3 W1: the form fixture matrix (§7) -----------------------------------
+//
+// Every builder below produces a one-page document carrying a real `/AcroForm`, built with
+// lopdf's public API only, for the same reason the rest of this module is: a fixture the
+// product's own writer cannot express is a signal about the writer, not about the test.
+//
+// The matrix is deliberately *synthetic* where the state spelling is the point. The design
+// (§7 W1) splits the two roles: a real producer's file is committed to prove which spellings
+// exist in the wild (`libreoffice-checkbox-form.pdf`, `/Yes` value with `/yes` appearance),
+// and these builders supply the spellings no producer in this repo emits — `/On` above all.
+// A builder is the right tool there precisely because it lets us write a spelling nobody
+// chose, which is what makes a writer that hardcodes one state name falsifiable.
+
+/// The `/AcroForm` structure a builder hands back to [`form_document`].
+///
+/// Object ids rather than `Dictionary` values because a radio group's parent field must reference
+/// its kid widgets, and a reference is only available once the kid exists. Letting the builder add
+/// its own objects is what makes the per-option naming expressible without a second pass.
+pub struct FormSpec {
+    /// Widget annotation ids. Each becomes a page `/Annots` entry and an `/AcroForm` `/Fields` one.
+    pub widgets: Vec<ObjectId>,
+    /// `/Fields` entries that are not widgets -- a radio group's parent field.
+    pub parent_fields: Vec<ObjectId>,
+    /// Merged into the catalog's `/AcroForm` after the shared keys are set.
+    pub form_extra: Dictionary,
+}
+
+/// An appearance stream sized to a widget box (ISO 32000-1 12.5.5).
+///
+/// `/Resources` is written empty rather than omitted: an `/AP` stream is a form XObject, and a form
+/// XObject's `/Resources` is required. An omitted one makes PDFium fall back to the page's
+/// resources, which is legal but hides a fixture defect behind the renderer's leniency.
+fn widget_appearance(content: &str, width: f32, height: f32) -> Stream {
+    Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Real(width),
+                Object::Real(height),
+            ],
+            "Resources" => dictionary! {},
+        },
+        content.as_bytes().to_vec(),
+    )
+}
+
+/// The "off" and "on" appearances of a 14x14 checkbox.
+///
+/// The two must differ in **ink**, not only in a dictionary key: the §7 W4 gate compares rendered
+/// pixels of the widget rectangle, so a fixture whose on-state drew the same box as its off-state
+/// would let that gate pass on any writer at all. The off state draws the frame; the on state draws
+/// the frame and a tick.
+fn checkbox_appearances(document: &mut Document) -> (ObjectId, ObjectId) {
+    let off = widget_appearance("0.6 w 1 1 12 12 re S", 14.0, 14.0);
+    let on = widget_appearance(
+        "0.6 w 1 1 12 12 re S 3 6.5 m 5.5 4 l 10.5 10.5 l S",
+        14.0,
+        14.0,
+    );
+    (document.add_object(off), document.add_object(on))
+}
+
+/// A widget rectangle as a PDF array.
+fn rect_array(rect: [i64; 4]) -> Object {
+    Object::Array(
+        rect.iter()
+            .map(|coordinate| Object::Integer(*coordinate))
+            .collect(),
+    )
+}
+
+/// A checkbox widget whose `/AP /N` names its on-state `on_state`.
+///
+/// `on_state` is a parameter rather than a constant because it *is* the subject of the fixture:
+/// `/Yes`, `/On` and `/yes` are three spellings real writers emit, and D-F3 says the writer takes
+/// the name from this dictionary instead of from its own constant.
+fn checkbox_widget(
+    document: &mut Document,
+    name: &str,
+    on_state: &str,
+    checked: bool,
+    rect: [i64; 4],
+    page_id: ObjectId,
+) -> ObjectId {
+    let (off_id, on_id) = checkbox_appearances(document);
+    let state = if checked { on_state } else { "Off" };
+
+    document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Btn",
+        "T" => Object::string_literal(name),
+        "Rect" => rect_array(rect),
+        "F" => Object::Integer(4),
+        "P" => Object::Reference(page_id),
+        "V" => Object::Name(state.as_bytes().to_vec()),
+        "AS" => Object::Name(state.as_bytes().to_vec()),
+        "AP" => dictionary! {
+            "N" => dictionary! {
+                on_state => Object::Reference(on_id),
+                "Off" => Object::Reference(off_id),
+            },
+        },
+    })
+}
+
+/// One 14x14 checkbox at `(x, y)`, its on-state spelled `on_state`.
+fn checkbox_at(
+    document: &mut Document,
+    name: &str,
+    on_state: &str,
+    checked: bool,
+    x: i64,
+    y: i64,
+    page_id: ObjectId,
+) -> ObjectId {
+    checkbox_widget(
+        document,
+        name,
+        on_state,
+        checked,
+        [x, y, x + 14, y + 14],
+        page_id,
+    )
+}
+
+/// A text widget. `multiline` sets `/Ff` bit 13; `read_only` sets bit 1.
+fn text_widget(
+    document: &mut Document,
+    name: &str,
+    value: &str,
+    multiline: bool,
+    read_only: bool,
+    rect: [i64; 4],
+    page_id: ObjectId,
+) -> ObjectId {
+    let width = (rect[2] - rect[0]) as f32;
+    let height = (rect[3] - rect[1]) as f32;
+    let appearance_id = document.add_object(widget_appearance("1 w 1 1 re S", width, height));
+
+    let mut flags = 0i64;
+    if read_only {
+        flags |= 1;
+    }
+    if multiline {
+        flags |= 4096;
+    }
+
+    let mut widget = dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Tx",
+        "T" => Object::string_literal(name),
+        "Rect" => rect_array(rect),
+        "F" => Object::Integer(4),
+        "P" => Object::Reference(page_id),
+        "DA" => Object::string_literal("/F1 10 Tf 0 g"),
+        "AP" => dictionary! { "N" => Object::Reference(appearance_id) },
+    };
+    if flags != 0 {
+        widget.set("Ff", Object::Integer(flags));
+    }
+    if !value.is_empty() {
+        widget.set("V", Object::string_literal(value));
+    }
+    document.add_object(widget)
+}
+
+/// A choice widget. `combo` sets `/Ff` bit 18 (drop-down); `multi_select` sets bit 22.
+///
+/// `selected` is a zero-based index into `/Opt`, written as `/I` plus the matching `/V`. A value
+/// rather than a flag because `/I` and `/V` have to agree: a fixture carrying one without the other
+/// would let a writer that updated only one of them pass.
+fn choice_widget(
+    document: &mut Document,
+    name: &str,
+    combo: bool,
+    multi_select: bool,
+    options: &[&str],
+    selected: Option<i64>,
+    rect: [i64; 4],
+    page_id: ObjectId,
+) -> ObjectId {
+    let width = (rect[2] - rect[0]) as f32;
+    let height = (rect[3] - rect[1]) as f32;
+    let appearance_id = document.add_object(widget_appearance("1 w 1 1 re S", width, height));
+
+    let mut flags = 0i64;
+    if combo {
+        flags |= 131_072;
+    }
+    if multi_select {
+        flags |= 2_097_152;
+    }
+
+    let mut widget = dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Ch",
+        "T" => Object::string_literal(name),
+        "Ff" => Object::Integer(flags),
+        "Rect" => rect_array(rect),
+        "F" => Object::Integer(4),
+        "P" => Object::Reference(page_id),
+        "DA" => Object::string_literal("/F1 10 Tf 0 g"),
+        "Opt" => Object::Array(
+            options
+                .iter()
+                .map(|option| Object::string_literal(*option))
+                .collect(),
+        ),
+        "AP" => dictionary! { "N" => Object::Reference(appearance_id) },
+    };
+    if let Some(index) = selected {
+        if let Some(option) = options.get(index as usize) {
+            widget.set("I", Object::Array(vec![Object::Integer(index)]));
+            widget.set("V", Object::string_literal(*option));
+        }
+    }
+    document.add_object(widget)
+}
+
+/// Builds a one-page form document. `build` adds its own objects and returns the ids to wire up.
+fn form_document(build: impl FnOnce(&mut Document, ObjectId) -> FormSpec) -> Document {
+    let mut document = Document::with_version("1.7");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(winansi_helvetica());
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let content_id = document.add_object(page_body(vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12.into()]),
+        Operation::new("Td", vec![72.into(), 752.into()]),
+        Operation::new("Tj", vec![Object::string_literal("P3.3 form fixture")]),
+        Operation::new("ET", vec![]),
+    ]));
+
+    let page_id = document.new_object_id();
+    let spec = build(&mut document, page_id);
+
+    let mut annots: Vec<Object> = Vec::new();
+    let mut fields: Vec<Object> = Vec::new();
+    for id in &spec.widgets {
+        annots.push(Object::Reference(*id));
+        fields.push(Object::Reference(*id));
+    }
+    for id in &spec.parent_fields {
+        fields.push(Object::Reference(*id));
+    }
+
+    document.objects.insert(
+        page_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ],
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "Annots" => Object::Array(annots),
+        }),
+    );
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => Object::Integer(1),
+        }),
+    );
+
+    let mut form = dictionary! {
+        "Fields" => Object::Array(fields),
+        "DA" => Object::string_literal("/F1 0 Tf 0 g"),
+        "DR" => dictionary! { "Font" => dictionary! { "F1" => Object::Reference(font_id) } },
+    };
+    for (key, value) in spec.form_extra.iter() {
+        form.set(key.clone(), value.clone());
+    }
+
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "AcroForm" => form,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// Single-line and multi-line text fields: the one type PDFium already fills correctly (§1.1).
+pub fn form_text_fields() -> Document {
+    form_document(|document, page_id| FormSpec {
+        widgets: vec![
+            text_widget(
+                document,
+                "given",
+                "",
+                false,
+                false,
+                [72, 700, 300, 724],
+                page_id,
+            ),
+            text_widget(
+                document,
+                "notes",
+                "",
+                true,
+                false,
+                [72, 600, 460, 684],
+                page_id,
+            ),
+        ],
+        parent_fields: Vec::new(),
+        form_extra: Dictionary::new(),
+    })
+}
+
+/// A checkbox whose on-state is `/Yes`: the spelling reportlab emits, and the control case.
+pub fn form_checkbox_yes() -> Document {
+    form_document(|document, page_id| FormSpec {
+        widgets: vec![checkbox_at(
+            document, "agree", "Yes", false, 72, 700, page_id,
+        )],
+        parent_fields: Vec::new(),
+        form_extra: Dictionary::new(),
+    })
+}
+
+/// A checkbox whose on-state is `/On`.
+///
+/// No producer in this repo emits `/On`; it exists because a writer that hardcodes `/Yes` passes
+/// every `/Yes` fixture and fails this one. This is W4's primary pixel case, since it carries no
+/// `/NeedAppearances` for a viewer to shortcut through (§7 W1).
+pub fn form_checkbox_on() -> Document {
+    form_document(|document, page_id| FormSpec {
+        widgets: vec![checkbox_at(
+            document, "agree", "On", false, 72, 700, page_id,
+        )],
+        parent_fields: Vec::new(),
+        form_extra: Dictionary::new(),
+    })
+}
+
+/// A checkbox whose on-state is lower-case `/yes`.
+///
+/// Measured from LibreOffice (§6.4). The real file's *appearance* key is `/yes` while its `/V` is
+/// `/Yes`, which is a disagreement no case-folding can resolve; this fixture isolates the
+/// lower-case appearance key alone, so a failure here is about the key spelling and not about the
+/// LibreOffice file's two-field disagreement.
+pub fn form_checkbox_lowercase_yes() -> Document {
+    form_document(|document, page_id| FormSpec {
+        widgets: vec![checkbox_at(
+            document, "agree", "yes", false, 72, 700, page_id,
+        )],
+        parent_fields: Vec::new(),
+        form_extra: Dictionary::new(),
+    })
+}
+
+/// A radio group: one parent `/FT /Btn` field with `/Ff` bit 16, and two kid widgets whose
+/// `/AP /N` name their own option (`/red`, `/blue`) plus `/Off`.
+///
+/// The per-option naming is the point. A radio's legal values are the union of its kids' appearance
+/// keys, so a writer that looked only at the parent would find no state to write. `/Ff 32768` must
+/// sit on the parent: on a kid it is ignored, and the group then reads as two checkboxes.
+pub fn form_radio_group() -> Document {
+    form_document(|document, page_id| {
+        let mut kids = Vec::new();
+        for (index, option) in ["red", "blue"].iter().enumerate() {
+            let (off_id, on_id) = checkbox_appearances(document);
+            let x = 72 + index as i64 * 40;
+            let kid = document.add_object(dictionary! {
+                "Type" => "Annot",
+                "Subtype" => "Widget",
+                "Rect" => rect_array([x, 700, x + 14, 714]),
+                "F" => Object::Integer(4),
+                "P" => Object::Reference(page_id),
+                "AS" => Object::Name(b"Off".to_vec()),
+                "AP" => dictionary! {
+                    "N" => dictionary! {
+                        *option => Object::Reference(on_id),
+                        "Off" => Object::Reference(off_id),
+                    },
+                },
+            });
+            kids.push(kid);
+        }
+
+        let kid_refs: Vec<Object> = kids.iter().map(|id| Object::Reference(*id)).collect();
+        let parent = document.add_object(dictionary! {
+            "FT" => "Btn",
+            "T" => Object::string_literal("color"),
+            "Ff" => Object::Integer(32768),
+            "V" => Object::Name(b"Off".to_vec()),
+            "Kids" => Object::Array(kid_refs),
+        });
+        for kid in &kids {
+            if let Ok(dictionary) = document.get_dictionary_mut(*kid) {
+                dictionary.set("Parent", Object::Reference(parent));
+            }
+        }
+
+        FormSpec {
+            widgets: kids,
+            parent_fields: vec![parent],
+            form_extra: Dictionary::new(),
+        }
+    })
+}
+
+/// Combo and list fields: `/Ch`.
+///
+/// The combo starts empty and the list starts on its second option, so a fill has a state to change
+/// in both. The list carries `/I` from the fixture, which is the key a multi-select write has to
+/// keep in step with `/V`.
+pub fn form_choice_fields() -> Document {
+    form_document(|document, page_id| {
+        let options = ["alpha", "bravo", "charlie"];
+        FormSpec {
+            widgets: vec![
+                choice_widget(
+                    document,
+                    "pick",
+                    true,
+                    false,
+                    &options,
+                    None,
+                    [72, 700, 260, 722],
+                    page_id,
+                ),
+                choice_widget(
+                    document,
+                    "many",
+                    false,
+                    true,
+                    &options,
+                    Some(1),
+                    [72, 600, 260, 680],
+                    page_id,
+                ),
+            ],
+            parent_fields: Vec::new(),
+            form_extra: Dictionary::new(),
+        }
+    })
+}
+
+/// A read-only text field: `/Ff` bit 1. W6's I-F4 refusal has nothing to refuse without it.
+pub fn form_read_only_field() -> Document {
+    form_document(|document, page_id| FormSpec {
+        widgets: vec![text_widget(
+            document,
+            "locked",
+            "cannot change",
+            false,
+            true,
+            [72, 700, 300, 724],
+            page_id,
+        )],
+        parent_fields: Vec::new(),
+        form_extra: Dictionary::new(),
+    })
+}
+
+/// A document carrying `/XFA`: the dynamic-form case this build refuses by name (§2, D-F6).
+pub fn form_with_xfa() -> Document {
+    form_document(|document, page_id| {
+        let packet =
+            br#"<?xml version="1.0"?><xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/"/>"#.to_vec();
+        let xfa_id = document.add_object(Stream::new(dictionary! {}, packet));
+        let mut extra = Dictionary::new();
+        extra.set("XFA", Object::Reference(xfa_id));
+        FormSpec {
+            widgets: vec![text_widget(
+                document,
+                "given",
+                "",
+                false,
+                false,
+                [72, 700, 300, 724],
+                page_id,
+            )],
+            parent_fields: Vec::new(),
+            form_extra: extra,
+        }
+    })
 }
 
 #[cfg(test)]

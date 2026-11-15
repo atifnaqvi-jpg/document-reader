@@ -234,9 +234,24 @@ fi
 # 1070/0 -> 1071/0, for `no_test_holds_the_apps_pdfium_and_builds_another`. It reads the test
 # sources as text, so it needs no PDFium and ignored stays 107 -- measured, not incremented.
 # This one is a fix, not a feature: the count moved because the defect it guards was real.
-PIN_PLAIN_PASSED=964
+# 2026-11-15 (P3.3 W1/W2: the form fixture matrix and the fill reader/writer): +21 in
+# both shapes, 964/107 -> 985/107 and 1071/0 -> 1092/0. All twenty-one are unit tests in
+# `editor/forms.rs` (the read model's three button spellings, the radio union, the choice
+# `/I`+`/V` pair, the XFA refusal, the read-only listing, plus the write path's byte-prefix
+# preservation, four refusal codes, the batch atomicity, the `/I` step, the radio kid, the
+# `/NeedAppearances` write and the two `verify_writes` non-persist cases). None opens PDFium,
+# so the ignored count stays at 107. Measured, not incremented: 985/107 and 1092/0.
+#
+# The arithmetic is checkable and was checked: HEAD measured 964/107 and 1071/0, and the diff
+# of passing test names against this tree is exactly the twenty-one added names. An earlier
+# reading of 984 was 964 + 21 - 1, where the -1 was `the_fixture_tree_holds_no_untracked_files`
+# failing on the eight new PDFs before they were committed -- the fixture guard doing its job,
+# not a count change. Anyone re-deriving this must compare like with like: `cargo test` stops at
+# the first failing binary, so a run with a failure reports fewer passes than the pin and looks
+# like a vanished test.
+PIN_PLAIN_PASSED=985
 PIN_PLAIN_IGNORED=107
-PIN_IGNORED_PASSED=1071
+PIN_IGNORED_PASSED=1092
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

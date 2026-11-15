@@ -491,6 +491,65 @@ pub enum AppError {
         /// The declared `/P` level.
         level: u8,
     },
+    /// P3.3 W6 (I-F4): the field the caller named exists but is marked read-only.
+    ///
+    /// A refusal, not a failure, and separate from `FormFieldNotFound` on purpose: "I cannot change
+    /// this" and "there is no such field" call for different UI, and a caller that received one for
+    /// the other would either show a phantom field or retry a write that can never succeed.
+    #[error("the form field \"{name}\" is read-only in this document and cannot be filled")]
+    FormFieldReadOnly {
+        /// The field's fully qualified name, as the document spells it.
+        name: String,
+    },
+    /// P3.3 W6: no field by this name exists in the document's `/AcroForm`.
+    ///
+    /// Named rather than boolean because I-F2 forbids inventing a field: the caller asked to write
+    /// a name the document does not carry, and the refusal has to say which name so the user can
+    /// see the mismatch instead of watching a silent no-op.
+    #[error("this document has no form field named \"{name}\"")]
+    FormFieldNotFound {
+        /// What the caller asked to fill.
+        name: String,
+    },
+    /// P3.3 W6: the value is not one this field can legally take.
+    ///
+    /// Covers a choice value absent from `/Opt` and a button state absent from `/AP /N`. Both are
+    /// I-F2 refusals: the legal set is read from the document, and a value outside it would create
+    /// a state no appearance stream draws.
+    #[error("\"{value}\" is not a value this form field accepts; it accepts: {allowed}")]
+    FormFieldValueNotAllowed {
+        /// What the caller asked to write.
+        value: String,
+        /// The legal set, comma-joined, as read from the document.
+        allowed: String,
+    },
+    /// P3.3 W6 (D-F6): the document carries an `/XFA` form, which this build does not fill.
+    ///
+    /// Refused by name rather than attempted. An XFA form's data lives in the XML packet, not in
+    /// the `/AcroForm` fields; writing the AcroForm half produces a file that opens, shows the old
+    /// values in every viewer that honours XFA, and looks like a write that silently failed.
+    #[error(
+        "this document uses an XFA form, which this build cannot fill; its fields live in an XML \
+         packet rather than in the PDF form dictionary"
+    )]
+    XfaFormUnsupported,
+    /// P3.3 I-F1: the write reported success but the value did not read back.
+    ///
+    /// The one error that exists because "no false success" is the phase's first invariant. It is
+    /// raised *after* the file was written, by re-opening the saved bytes and reading the field
+    /// again — so it means the writer produced a file whose field still carries the old value. The
+    /// message says so plainly, because the alternative is a UI that says "Filled" over a document
+    /// that did not change.
+    #[error(
+        "the fill was written but did not stick: field \"{name}\" still reads {found} after \
+         saving. The saved file was not accepted; the original is unchanged"
+    )]
+    FormFillDidNotPersist {
+        /// The field the caller filled.
+        name: String,
+        /// What the field reads after the round trip, quoted for the user.
+        found: String,
+    },
     #[error("{0}")]
     Other(String),
 }
@@ -523,6 +582,11 @@ impl AppError {
             AppError::CertificateUnreadable(_) => "CERTIFICATE_UNREADABLE",
             AppError::SignatureBuildFailed(_) => "SIGNATURE_BUILD_FAILED",
             AppError::CertificationRefusesEdit { .. } => "CERTIFICATION_REFUSES_EDIT",
+            AppError::FormFieldReadOnly { .. } => "FORM_FIELD_READ_ONLY",
+            AppError::FormFieldNotFound { .. } => "FORM_FIELD_NOT_FOUND",
+            AppError::FormFieldValueNotAllowed { .. } => "FORM_FIELD_VALUE_NOT_ALLOWED",
+            AppError::XfaFormUnsupported => "XFA_FORM_UNSUPPORTED",
+            AppError::FormFillDidNotPersist { .. } => "FORM_FILL_DID_NOT_PERSIST",
             AppError::Other(_) => "OTHER",
         }
     }
