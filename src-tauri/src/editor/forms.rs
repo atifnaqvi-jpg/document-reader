@@ -23,15 +23,15 @@
 //! Every mutation here is an **incremental update**: the source bytes are kept verbatim as the
 //! first revision and one more revision is appended. Nothing before the append point is rewritten,
 //! so "everything we did not write is preserved byte for byte" is a property of the mechanism
-//! rather than a promise the writer has to keep carefully. `tests/forms_write.rs` asserts it on
-//! the actual bytes: the output must start with the input.
+//! rather than a promise the writer has to keep carefully. `a_fill_preserves_the_source_bytes_verbatim_as_its_first_revision`
+//! asserts it on the actual bytes: the output must start with the input.
 //!
 //! The alternative — load, mutate, re-serialise — would rewrite every object in the file. That
 //! passes a test that compares rendered output and destroys signatures, object streams, and any
 //! vendor extension a producer emitted in an order we would not reproduce.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lopdf::{Document, IncrementalDocument, Object, ObjectId};
 
@@ -100,6 +100,10 @@ struct FieldLocations {
 /// A form whose fields were read successfully, plus where each one lives.
 pub struct OpenForm {
     source_bytes: Vec<u8>,
+    /// Where the bytes came from, when they came from a file. `enforceable_level` reads `/DocMDP`
+    /// through PDFium as a fallback when the catalog's own `/Perms` entry is absent, and that fallback
+    /// needs a path. `None` for [`open_bytes`], where the bytes are the whole story.
+    source_path: Option<PathBuf>,
     fields: Vec<FormField>,
     locations: BTreeMap<String, FieldLocations>,
 }
@@ -133,7 +137,9 @@ impl OpenForm {
 pub fn open(path: &Path) -> Result<OpenForm, AppError> {
     let bytes = std::fs::read(path)
         .map_err(|error| AppError::Other(format!("could not read PDF: {error}")))?;
-    open_bytes(bytes)
+    let mut form = open_bytes(bytes)?;
+    form.source_path = Some(path.to_path_buf());
+    Ok(form)
 }
 
 /// [`open`] over bytes already in memory.
@@ -151,6 +157,7 @@ pub fn open_bytes(source_bytes: Vec<u8>) -> Result<OpenForm, AppError> {
 
     Ok(OpenForm {
         source_bytes,
+        source_path: None,
         fields,
         locations,
     })
@@ -648,6 +655,21 @@ impl OpenForm {
             ));
         }
 
+        // 0. The certification gate, before anything else touches the document. The 2026-11-14
+        //    ruling permits form fill at `P=2` and `P=3` and refuses it at `P=1`, so a certified
+        //    document is not refused wholesale -- only the level that forbids filling is. Called
+        //    first rather than last because the refusal has to name the level before the user has
+        //    had a file written, and because a `P=1` document must not be validated against either:
+        //    the answer is no regardless of what the values are.
+        let level = crate::editor::signature::verify::enforceable_level(
+            &self.source_bytes,
+            self.source_path.as_deref().unwrap_or_else(|| Path::new("")),
+        );
+        crate::editor::signature::editpolicy::check(
+            level,
+            crate::editor::signature::editpolicy::EditKind::FormFill,
+        )?;
+
         // 1. Validate everything first, so a refusal leaves no half-written file.
         let mut writes = Vec::new();
         for value in values {
@@ -976,6 +998,7 @@ impl PlannedWrite {
 mod tests {
     use super::*;
     use crate::editor::testpdf;
+    use lopdf::dictionary;
 
     fn open_fixture(bytes: Vec<u8>) -> OpenForm {
         open_bytes(bytes).expect("the fixture opens")
@@ -1570,6 +1593,124 @@ mod tests {
         let error = verify_writes(&readback, std::slice::from_ref(&write))
             .expect_err("a missing field is not a persisted fill");
         assert_eq!(error.code(), "FORM_FILL_DID_NOT_PERSIST");
+    }
+
+    /// A form document certified at `level`, in the shape `verify::declared_level` reads: a catalog
+    /// `/Perms /DocMDP` entry, a `/Type /Sig` dictionary, and `/Reference` naming a
+    /// `/TransformParams` dictionary whose `/P` is the level.
+    ///
+    /// Built here rather than added to `testpdf` because only this test needs it, and a fixture
+    /// builder nothing else calls is a second thing to keep honest.
+    fn certified_form(level: i64) -> Vec<u8> {
+        let mut document = testpdf::form_checkbox_yes();
+        let parameters = document.add_object(dictionary! { "P" => level });
+        let reference = document.add_object(dictionary! {
+            "TransformMethod" => Object::Name(b"DocMDP".to_vec()),
+            "TransformParams" => Object::Reference(parameters),
+        });
+        let signature = document.add_object(dictionary! {
+            "Type" => Object::Name(b"Sig".to_vec()),
+            "Filter" => Object::Name(b"Adobe.PPKLite".to_vec()),
+            "Reference" => Object::Array(vec![Object::Reference(reference)]),
+            "Contents" => Object::string_literal(vec![0u8; 8]),
+        });
+        let catalog_id = document
+            .trailer
+            .get(b"Root")
+            .ok()
+            .and_then(|root| root.as_reference().ok())
+            .expect("the document has a /Root");
+        let catalog = document
+            .get_object_mut(catalog_id)
+            .and_then(|object| object.as_dict_mut())
+            .expect("a catalog dictionary");
+        catalog.set(
+            "Perms",
+            dictionary! { "DocMDP" => Object::Reference(signature) },
+        );
+        testpdf::bytes(&document)
+    }
+
+    /// D-F7's ruling, as a test: form fill is permitted on a document certified at `P=2` and `P=3`,
+    /// and refused at `P=1` with the level named.
+    ///
+    /// The `P=1` case is the one that matters, and it is asserted by *code* rather than by message
+    /// text so a reworded message cannot make it pass. It also checks no file was produced, because
+    /// a gate that refuses after the write has already told the user their fill worked.
+    #[test]
+    fn the_certification_gate_refuses_a_P1_fill_and_permits_P2_and_P3() {
+        for level in [2i64, 3] {
+            let source_bytes = certified_form(level);
+            // Guard the guard: if `certified_form` stopped producing a readable level, the
+            // permissive rows below would pass for the wrong reason.
+            assert_eq!(
+                crate::editor::signature::verify::certification_level(&source_bytes),
+                crate::editor::signature::editpolicy::CertificationLevel::from_number(level as u8),
+                "the P={level} fixture must actually declare its level"
+            );
+
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source = dir.path().join("source.pdf");
+            let target = dir.path().join("filled.pdf");
+            std::fs::write(&source, &source_bytes).expect("write fixture");
+
+            fill_to(
+                &source,
+                &target,
+                &[FillValue {
+                    name: "agree".to_string(),
+                    value: "Yes".to_string(),
+                }],
+                |path| path.exists(),
+            )
+            .unwrap_or_else(|error| {
+                panic!("P={level} permits form fill per the 2026-11-14 ruling, but got: {error}")
+            });
+            assert!(target.exists(), "P={level} must produce the filled file");
+        }
+
+        let source_bytes = certified_form(1);
+        assert_eq!(
+            crate::editor::signature::verify::certification_level(&source_bytes),
+            crate::editor::signature::editpolicy::CertificationLevel::from_number(1),
+            "the P=1 fixture must actually declare its level"
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.pdf");
+        let target = dir.path().join("filled.pdf");
+        std::fs::write(&source, &source_bytes).expect("write fixture");
+
+        let error = fill_to(
+            &source,
+            &target,
+            &[FillValue {
+                name: "agree".to_string(),
+                value: "Yes".to_string(),
+            }],
+            |path| path.exists(),
+        )
+        .expect_err("P=1 forbids every change after certification but a further signature");
+
+        assert_eq!(error.code(), "CERTIFICATION_REFUSES_EDIT");
+        assert!(
+            error.to_string().contains('1'),
+            "the refusal must name the level, or the user cannot tell a P=1 refusal from a P=2 one: \
+             {error}"
+        );
+        assert!(
+            !target.exists(),
+            "a certified refusal must leave no file: the gate runs before the write, and this is how \
+             that ordering is proven rather than asserted"
+        );
+
+        // Reading is not filling: a P=1 document must still open and list its fields, or the gate
+        // has turned a certified document into an unopenable one.
+        let form = open(&source).expect("a certified document still opens");
+        assert!(
+            form.field("agree").is_some(),
+            "reading a P=1 document's fields is not an edit and must stay possible"
+        );
     }
 
     /// §5's acceptance sweep: every state spelling the design names, filled end to end, plus the

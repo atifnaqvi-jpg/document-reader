@@ -259,9 +259,15 @@ fi
 # `/V /Yes` with an `/AP /N` key of `/yes`. The test asserts both halves before it fills anything,
 # so a fixture regenerated with a coherent writer fails loudly rather than quietly passing a weaker
 # claim. That is deliberate: the fixture's whole value is the producer's disagreement.
-PIN_PLAIN_PASSED=987
+# 2026-11-15 (P3.3 W6: the certification gate on the fill path): +1 in both shapes,
+# 987/107 -> 988/107 and 1094/0 -> 1095/0. The one is
+# `the_certification_gate_refuses_a_P1_fill_and_permits_P2_and_P3`. It builds its `P=1`, `P=2` and
+# `P=3` fixtures in-test rather than adding them to `testpdf`, because nothing else calls such a
+# builder. Ignored stays 107: the test does not open PDFium -- `enforceable_level` only reaches it
+# as a fallback when the bytes carry no level, and these fixtures carry one.
+PIN_PLAIN_PASSED=988
 PIN_PLAIN_IGNORED=107
-PIN_IGNORED_PASSED=1094
+PIN_IGNORED_PASSED=1095
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
