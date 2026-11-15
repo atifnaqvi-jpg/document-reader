@@ -173,8 +173,14 @@ jobs:
           # this app protected, which needs PDFium because a protected file cannot be read without a
           # real PDF reader. It is one test, so one mark: the pin moved by exactly that, and the
           # `passed` floor above did not move at all.
-          if [ "$ignored" -ne 107 ]; then
-            echo "::error::$ignored tests ignored; 107 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured at 108, not 107: P3.3 W4's `the_checkbox_ticks_in_a_real_viewer` renders the
+          # checkbox before and after a fill and compares the pixels, which needs a real PDFium or
+          # there is nothing to compare. It is the one test in P3.3 that *must* be ignored here: the
+          # claim it makes is that a viewer draws the tick, and the `passed` floor cannot express
+          # that. The nine form-data tests that arrived in the same phase need no library and moved
+          # the `passed` floor instead.
+          if [ "$ignored" -ne 108 ]; then
+            echo "::error::$ignored tests ignored; 108 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
