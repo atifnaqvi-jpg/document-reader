@@ -3842,7 +3842,15 @@ pub fn form_field_on_second_page() -> Document {
 /// field resolves to no page and the overlay draws nothing — the silent-nothing failure D6 is about.
 pub fn form_field_without_page_entry() -> Document {
     form_document(|document, page_id| {
-        let widget = text_widget(document, "unstated", "", false, false, [72, 700, 300, 724], page_id);
+        let widget = text_widget(
+            document,
+            "unstated",
+            "",
+            false,
+            false,
+            [72, 700, 300, 724],
+            page_id,
+        );
         // The builder sets `/P`; removing it is the whole point of this fixture, so the `/Annots`
         // entry `form_document` writes becomes the only route left.
         if let Some(Object::Dictionary(dictionary)) = document.objects.get_mut(&widget) {
@@ -3862,7 +3870,15 @@ pub fn form_field_without_page_entry() -> Document {
 /// rather than being placed on page 0 over unrelated content.
 pub fn form_field_on_no_page() -> Document {
     form_document(|document, page_id| {
-        let widget = text_widget(document, "orphan", "", false, false, [72, 700, 300, 724], page_id);
+        let widget = text_widget(
+            document,
+            "orphan",
+            "",
+            false,
+            false,
+            [72, 700, 300, 724],
+            page_id,
+        );
         if let Some(Object::Dictionary(dictionary)) = document.objects.get_mut(&widget) {
             dictionary.remove(b"P");
         }

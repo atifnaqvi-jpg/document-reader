@@ -568,7 +568,7 @@ fn page_of_widget(document: &Document, widget_id: ObjectId) -> Option<u32> {
             .get_pages()
             .iter()
             .find(|(_, id)| **id == page_id)
-            .map(|(number, _)| number.saturating_sub(1) as u32);
+            .map(|(number, _)| number.saturating_sub(1));
     }
 
     document
@@ -588,7 +588,7 @@ fn page_of_widget(document: &Document, widget_id: ObjectId) -> Option<u32> {
                 })
                 .unwrap_or(false)
         })
-        .map(|(number, _)| number.saturating_sub(1) as u32)
+        .map(|(number, _)| number.saturating_sub(1))
 }
 
 /// The on-state key names under `/AP /N`.
@@ -1333,7 +1333,9 @@ mod tests {
     #[test]
     fn a_widget_on_no_page_is_read_with_no_page_rather_than_placed_on_the_first() {
         let form = open_fixture(fixture_bytes(testpdf::form_field_on_no_page()));
-        let field = form.field("orphan").expect("the field is still read and listed");
+        let field = form
+            .field("orphan")
+            .expect("the field is still read and listed");
         assert_eq!(
             field.rect_pages,
             vec![None],
@@ -1381,7 +1383,9 @@ mod tests {
     #[test]
     fn a_merged_radio_group_keeps_each_rect_with_its_own_page() {
         let form = open_fixture(fixture_bytes(testpdf::form_radio_group()));
-        let group = form.field("color").expect("the group is read once, under its parent name");
+        let group = form
+            .field("color")
+            .expect("the group is read once, under its parent name");
         assert_eq!(
             group.rects.len(),
             2,

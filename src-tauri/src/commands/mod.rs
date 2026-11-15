@@ -6,6 +6,7 @@ use rusqlite::Connection;
 use tauri::{AppHandle, State};
 
 use crate::db::{annotations, app_state, bookmarks, documents, redactions, search, Db};
+use crate::editor::forms::FormField;
 use crate::editor::redact::Rect;
 use crate::editor::session::{PasswordStore, SessionPassword};
 use crate::editor::xfdf;
@@ -15,7 +16,6 @@ use crate::model::{
     Annotation, AnnotationKind, AnnotationStatus, AppError, Bookmark, DocumentMeta, Format,
     LibraryEntry, RedactionKind, RedactionMark, RenderedPage, SearchHit,
 };
-use crate::editor::forms::FormField;
 use crate::provider::ReaderProvider;
 use crate::render::RenderService;
 
@@ -759,7 +759,10 @@ pub fn save_edits(db: State<'_, Db>, document_id: String) -> Result<String, AppE
 /// refuses by name instead (D5, `NO_FILLABLE_FORM_FIELDS`) because a fill *request* on a flat
 /// document is a request that cannot be met.
 #[tauri::command]
-pub fn list_form_fields(db: State<'_, Db>, document_id: String) -> Result<Vec<FormField>, AppError> {
+pub fn list_form_fields(
+    db: State<'_, Db>,
+    document_id: String,
+) -> Result<Vec<FormField>, AppError> {
     let path = document_path(&db, &document_id)?;
     let bytes = std::fs::read(&path)
         .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
@@ -812,10 +815,7 @@ pub fn fill_form_field(
     let outcome = crate::editor::forms::fill_to(
         Path::new(&original_path),
         &target,
-        &[crate::editor::forms::FillValue {
-            name: field,
-            value,
-        }],
+        &[crate::editor::forms::FillValue { name: field, value }],
         |candidate| candidate.exists(),
     )?;
 
