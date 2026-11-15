@@ -86,6 +86,42 @@ for `/Yes`/`/Off` is produced by `reportlab`; this one supplies the odd case.
 or `/Subject` is set; the only metadata is `/Producer LibreOffice 24.2` and a creation date,
 which is the producer identity this README relies on.
 
+### The synthesised matrix (`form-*.pdf`)
+
+`libreoffice-checkbox-form.pdf` above is the only real producer this repo commits, and it happens to
+spell its appearance key `/yes`. That is a *sample* of the wild, not the wild: a writer that
+hardcodes `/yes` passes it. The matrix below is built by `testpdf` so the spellings that no producer
+here emits can be written on purpose.
+
+| Fixture | What it must provoke |
+|---------|----------------------|
+| `form-text-fields.pdf` | `/Tx`, one single-line (`given`) and one multi-line (`notes`, `/Ff` bit 13). The type PDFium already fills correctly, so it is the control for every writer assertion. |
+| `form-checkbox-yes.pdf` | `/Btn` with on-state `/Yes` — the reportlab spelling. |
+| `form-checkbox-on.pdf` | `/Btn` with on-state `/On`. No producer here emits this, so a writer that hardcodes `/Yes` fails here and nowhere else. W4's primary pixel case. |
+| `form-checkbox-lowercase-yes.pdf` | `/Btn` with on-state `/yes`. Isolates the lower-case key from the LibreOffice file's separate `/V`/`/AS` disagreement. |
+| `form-radio-group.pdf` | Parent `/FT /Btn` with `/Ff` bit 16 and two kids naming `/red` and `/blue`. A writer reading only the parent finds no state to write. |
+| `form-choice-fields.pdf` | `/Ch`: a combo (`pick`, `/Ff` bit 18, no `/V`) and a multi-select list (`many`, bit 22, with `/I` and a matching `/V`). |
+| `form-read-only.pdf` | `/Tx` with `/Ff` bit 1. W6's I-F4 refusal. |
+| `form-xfa.pdf` | An `/XFA` entry in the catalog's `/AcroForm`, which this build refuses by name (D-F6). |
+
+Every appearance stream draws different ink on and off, because W4 compares rendered pixels of the
+widget rectangle: a fixture whose on-state drew the same box as its off-state would let any writer
+pass. `scripts/make-p33-fixtures.sh` is the generator, and the generator asserts that two builds of
+each document are byte-identical before writing anything, so a pixel gate cannot fail for a reason
+that has nothing to do with the code under test.
+
+### pdfium-render cannot enumerate `/AP` state names
+
+Measured, and it changes the design. `pdfium-render 0.8.37` exposes a field's `/AS` (as
+`appearance_stream()`) and its `/V`, but the only `/AP` accessor is `FPDFAnnot_GetAP`, which returns
+the *selected* stream — not the key set under `/AP /N`. So a button's on/off names cannot be read
+through PDFium at all.
+
+D-F3 says "state names come from `/AP`". That is still the rule; what changes is *who reads it*: the
+names are read from the same lopdf document the writer mutates, not from the PDFium field. Reading
+them from lopdf is also stricter — it is the exact dictionary the write lands in, so a name cannot
+differ between the read and the write.
+
 **Regenerate** (output is not byte-identical — LibreOffice stamps a creation date and object
 numbers vary, so regenerate only to replace the file deliberately, and re-check the `/N` keys
 afterwards):
