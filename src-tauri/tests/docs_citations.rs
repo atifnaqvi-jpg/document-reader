@@ -101,10 +101,11 @@ const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
 /// absent. The moment the named test lands, the guard fails and demands the entry's removal, so the
 /// list cannot rot into a permanent hole. It exists because a design is governed from the moment it
 /// is written (§ `GOVERNED_DOCS`) and necessarily names acceptance tests that do not exist yet.
-const PLANNED_SYMBOLS: [(&str, &str); 1] = [(
-    "the_checkbox_ticks_in_a_real_viewer",
-    "docs/P3.3-forms-DESIGN.md",
-)];
+///
+/// Empty since 2026-11-15: `the_checkbox_ticks_in_a_real_viewer` was the only entry, and the guard
+/// demanded its removal the moment the test landed. The list stays because the next governed design
+/// that lands ahead of its tests will need it.
+const PLANNED_SYMBOLS: [(&str, &str); 0] = [];
 
 /// Symbols a governed document cites **in order to assert that they are absent**, with the reason
 /// the absence is load-bearing.

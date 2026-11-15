@@ -1713,6 +1713,94 @@ mod tests {
         );
     }
 
+    /// Counts dark pixels inside the checkbox's widget rectangle, `(x, y, w, h)` in page points at
+    /// scale 1.0. The rectangle is `[72, 700, 86, 714]` from `testpdf::checkbox_at`, and PDF page
+    /// space has its origin at the bottom left while image rows start at the top, so the row range is
+    /// flipped. Two points of inset keep the widget's own border out of the count: the border is drawn
+    /// the same whether the box is ticked or not, and including it would dilute the very difference
+    /// being measured.
+    fn dark_pixels_in_widget(png: &[u8], scale: f32) -> usize {
+        let image = image::load_from_memory(png)
+            .expect("render_page_at returns an encoded image")
+            .to_luma8();
+        let (width, height) = image.dimensions();
+
+        // Two points of inset keep the widget's own border out: the border is drawn the same whether
+        // the box is ticked or not, and including it would swamp a small tick.
+        let inset = 2.0 * scale;
+        let left = ((72.0 * scale) + inset) as u32;
+        let right = ((86.0 * scale) - inset) as u32;
+        let bottom = ((700.0 * scale) + inset) as u32;
+        let top = ((714.0 * scale) - inset) as u32;
+
+        let mut dark = 0;
+        for y in bottom..top.min(height) {
+            // PDF space has its origin bottom-left and image rows start at the top.
+            let row = height - 1 - y;
+            for x in left..right.min(width) {
+                if image.get_pixel(x, row).0[0] < 128 {
+                    dark += 1;
+                }
+            }
+        }
+        dark
+    }
+
+    /// W4's pixel claim, and the reason it cannot be replaced by a value read-back: LibreOffice sets
+    /// `/NeedAppearances true`, so a viewer regenerates the appearance itself and the tick appears
+    /// whether or not our writer put anything in `/AP`. The value reading back proves we wrote the
+    /// dictionary. Only pixels prove the document *shows* the change.
+    ///
+    /// The `[ON]` fixture is the case under test because it carries no `/NeedAppearances` for a
+    /// viewer to shortcut through: the tick can only come from the appearance stream our writer
+    /// selected.
+    ///
+    /// The before/after comparison is the guard. Asserting only that the filled file has dark pixels
+    /// in the widget rectangle would pass on an unticked box, whose border is also dark -- so the test
+    /// measures the same rectangle before the fill and requires it to be emptier.
+    #[test]
+    #[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+    fn the_checkbox_ticks_in_a_real_viewer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("on.pdf");
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_checkbox_on())).expect("write");
+
+        let filled = dir.path().join("ticked.pdf");
+        let outcome = fill_to(
+            &source,
+            &filled,
+            &[FillValue {
+                name: "agree".to_string(),
+                value: "On".to_string(),
+            }],
+            |path| path.exists(),
+        )
+        .expect("a document with no certification fills");
+
+        // At 1.0 the tick measures three dark pixels, which is too small a margin to distinguish a
+        // drawn tick from an anti-aliasing difference. At 4.0 it is a region.
+        let scale = 4.0;
+        let before = crate::provider::PdfProvider::render_page_at(&source, 0, scale)
+            .expect("the unfilled source renders");
+        let after = crate::provider::PdfProvider::render_page_at(
+            &std::path::PathBuf::from(&outcome.path),
+            0,
+            scale,
+        )
+        .expect("the filled file renders");
+
+        let unticked = dark_pixels_in_widget(&before.bytes, scale);
+        let ticked = dark_pixels_in_widget(&after.bytes, scale);
+
+        // Not "greater than zero": a viewer that draws the widget's border but never the tick scores
+        // the same before and after, which is exactly the failure this test exists to catch.
+        assert!(
+            ticked > unticked,
+            "the filled document must draw more ink in the checkbox than the unfilled one, or the \
+             tick exists only in the dictionary. before={unticked} after={ticked}"
+        );
+    }
+
     /// §5's acceptance sweep: every state spelling the design names, filled end to end, plus the
     /// one real-producer file in the repository.
     ///

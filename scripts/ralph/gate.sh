@@ -265,9 +265,14 @@ fi
 # `P=3` fixtures in-test rather than adding them to `testpdf`, because nothing else calls such a
 # builder. Ignored stays 107: the test does not open PDFium -- `enforceable_level` only reaches it
 # as a fallback when the bytes carry no level, and these fixtures carry one.
+# 2026-11-15 (P3.3 W4: the pixel tick test): 988/107 -> 988/108 and 1095/0 -> 1096/0. A pass did
+# not move, only ignored: `the_checkbox_ticks_in_a_real_viewer` needs a real PDFium to render, so it
+# is `#[ignore]` like the provider's own render tests. This is the one pin change in P3.3 where the
+# plain count is the interesting number -- it says the test is honestly gated rather than quietly
+# skipped. `--include-ignored` is where it runs, and that is the shape CI must run to mean anything.
 PIN_PLAIN_PASSED=988
-PIN_PLAIN_IGNORED=107
-PIN_IGNORED_PASSED=1095
+PIN_PLAIN_IGNORED=108
+PIN_IGNORED_PASSED=1096
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
