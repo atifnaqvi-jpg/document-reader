@@ -155,6 +155,19 @@ pub fn open_bytes(source_bytes: Vec<u8>) -> Result<OpenForm, AppError> {
     let mut locations = BTreeMap::new();
     collect_fields(&document, None, &mut fields, &mut locations)?;
 
+    // D5 (ruled 2026-11-15): a document with nothing to fill is refused by name rather than opened
+    // as an empty form. Reported against a real LEA Berlin government form — Excel 2016 producer, no
+    // `/AcroForm`, zero widgets — where the surface opened and did nothing, which reads as a broken
+    // app instead of as a document with no form. Inventing a field here is forbidden (D-F3/I-F2), so
+    // the honest answer is a refusal that says why.
+    //
+    // This is the only gate on emptiness. An all-read-only form is *not* refused here: D-F7 lists
+    // those fields so the user can see them, and refuses the write instead. Refusing to open would
+    // hide the very fields the refusal is about.
+    if fields.is_empty() {
+        return Err(AppError::NoFillableFormFields);
+    }
+
     Ok(OpenForm {
         source_bytes,
         source_path: None,
@@ -208,7 +221,9 @@ fn collect_fields(
                 })
                 .and_then(|form| form.as_dict().ok());
             let Some(form) = form else {
-                // A document with no form is not an error: it simply has no fields to fill.
+                // No `/AcroForm` at all: this walk contributes nothing and stops. It is the caller
+                // ([`open_bytes`]) that turns an empty result into a named refusal (D5), so that the
+                // decision lives in one place rather than at every early return in this recursion.
                 return Ok(());
             };
             match form.get(b"Fields").and_then(Object::as_array) {
@@ -1134,11 +1149,86 @@ mod tests {
         );
     }
 
-    /// A document with no form is not an error; it has no fields.
+    /// D5: a document with no form is refused by name, not opened as an empty form.
+    ///
+    /// This test previously asserted the opposite — `a_document_without_a_form_has_no_fields`, which
+    /// treated the empty list as a valid result. That contract was the defect: the surface opened and
+    /// showed nothing, which a user reads as a broken app rather than as a document with no form. The
+    /// real-world report that overturned it was a flat LEA Berlin government form.
     #[test]
-    fn a_document_without_a_form_has_no_fields() {
-        let form = open_fixture(fixture_bytes(testpdf::blank_page()));
-        assert!(form.fields().is_empty());
+    fn a_document_without_a_form_is_refused_by_name() {
+        let error = open_bytes(fixture_bytes(testpdf::blank_page()))
+            .expect_err("a flat document must not open as an empty form");
+        assert_eq!(
+            error.code(),
+            "NO_FILLABLE_FORM_FIELDS",
+            "the refusal must name itself, not surface as an empty field list"
+        );
+    }
+
+    /// D5, the second shape: an `/AcroForm` exists but contributes no placeable field.
+    ///
+    /// Distinct from the case above because the walk takes a different path — it finds a form
+    /// dictionary and an empty `/Fields` rather than no form at all — and a guard that only tested
+    /// the first shape would pass while this one still opened silently.
+    #[test]
+    fn a_form_with_no_fields_is_refused_by_name() {
+        let error = open_bytes(fixture_bytes(testpdf::form_with_empty_fields_array()))
+            .expect_err("an empty /AcroForm must not open as an empty form");
+        assert_eq!(error.code(), "NO_FILLABLE_FORM_FIELDS");
+    }
+
+    /// D5 must not swallow the case it does *not* cover: a form whose fields are all read-only.
+    ///
+    /// D-F7 lists a read-only field so the user can see it and refuses the *write* instead. A
+    /// refusal-to-open keyed on "nothing is writable" would pass the two tests above and still break
+    /// this one, which is why the check is on the field list being empty rather than on fillability.
+    #[test]
+    fn an_all_read_only_form_still_opens() {
+        let form = open_fixture(fixture_bytes(testpdf::form_read_only_field()));
+        assert!(
+            !form.fields().is_empty(),
+            "D-F7: read-only fields are listed, not hidden; only the write is refused"
+        );
+        assert!(
+            form.fields().iter().all(|field| !field.is_fillable()),
+            "and none of them reads as fillable"
+        );
+    }
+
+    /// D5 on the *fill command path*: asking to fill a flat document is refused, and writes nothing.
+    ///
+    /// The `open`-level tests above prove the read surface refuses; this one proves the same refusal
+    /// reaches a caller that goes straight to `fill_to`, which is the shape a command uses. It also
+    /// asserts no file appeared: a refusal that still produced output would leave the user with a
+    /// copy they did not ask for, and the "no half-written file" promise is only about the write.
+    #[test]
+    fn filling_a_document_with_no_form_fields_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("flat.pdf");
+        let target = dir.path().join("filled.pdf");
+        std::fs::write(&source, testpdf::bytes(&testpdf::blank_page())).expect("write fixture");
+
+        let error = fill_to(
+            &source,
+            &target,
+            &[FillValue {
+                name: "given".to_string(),
+                value: "anything".to_string(),
+            }],
+            |path| path.exists(),
+        )
+        .expect_err("a flat document must not accept a fill");
+
+        assert_eq!(
+            error.code(),
+            "NO_FILLABLE_FORM_FIELDS",
+            "the fill path must refuse by name, not report a missing field"
+        );
+        assert!(
+            !target.exists(),
+            "a refused fill must not leave a file behind at the target path"
+        );
     }
 
     /// I-F1, the phase's first invariant: a fill that reports success has to be readable back.

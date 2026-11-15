@@ -562,6 +562,30 @@ pub enum AppError {
          build supports"
     )]
     FdfUnsupported,
+    /// P3.3 (D5, ruled 2026-11-15 from a real-world hand-test): the document has no fillable form
+    /// fields, so the fill surface refuses instead of opening an empty panel.
+    ///
+    /// The defect this names was reported against a real German LEA government form whose producer
+    /// was Microsoft Excel 2016: it has no `/AcroForm` and no widget annotations, so nothing in it
+    /// is fillable and no viewer's form engine can fill it. The refusal is correct — inventing a
+    /// field would violate D-F3 (I-F2) — but the *silence* was not: the surface opened and did
+    /// nothing, which reads as a broken app rather than as a document with nothing to fill. I-F7
+    /// requires a refusal that names its reason, so this is a first-class error rather than an
+    /// empty field list the caller has to interpret.
+    ///
+    /// Covers both shapes it was written for: no `/AcroForm` at all (a flat document), and an
+    /// `/AcroForm` whose `/Fields` contributes no fillable widget. The message says "no fillable
+    /// form fields" rather than "no fields" because the second case can have a `/Fields` array whose
+    /// entries this build cannot place.
+    ///
+    /// It names no alternative feature. That is deliberate: at the time of writing there is no
+    /// shipping path that types onto a flat page, and a refusal that points at a capability the app
+    /// does not have is a worse lie than one that stops at the fact.
+    #[error(
+        "this document has no fillable form fields — it is a flat PDF with no form to fill, so \
+         there is nothing this app can fill in it"
+    )]
+    NoFillableFormFields,
     #[error("{0}")]
     Other(String),
 }
@@ -600,6 +624,7 @@ impl AppError {
             AppError::XfaFormUnsupported => "XFA_FORM_UNSUPPORTED",
             AppError::FormFillDidNotPersist { .. } => "FORM_FILL_DID_NOT_PERSIST",
             AppError::FdfUnsupported => "FDF_UNSUPPORTED",
+            AppError::NoFillableFormFields => "NO_FILLABLE_FORM_FIELDS",
             AppError::Other(_) => "OTHER",
         }
     }

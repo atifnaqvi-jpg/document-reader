@@ -3743,6 +3743,19 @@ pub fn form_choice_fields() -> Document {
     })
 }
 
+/// An `/AcroForm` that exists but declares no fields.
+///
+/// The second shape D5 refuses: a form dictionary with an empty `/Fields`, which reaches the walk
+/// through a different path than a document with no `/AcroForm` at all. Both must refuse, and each
+/// needs its own fixture or a guard on one passes while the other still opens silently.
+pub fn form_with_empty_fields_array() -> Document {
+    form_document(|_document, _page_id| FormSpec {
+        widgets: Vec::new(),
+        parent_fields: Vec::new(),
+        form_extra: Dictionary::new(),
+    })
+}
+
 /// A read-only text field: `/Ff` bit 1. W6's I-F4 refusal has nothing to refuse without it.
 pub fn form_read_only_field() -> Document {
     form_document(|document, page_id| FormSpec {
