@@ -1572,6 +1572,154 @@ mod tests {
         assert_eq!(error.code(), "FORM_FILL_DID_NOT_PERSIST");
     }
 
+    /// §5's acceptance sweep: every state spelling the design names, filled end to end, plus the
+    /// one real-producer file in the repository.
+    ///
+    /// This is the row a reviewer reads instead of the eight unit tests. It is deliberately one
+    /// test over a table rather than four tests: the claim being made is *uniformity* -- that the
+    /// same writer handles `/Yes`, `/On`, `/yes` and LibreOffice's value/state disagreement without
+    /// a special case per spelling -- and four separate tests would each pass while a fifth
+    /// spelling was handled by a hardcoded branch.
+    ///
+    /// Each case asserts the three things a fill has to be true of, in the order the invariants
+    /// name them: the value persisted (I-F1), the bytes before the append are the original's
+    /// (D-F4), and the source file on disk is untouched.
+    #[test]
+    fn the_acceptance_sweep_fills_every_state_spelling_and_the_real_producer_file() {
+        // (label, fixture bytes, field name, the state to write, the state the file must then hold)
+        //
+        // The third and fourth columns differ for the LibreOffice file and that difference is the
+        // point: its `/V` says `Yes` while its `/AP /N` draws `yes`. A writer that took the state
+        // name from `/V` would write `/V /Yes` and `/AS /Yes`, and `/AS` would then name a stream
+        // that does not exist. Writing `yes` and reading back `yes` proves the name came from where
+        // the design says it must.
+        let synthetic_yes = fixture_bytes(testpdf::form_checkbox_yes());
+        let synthetic_on = fixture_bytes(testpdf::form_checkbox_on());
+        let synthetic_lower = fixture_bytes(testpdf::form_checkbox_lowercase_yes());
+        let libreoffice = std::fs::read("tests/fixtures/libreoffice-checkbox-form.pdf")
+            .expect("the real-producer fixture is committed");
+
+        let cases: [(&str, Vec<u8>, &str, &str, &str); 4] = [
+            ("synthetic /Yes", synthetic_yes, "agree", "Yes", "Yes"),
+            ("synthetic /On", synthetic_on, "agree", "On", "On"),
+            ("synthetic /yes", synthetic_lower, "agree", "yes", "yes"),
+            (
+                "libreoffice /V Yes with /AP yes",
+                libreoffice,
+                "agree",
+                "yes",
+                "yes",
+            ),
+        ];
+
+        for (label, source_bytes, field, write, expected) in cases {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source = dir.path().join("source.pdf");
+            let target = dir.path().join("filled.pdf");
+            std::fs::write(&source, &source_bytes).expect("write fixture");
+
+            fill_to(
+                &source,
+                &target,
+                &[FillValue {
+                    name: field.to_string(),
+                    value: write.to_string(),
+                }],
+                |path| path.exists(),
+            )
+            .unwrap_or_else(|error| panic!("{label}: fill refused: {error}"));
+
+            // I-F1: the saved file carries the value.
+            let readback = open(&target).unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(
+                readback.field(field).and_then(|f| f.value.clone()),
+                Some(expected.to_string()),
+                "{label}: the saved file must hold {expected:?}"
+            );
+
+            // D-F4: the original bytes are revision one, verbatim.
+            let written = std::fs::read(&target).expect("read output");
+            assert!(
+                written.starts_with(&source_bytes),
+                "{label}: the fill must append, not rewrite"
+            );
+
+            // The source is not the target, and was not touched.
+            assert_eq!(
+                std::fs::read(&source).expect("read source"),
+                source_bytes,
+                "{label}: the original file must be unchanged"
+            );
+        }
+    }
+
+    /// The tamper negative: a state name the field's `/AP /N` does not draw is refused even when
+    /// another spelling in the same family exists on the file.
+    ///
+    /// Written against the real-producer file because that is where the trap is sharpest. Its `/V`
+    /// says `Yes` and its appearance says `yes`; a writer that accepted `/V`'s spelling would take
+    /// `Yes` here and write an `/AS` no stream answers. The refusal must therefore name `yes` as the
+    /// legal state, proving the legal set came from `/AP /N` and not from `/V`.
+    #[test]
+    fn the_tamper_negative_refuses_the_spelling_the_appearance_does_not_draw() {
+        let source_bytes = std::fs::read("tests/fixtures/libreoffice-checkbox-form.pdf")
+            .expect("the real-producer fixture is committed");
+        let form = open_bytes(source_bytes.clone()).expect("the fixture opens");
+
+        let field = form.field("agree").expect("the checkbox is named agree");
+        assert_eq!(
+            field.value.as_deref(),
+            Some("Yes"),
+            "the fixture's /V must stay /Yes, or this test stops testing the disagreement"
+        );
+        assert_eq!(
+            field.states,
+            vec!["yes".to_string()],
+            "the fixture's /AP /N must stay /yes, or this test stops testing the disagreement"
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.pdf");
+        let target = dir.path().join("filled.pdf");
+        std::fs::write(&source, &source_bytes).expect("write fixture");
+
+        let error = fill_to(
+            &source,
+            &target,
+            &[FillValue {
+                name: "agree".to_string(),
+                // The spelling `/V` uses. Plausible, and wrong: no `/AP /N` key draws it.
+                value: "Yes".to_string(),
+            }],
+            |path| path.exists(),
+        )
+        .expect_err("the value /V spells is not the state the appearance draws");
+
+        assert_eq!(error.code(), "FORM_FIELD_VALUE_NOT_ALLOWED");
+        assert!(
+            error.to_string().contains("yes"),
+            "the refusal must offer the state the file actually draws, which proves the legal set \
+             came from /AP /N rather than /V: {error}"
+        );
+        assert!(
+            !target.exists(),
+            "a refusal must leave no file, so the caller can retry knowing nothing changed"
+        );
+
+        // And the spelling the appearance does draw is accepted, so this is a distinction the
+        // writer makes rather than a blanket refusal of the file.
+        fill_to(
+            &source,
+            &target,
+            &[FillValue {
+                name: "agree".to_string(),
+                value: "yes".to_string(),
+            }],
+            |path| path.exists(),
+        )
+        .expect("the state the appearance draws must be accepted");
+    }
+
     #[test]
     fn a_utf16_name_is_decoded_rather_than_left_as_bytes() {
         assert_eq!(decode_text_string(&[0xFE, 0xFF, 0x00, 0x41]), "A");

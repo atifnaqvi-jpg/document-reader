@@ -249,9 +249,19 @@ fi
 # not a count change. Anyone re-deriving this must compare like with like: `cargo test` stops at
 # the first failing binary, so a run with a failure reports fewer passes than the pin and looks
 # like a vanished test.
-PIN_PLAIN_PASSED=985
+# 2026-11-15 (P3.3 §5 acceptance sweep): +2 in both shapes, 985/107 -> 987/107 and
+# 1092/0 -> 1094/0. The two are `the_acceptance_sweep_fills_every_state_spelling_and_the_real_producer_file`
+# and `the_tamper_negative_refuses_the_spelling_the_appearance_does_not_draw`, both in
+# `editor/forms.rs`. Neither opens PDFium, so ignored stays 107.
+#
+# The sweep reads the committed real-producer fixture, so it depends on
+# `tests/fixtures/libreoffice-checkbox-form.pdf` -- and on it staying the file the design measured:
+# `/V /Yes` with an `/AP /N` key of `/yes`. The test asserts both halves before it fills anything,
+# so a fixture regenerated with a coherent writer fails loudly rather than quietly passing a weaker
+# claim. That is deliberate: the fixture's whole value is the producer's disagreement.
+PIN_PLAIN_PASSED=987
 PIN_PLAIN_IGNORED=107
-PIN_IGNORED_PASSED=1092
+PIN_IGNORED_PASSED=1094
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
