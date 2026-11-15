@@ -550,6 +550,18 @@ pub enum AppError {
         /// What the field reads after the round trip, quoted for the user.
         found: String,
     },
+    /// P3.3 W7 (R7): a `.fdf` form-data file, refused by name.
+    ///
+    /// Ruled out of 1.3.0 on cost, not principle: a second binary container for one import path
+    /// doubles the format surface and gives two parsers a chance to disagree silently. The message
+    /// names XFDF as what *is* supported, because "unsupported" without an alternative is a dead end
+    /// for the user holding the file.
+    #[error(
+        "this is an FDF form-data file, which this build does not read. Import the same form data as \
+         XFDF instead: every viewer that writes FDF can also write XFDF, and XFDF is the format this \
+         build supports"
+    )]
+    FdfUnsupported,
     #[error("{0}")]
     Other(String),
 }
@@ -587,6 +599,7 @@ impl AppError {
             AppError::FormFieldValueNotAllowed { .. } => "FORM_FIELD_VALUE_NOT_ALLOWED",
             AppError::XfaFormUnsupported => "XFA_FORM_UNSUPPORTED",
             AppError::FormFillDidNotPersist { .. } => "FORM_FILL_DID_NOT_PERSIST",
+            AppError::FdfUnsupported => "FDF_UNSUPPORTED",
             AppError::Other(_) => "OTHER",
         }
     }

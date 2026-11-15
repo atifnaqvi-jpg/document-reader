@@ -270,9 +270,13 @@ fi
 # is `#[ignore]` like the provider's own render tests. This is the one pin change in P3.3 where the
 # plain count is the interesting number -- it says the test is honestly gated rather than quietly
 # skipped. `--include-ignored` is where it runs, and that is the shape CI must run to mean anything.
-PIN_PLAIN_PASSED=988
+# 2026-11-15 (P3.3 W7: XFDF form data, FDF refused): 988/108 -> 997/108 and 1096/0 -> 1105/0. Nine
+# new passes, no new ignored: `editor/xfdf.rs`'s form-data tests need no PDFium, including the
+# round-trip that fills, exports, re-imports and fills a fresh copy. Unlike W4's pixel test this one
+# proves the writer and the interchange agree on field names, which no parser unit test can.
+PIN_PLAIN_PASSED=997
 PIN_PLAIN_IGNORED=108
-PIN_IGNORED_PASSED=1096
+PIN_IGNORED_PASSED=1105
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

@@ -967,6 +967,199 @@ mod tests {
     use super::*;
     use crate::model::FreeTextMode;
 
+    mod form_data_tests {
+        use super::super::form_data;
+
+        fn xml(body: &str) -> String {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/"><fields>{body}</fields></xfdf>"#
+            )
+        }
+
+        #[test]
+        fn a_field_value_round_trips_through_export_and_parse() {
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("agree".to_string(), "Yes".to_string());
+            values.insert("name".to_string(), "Ada Lovelace".to_string());
+
+            let exported = form_data::export(&values).expect("export");
+            let (parsed, report) = form_data::parse(&exported).expect("the export must re-parse");
+            let mut report = report;
+            let back = form_data::values(&parsed, &mut report);
+
+            assert_eq!(back, values, "export then parse must be the identity");
+            assert_eq!(report.imported, 2);
+            assert_eq!(report.collapsed_duplicates, 0);
+        }
+
+        /// The refusal R7 requires, and the reason it is by content and not by extension: a user who
+        /// renames a `.fdf` to `.xfdf` has not changed the bytes, and letting it through would produce
+        /// an XML syntax error that names neither the format nor the fix.
+        #[test]
+        fn an_fdf_file_is_refused_by_name_and_told_what_to_use_instead() {
+            let fdf = b"%FDF-1.2\n1 0 obj<</FDF<</Fields[]>>>>endobj\ntrailer<</Root 1 0 R>>";
+
+            let error = form_data::refuse_non_xfdf(fdf)
+                .expect_err("an FDF container must be refused before any parsing");
+
+            assert_eq!(error.code(), "FDF_UNSUPPORTED");
+            let message = error.to_string();
+            assert!(
+                message.contains("XFDF"),
+                "a refusal must name the format that is supported, or it is a dead end: {message}"
+            );
+        }
+
+        /// `<annots>` is P3.1's section and a real viewer exports both together. Reading only
+        /// `<fields>` must not be confused with failing to read the file.
+        #[test]
+        fn the_annotation_section_is_ignored_rather_than_mistaken_for_form_data() {
+            let document = r#"<?xml version="1.0"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/">
+  <annots><square name="a1" page="0" rect="0,0,10,10"/></annots>
+  <fields><field name="agree"><value>Yes</value></field></fields>
+</xfdf>"#;
+
+            let (parsed, mut report) = form_data::parse(document).expect("parse");
+            let values = form_data::values(&parsed, &mut report);
+
+            assert_eq!(values.len(), 1);
+            assert_eq!(values.get("agree").map(String::as_str), Some("Yes"));
+        }
+
+        /// A radio group legitimately produces several `<field>` entries naming one field. Last wins,
+        /// and the collapse is *counted*: a silent merge would make a corrupt file look identical to
+        /// a healthy radio group.
+        #[test]
+        fn a_repeated_name_collapses_to_the_last_value_and_says_how_many_it_collapsed() {
+            let document = xml(r#"<field name="choice"><value>Off</value></field>
+                   <field name="choice"><value>On</value></field>"#);
+
+            let (parsed, mut report) = form_data::parse(&document).expect("parse");
+            let values = form_data::values(&parsed, &mut report);
+
+            assert_eq!(
+                values.get("choice").map(String::as_str),
+                Some("On"),
+                "the last entry is the current state Acrobat writes last"
+            );
+            assert_eq!(report.collapsed_duplicates, 1);
+            assert_eq!(report.imported, 1);
+        }
+
+        #[test]
+        fn a_field_with_no_name_is_counted_rather_than_dropped_silently() {
+            let document = xml(r#"<field><value>orphan</value></field>"#);
+
+            let (parsed, report) = form_data::parse(&document).expect("parse");
+
+            assert!(parsed.is_empty());
+            assert_eq!(report.skipped_nameless, 1);
+        }
+
+        /// Acrobat's spelling for a cleared field. Without this the value would be the *previous*
+        /// field's text, because an empty element emits no text event to clear the buffer.
+        #[test]
+        fn a_self_closing_field_reads_as_an_empty_value_not_as_a_leftover() {
+            let document = xml(r#"<field name="first"><value>Yes</value></field>
+                   <field name="second"/>"#);
+
+            let (parsed, mut report) = form_data::parse(&document).expect("parse");
+            let values = form_data::values(&parsed, &mut report);
+
+            assert_eq!(values.get("first").map(String::as_str), Some("Yes"));
+            assert_eq!(
+                values.get("second").map(String::as_str),
+                Some(""),
+                "a self-closing field must be empty, not carry the previous field's value"
+            );
+        }
+
+        #[test]
+        fn entities_in_a_value_are_decoded() {
+            let document = xml(r#"<field name="note"><value>a &amp; b &lt; c</value></field>"#);
+
+            let (parsed, mut report) = form_data::parse(&document).expect("parse");
+            let values = form_data::values(&parsed, &mut report);
+
+            assert_eq!(
+                values.get("note").map(String::as_str),
+                Some("a & b < c"),
+                "an escaped value must come back as characters, not as entities"
+            );
+        }
+
+        /// The claim W7 exists to make: form data leaves the document and comes back into a
+        /// *different* copy of it. A unit test on the parser would pass while export and the fill
+        /// path disagreed about field names, so this drives the real writer twice.
+        #[test]
+        fn a_filled_value_survives_export_to_xfdf_and_a_fill_of_a_fresh_copy() {
+            use crate::editor::{forms, testpdf};
+
+            let dir = tempfile::tempdir().expect("temp dir");
+            let original = dir.path().join("blank.pdf");
+            std::fs::write(&original, testpdf::bytes(&testpdf::form_text_fields())).expect("write");
+
+            let first = dir.path().join("first.pdf");
+            let outcome = forms::fill_to(
+                &original,
+                &first,
+                &[forms::FillValue {
+                    name: "given".to_string(),
+                    value: "Ada".to_string(),
+                }],
+                |path| path.exists(),
+            )
+            .expect("the blank form fills");
+
+            // Read the field back out of the *saved* file, so the value handed to XFDF is the one
+            // that actually persisted rather than the one that was requested.
+            let saved = forms::open(&std::path::PathBuf::from(&outcome.path)).expect("reopen");
+            let mut values = std::collections::BTreeMap::new();
+            for field in saved.fields() {
+                if let Some(value) = &field.value {
+                    values.insert(field.name.clone(), value.clone());
+                }
+            }
+            assert_eq!(values.get("given").map(String::as_str), Some("Ada"));
+
+            let xfdf = form_data::export(&values).expect("export");
+
+            // A fresh copy of the *original*, so the value can only arrive through the XFDF.
+            let (parsed, mut report) = form_data::parse(&xfdf).expect("parse");
+            let reimported = form_data::values(&parsed, &mut report);
+            let fill: Vec<forms::FillValue> = reimported
+                .iter()
+                .map(|(name, value)| forms::FillValue {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+
+            let second = dir.path().join("second.pdf");
+            forms::fill_to(&original, &second, &fill, |path| path.exists())
+                .expect("the re-imported values fill");
+
+            let refilled = forms::open(&second).expect("reopen the second copy");
+            let given = refilled.field("given").expect("the field is still there");
+            assert_eq!(
+                given.value.as_deref(),
+                Some("Ada"),
+                "the value must survive leave, export, import and refill -- not merely parse"
+            );
+        }
+
+        #[test]
+        fn a_parse_failure_is_reported_rather_than_returning_no_fields() {
+            let error = form_data::parse("<xfdf><fields><field name=")
+                .expect_err("truncated XML must be an error, not an empty result");
+
+            assert_eq!(error.code(), "OTHER");
+            assert!(error.to_string().contains("XFDF"), "{error}");
+        }
+    }
+
     fn row(
         id: &str,
         page: u32,
@@ -1465,5 +1658,244 @@ mod tests {
     fn a_date_without_a_time_is_accepted() {
         let seconds = parse_date("D:20231114").unwrap();
         assert_eq!(format_date(seconds), "D:20231114000000");
+    }
+}
+
+/// Form *data* interchange, as distinct from the annotation interchange above.
+///
+/// R7 (2026-11-14) ruled XFDF in and FDF out. The two live in one module because they share a
+/// namespace, a root element and a parser's worth of entity handling; they do not share a shape,
+/// which is why the types are separate rather than one type with an `is_form` flag.
+pub mod form_data {
+    use std::collections::BTreeMap;
+
+    use quick_xml::events::{BytesDecl, BytesStart, BytesText, Event};
+    use quick_xml::{Reader, Writer};
+
+    use crate::model::AppError;
+
+    /// One field's value from an XFDF file.
+    ///
+    /// Fields arrive in document order and duplicates are possible: Acrobat writes one `<field>`
+    /// per widget in a radio group, all naming the same field with different states. Collapsing
+    /// them here would hide a document whose two widgets disagree, so the reader keeps every one
+    /// and [`values`] resolves them with a rule the caller can see.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FieldValue {
+        /// The fully qualified name, as the XFDF `<field name="...">` attribute spells it.
+        pub name: String,
+        /// The `<value>` text. Empty when the element carried none, which for a checkbox means
+        /// "not ticked" rather than "unknown".
+        pub value: String,
+    }
+
+    /// What an import produced, and what it had to leave behind.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub struct FormDataReport {
+        /// Names whose value was taken.
+        pub imported: usize,
+        /// Names that appeared more than once and were collapsed. Counted, not silently merged:
+        /// a radio group legitimately produces these, a corrupt file also does.
+        pub collapsed_duplicates: usize,
+        /// `<field>` elements with no `name` attribute. Unaddressable, so unusable.
+        pub skipped_nameless: usize,
+    }
+
+    /// Refuses any input that is not XFDF, by name, before parsing it.
+    ///
+    /// FDF is a *binary* container whose first bytes are `%FDF-1.x`. Detecting it by content rather
+    /// than by file extension is deliberate: a user who renames a `.fdf` to `.xfdf` has not changed
+    /// what the bytes are, and refusing on extension would let that file through to a parser that
+    /// then reports a confusing XML syntax error.
+    pub fn refuse_non_xfdf(bytes: &[u8]) -> Result<(), AppError> {
+        let head = &bytes[..bytes.len().min(8)];
+        if head.starts_with(b"%FDF-") {
+            return Err(AppError::FdfUnsupported);
+        }
+        Ok(())
+    }
+
+    /// Parses XFDF form data into the pairs it carries, in document order.
+    ///
+    /// `<fields>` is the only section read. `<annots>` is P3.1's, and a file carrying both is
+    /// exactly what a viewer exports from a document with annotations and a form, so ignoring it
+    /// here is correct rather than lenient.
+    pub fn parse(xml: &str) -> Result<(Vec<FieldValue>, FormDataReport), AppError> {
+        refuse_non_xfdf(xml.as_bytes())?;
+
+        let mut reader = Reader::from_str(xml);
+        // Deliberately *not* `trim_text(true)`, for the reason the annotation parser above records:
+        // quick-xml delivers text and entity references as separate events when adjacent, so
+        // trimming each node eats the spaces around an `&amp;` and "a & b" comes back as "a&b".
+        // The buffer is trimmed once, when the field closes.
+        reader.config_mut().trim_text(false);
+
+        let mut values = Vec::new();
+        let mut report = FormDataReport::default();
+        let mut in_fields = false;
+        let mut current_name: Option<String> = None;
+        // Separate from `current_name` so a nameless `<field>` is still recognised as a field when
+        // it closes; keying the end branch on the name loses exactly the case that needs counting.
+        let mut in_field = false;
+        let mut current_value = String::new();
+        let mut in_value = false;
+
+        loop {
+            match reader.read_event() {
+                Err(error) => {
+                    return Err(AppError::Other(format!(
+                        "this file is not readable as XFDF: {error}"
+                    )))
+                }
+                Ok(Event::Eof) => break,
+                Ok(Event::Start(event)) => match event.name().as_ref() {
+                    "fields" => in_fields = true,
+                    "field" if in_fields => {
+                        in_field = true;
+                        current_name = attribute(&event, "name");
+                        current_value.clear();
+                    }
+                    "value" if in_field => in_value = true,
+                    _ => {}
+                },
+                Ok(Event::Empty(event)) if in_fields && event.name().as_ref() == "field" => {
+                    // A self-closing <field name="x"/> is Acrobat's spelling for an empty value.
+                    finish_field(
+                        attribute(&event, "name"),
+                        String::new(),
+                        &mut values,
+                        &mut report,
+                    );
+                }
+                Ok(Event::Text(event)) => {
+                    if in_value {
+                        current_value.push_str(
+                            &quick_xml::escape::unescape(event.as_ref()).unwrap_or_default(),
+                        );
+                    }
+                }
+                Ok(Event::GeneralRef(reference)) => {
+                    // Entities arrive as their own events, not as text: without this arm "a & b"
+                    // reads back as "a  b", with the character simply missing. Same trap the
+                    // annotation parser above records, and the same helper resolves it.
+                    if in_value {
+                        if let Some(character) =
+                            super::reference_char(reference.into_inner().as_ref())
+                        {
+                            current_value.push(character);
+                        }
+                    }
+                }
+                Ok(Event::End(event)) => match event.name().as_ref() {
+                    "value" => in_value = false,
+                    "field" if in_field => {
+                        in_field = false;
+                        in_value = false;
+                        finish_field(
+                            current_name.take(),
+                            std::mem::take(&mut current_value).trim().to_string(),
+                            &mut values,
+                            &mut report,
+                        );
+                    }
+                    "fields" => in_fields = false,
+                    _ => {}
+                },
+                Ok(_) => {}
+            }
+        }
+
+        Ok((values, report))
+    }
+
+    fn finish_field(
+        name: Option<String>,
+        value: String,
+        values: &mut Vec<FieldValue>,
+        report: &mut FormDataReport,
+    ) {
+        match name {
+            Some(name) if !name.trim().is_empty() => values.push(FieldValue {
+                name: name.trim().to_string(),
+                value,
+            }),
+            _ => report.skipped_nameless += 1,
+        }
+    }
+
+    fn attribute(event: &BytesStart<'_>, wanted: &str) -> Option<String> {
+        event
+            .attributes()
+            .flatten()
+            .find(|attribute| attribute.key.as_ref() == wanted)
+            .map(|attribute| attribute.value.into_owned())
+    }
+
+    /// One value per name: the last one wins, and the number of collapses is reported.
+    ///
+    /// Last-wins rather than first-wins because Acrobat writes the *current* state last in a radio
+    /// group whose earlier widgets were also on. The report is what keeps that choice visible —
+    /// without it, "one name produced two values" is a fact only this function knows.
+    pub fn values(parsed: &[FieldValue], report: &mut FormDataReport) -> BTreeMap<String, String> {
+        let mut resolved = BTreeMap::new();
+        for field in parsed {
+            if resolved
+                .insert(field.name.clone(), field.value.clone())
+                .is_some()
+            {
+                report.collapsed_duplicates += 1;
+            }
+        }
+        report.imported = resolved.len();
+        resolved
+    }
+
+    /// Writes form values as XFDF, so a fill can be handed to another document or another tool.
+    pub fn export(values: &BTreeMap<String, String>) -> Result<String, AppError> {
+        let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+        write(
+            &mut writer,
+            Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)),
+        )?;
+
+        let mut root = BytesStart::new("xfdf");
+        root.push_attribute(("xmlns", super::XFDF_NAMESPACE));
+        write(&mut writer, Event::Start(root))?;
+        write(&mut writer, Event::Start(BytesStart::new("fields")))?;
+
+        for (name, value) in values {
+            let mut field = BytesStart::new("field");
+            field.push_attribute(("name", name.as_str()));
+            write(&mut writer, Event::Start(field))?;
+            write(&mut writer, Event::Start(BytesStart::new("value")))?;
+            write(&mut writer, Event::Text(BytesText::new(value)))?;
+            write(
+                &mut writer,
+                Event::End(quick_xml::events::BytesEnd::new("value")),
+            )?;
+            write(
+                &mut writer,
+                Event::End(quick_xml::events::BytesEnd::new("field")),
+            )?;
+        }
+
+        write(
+            &mut writer,
+            Event::End(quick_xml::events::BytesEnd::new("fields")),
+        )?;
+        write(
+            &mut writer,
+            Event::End(quick_xml::events::BytesEnd::new("xfdf")),
+        )?;
+
+        String::from_utf8(writer.into_inner()).map_err(|error| {
+            AppError::Other(format!("XFDF export produced invalid UTF-8: {error}"))
+        })
+    }
+
+    fn write(writer: &mut Writer<Vec<u8>>, event: Event<'_>) -> Result<(), AppError> {
+        writer
+            .write_event(event)
+            .map_err(|error| AppError::Other(format!("could not write XFDF: {error}")))
     }
 }
