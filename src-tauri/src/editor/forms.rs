@@ -71,6 +71,14 @@ pub struct FormField {
     pub read_only: bool,
     /// `/Ff` bit 17 for a button — the field is a radio group rather than a set of checkboxes.
     pub radio: bool,
+    /// The zero-based page each entry of [`rects`](Self::rects) sits on, in the same order.
+    ///
+    /// `None` for a rect whose page could not be resolved. This is not an error: `/P` is optional in
+    /// ISO 32000-1 and a widget need not be reachable from any page's `/Annots`. The UI must not draw
+    /// an unresolved rect on page 0 — an input box over unrelated content is worse than an absent one
+    /// — so the absence is carried through rather than guessed (design §10.1).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rect_pages: Vec<Option<u32>>,
 }
 
 impl FormField {
@@ -393,9 +401,14 @@ fn merge_field(into: &mut FormField, from: FormField) {
             into.states.push(state);
         }
     }
-    for rect in from.rects {
+    // `rect_pages` is parallel to `rects`, so a rect that survives the dedup must carry its page
+    // with it. Zipping rather than merging the two lists separately is what keeps them aligned: a
+    // page list that drifted out of step would place a widget on another widget's page.
+    for (index, rect) in from.rects.into_iter().enumerate() {
         if !into.rects.contains(&rect) {
             into.rects.push(rect);
+            into.rect_pages
+                .push(from.rect_pages.get(index).copied().flatten());
         }
     }
     for option in from.options {
@@ -442,6 +455,7 @@ fn describe_field(
 
     let mut states = Vec::new();
     let mut rects = Vec::new();
+    let mut rect_pages = Vec::new();
     if field_type == "Btn" {
         // Read the on-states from `/AP /N`, of every widget in the field.
         let widgets: Vec<ObjectId> = if is_widget {
@@ -469,6 +483,7 @@ fn describe_field(
             };
             if let Some(rect) = widget_dict.get(b"Rect").ok().and_then(rect_of) {
                 rects.push(rect);
+                rect_pages.push(page_of_widget(document, widget));
             }
             for state in appearance_states(widget_dict) {
                 if state != "Off" && !states.contains(&state) {
@@ -482,6 +497,7 @@ fn describe_field(
             .and_then(rect_of)
         {
             rects.push(rect);
+            rect_pages.push(page_of_widget(document, id));
         }
     }
 
@@ -521,9 +537,58 @@ fn describe_field(
         options,
         selected_indices,
         rects,
+        rect_pages,
         read_only: flags & 1 != 0,
         radio: flags & 32768 != 0,
     }
+}
+
+/// The zero-based page a widget sits on, or `None` when the document does not say (design §10.1).
+///
+/// Two routes, and either can be the only one a given producer gives us:
+///
+/// 1. `/P` — the direct statement. Both committed form fixtures carry it, but it is optional in
+///    ISO 32000-1, so its absence is a shape to handle rather than a broken file.
+/// 2. The page's `/Annots` — the containment relation. A widget listed in a page's `/Annots` is on
+///    that page by definition, which makes this the authority when `/P` is missing.
+///
+/// `/P` is checked first because it needs no page walk. `None` is returned rather than a default:
+/// a rect drawn on the wrong page puts an input box over unrelated content, so an unresolved page is
+/// carried to the caller instead of being guessed onto page 0.
+fn page_of_widget(document: &Document, widget_id: ObjectId) -> Option<u32> {
+    if let Some(page_id) = document
+        .get_object(widget_id)
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .and_then(|dictionary| dictionary.get(b"P").ok())
+        .and_then(|page| page.as_reference().ok())
+    {
+        // `get_pages()` is keyed 1-based, which is the PDF page label; the UI counts from zero.
+        return document
+            .get_pages()
+            .iter()
+            .find(|(_, id)| **id == page_id)
+            .map(|(number, _)| number.saturating_sub(1) as u32);
+    }
+
+    document
+        .get_pages()
+        .iter()
+        .find(|(_, page_id)| {
+            document
+                .get_object(**page_id)
+                .ok()
+                .and_then(|object| object.as_dict().ok())
+                .and_then(|page| page.get(b"Annots").ok())
+                .and_then(|annots| annots.as_array().ok())
+                .map(|annots| {
+                    annots
+                        .iter()
+                        .any(|entry| entry.as_reference().ok() == Some(widget_id))
+                })
+                .unwrap_or(false)
+        })
+        .map(|(number, _)| number.saturating_sub(1) as u32)
 }
 
 /// The on-state key names under `/AP /N`.
@@ -1228,6 +1293,109 @@ mod tests {
         assert!(
             !target.exists(),
             "a refused fill must not leave a file behind at the target path"
+        );
+    }
+
+    /// §10.1: a widget's page comes from `/P`, and it is the page `/P` names, not page 0.
+    ///
+    /// The fixture puts the field on page 2 of 2. A reader that defaulted to zero, or that returned
+    /// whichever page it saw first, passes a one-page fixture and fails this one.
+    #[test]
+    fn a_widgets_page_is_read_from_its_p_entry() {
+        let form = open_fixture(fixture_bytes(testpdf::form_field_on_second_page()));
+        let field = form.field("second").expect("the field is read");
+        assert_eq!(
+            field.rect_pages,
+            vec![Some(1)],
+            "the field is on the second page (zero-based 1), which is what /P says"
+        );
+    }
+
+    /// §10.1: with `/P` absent, the page's `/Annots` is the authority.
+    ///
+    /// `/P` is optional in ISO 32000-1, so a producer may omit it. Without this fallback the overlay
+    /// draws nothing for a form the user can see — the silent-nothing shape D6 is about.
+    #[test]
+    fn a_widget_without_a_p_entry_is_placed_by_the_pages_annots() {
+        let form = open_fixture(fixture_bytes(testpdf::form_field_without_page_entry()));
+        let field = form.field("unstated").expect("the field is read");
+        assert_eq!(
+            field.rect_pages,
+            vec![Some(0)],
+            "the widget is listed in the only page's /Annots, so that page is authoritative"
+        );
+    }
+
+    /// §10.1: a field neither `/P` nor any `/Annots` claims is read, and resolves to no page.
+    ///
+    /// The alternative — placing it on page 0 — draws an input box over unrelated content, which is
+    /// worse than an absent one. Absence has to be carried, not defaulted.
+    #[test]
+    fn a_widget_on_no_page_is_read_with_no_page_rather_than_placed_on_the_first() {
+        let form = open_fixture(fixture_bytes(testpdf::form_field_on_no_page()));
+        let field = form.field("orphan").expect("the field is still read and listed");
+        assert_eq!(
+            field.rect_pages,
+            vec![None],
+            "an unresolvable page must stay unresolved, never default to 0"
+        );
+        assert_eq!(
+            field.rects.len(),
+            field.rect_pages.len(),
+            "rect_pages is parallel to rects; a length mismatch would misplace every later rect"
+        );
+    }
+
+    /// §10.1 on the real-producer file: both widgets resolve to the page their `/P` names.
+    ///
+    /// The synthetic fixtures and a real writer can disagree about anything, so the LibreOffice file
+    /// is checked separately. Its two widgets both carry `/P 1 0 R`, so both are page 0.
+    #[test]
+    fn the_real_producer_file_resolves_every_widget_to_a_page() {
+        let source = std::fs::read("tests/fixtures/libreoffice-checkbox-form.pdf")
+            .expect("the real-producer fixture is committed");
+        let form = open_bytes(source).expect("the fixture opens");
+        assert!(!form.fields().is_empty(), "it has fields to resolve");
+        for field in form.fields() {
+            assert_eq!(
+                field.rects.len(),
+                field.rect_pages.len(),
+                "{}: rect_pages must stay parallel to rects",
+                field.name
+            );
+            assert_eq!(
+                field.rect_pages,
+                vec![Some(0); field.rects.len()],
+                "{}: every widget of this one-page file sits on page 0",
+                field.name
+            );
+        }
+    }
+
+    /// §10.1 through the **merge** path: a radio group's two widgets keep their pages aligned.
+    ///
+    /// A radio group reaches `describe_field` once per kid, so its rects arrive through
+    /// `merge_field` rather than a single construction. That is the only path where `rects` and
+    /// `rect_pages` are appended in separate calls, so it is the only place they can drift out of
+    /// step — and a page list one entry short would put every rect after the gap on the wrong page.
+    #[test]
+    fn a_merged_radio_group_keeps_each_rect_with_its_own_page() {
+        let form = open_fixture(fixture_bytes(testpdf::form_radio_group()));
+        let group = form.field("color").expect("the group is read once, under its parent name");
+        assert_eq!(
+            group.rects.len(),
+            2,
+            "both kids must be listed as rects, or the group shows one target"
+        );
+        assert_eq!(
+            group.rect_pages.len(),
+            group.rects.len(),
+            "rect_pages must grow with rects through merge, not behind it"
+        );
+        assert_eq!(
+            group.rect_pages,
+            vec![Some(0), Some(0)],
+            "both kids sit on the single page, and each carries its own page"
         );
     }
 

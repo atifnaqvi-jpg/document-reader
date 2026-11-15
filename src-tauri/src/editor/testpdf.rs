@@ -3756,6 +3756,126 @@ pub fn form_with_empty_fields_array() -> Document {
     })
 }
 
+/// A two-page form whose text field sits on the **second** page, named by `/P` (design §10.1).
+///
+/// Page 2 rather than page 1 on purpose: a reader that defaults to page 0, or that returns the first
+/// page it finds, passes a one-page fixture and fails this one. The widget is also listed in the
+/// second page's `/Annots`, so this fixture agrees with itself — which is what a real producer emits.
+pub fn form_field_on_second_page() -> Document {
+    let mut document = Document::with_version("1.7");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(winansi_helvetica());
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let first_content = document.add_object(page_body(Vec::new()));
+    let first_page = document.new_object_id();
+    let second_page = document.new_object_id();
+
+    // Built after both page ids are known, so `/P` names page 2 rather than the page the builder
+    // happened to have in hand.
+    let widget = text_widget(
+        &mut document,
+        "second",
+        "",
+        false,
+        false,
+        [72, 700, 300, 724],
+        second_page,
+    );
+
+    document.objects.insert(
+        first_page,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(612), Object::Integer(792),
+            ],
+            "Contents" => first_content,
+            "Resources" => resources_id,
+            "Annots" => Object::Array(Vec::new()),
+        }),
+    );
+    document.objects.insert(
+        second_page,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(612), Object::Integer(792),
+            ],
+            "Contents" => first_content,
+            "Resources" => resources_id,
+            "Annots" => Object::Array(vec![Object::Reference(widget)]),
+        }),
+    );
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(first_page), Object::Reference(second_page)],
+            "Count" => Object::Integer(2),
+        }),
+    );
+
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "AcroForm" => dictionary! {
+            "Fields" => Object::Array(vec![Object::Reference(widget)]),
+            "DA" => Object::string_literal("/F1 0 Tf 0 g"),
+            "DR" => dictionary! { "Font" => dictionary! { "F1" => Object::Reference(font_id) } },
+        },
+    });
+    document.trailer.set("Root", catalog_id);
+    document.renumber_objects();
+    document
+}
+
+/// A form whose widget carries **no `/P`** and is listed in the page's `/Annots` (design §10.1).
+///
+/// `/P` is optional in ISO 32000-1, so a producer can omit it. Without the `/Annots` fallback this
+/// field resolves to no page and the overlay draws nothing — the silent-nothing failure D6 is about.
+pub fn form_field_without_page_entry() -> Document {
+    form_document(|document, page_id| {
+        let widget = text_widget(document, "unstated", "", false, false, [72, 700, 300, 724], page_id);
+        // The builder sets `/P`; removing it is the whole point of this fixture, so the `/Annots`
+        // entry `form_document` writes becomes the only route left.
+        if let Some(Object::Dictionary(dictionary)) = document.objects.get_mut(&widget) {
+            dictionary.remove(b"P");
+        }
+        FormSpec {
+            widgets: vec![widget],
+            parent_fields: Vec::new(),
+            form_extra: Dictionary::new(),
+        }
+    })
+}
+
+/// A form whose widget is reachable from neither `/P` nor any page's `/Annots`.
+///
+/// The honest-absence case: the field must be read (it is in `/Fields`) and must resolve to no page,
+/// rather than being placed on page 0 over unrelated content.
+pub fn form_field_on_no_page() -> Document {
+    form_document(|document, page_id| {
+        let widget = text_widget(document, "orphan", "", false, false, [72, 700, 300, 724], page_id);
+        if let Some(Object::Dictionary(dictionary)) = document.objects.get_mut(&widget) {
+            dictionary.remove(b"P");
+        }
+        FormSpec {
+            // `widgets` would add it to the page's `/Annots`; `parent_fields` only adds it to
+            // `/AcroForm /Fields`, which is exactly "a field no page claims".
+            widgets: Vec::new(),
+            parent_fields: vec![widget],
+            form_extra: Dictionary::new(),
+        }
+    })
+}
+
 /// A read-only text field: `/Ff` bit 1. W6's I-F4 refusal has nothing to refuse without it.
 pub fn form_read_only_field() -> Document {
     form_document(|document, page_id| FormSpec {
