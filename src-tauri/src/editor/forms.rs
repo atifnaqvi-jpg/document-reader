@@ -99,7 +99,6 @@ struct FieldLocations {
 
 /// A form whose fields were read successfully, plus where each one lives.
 pub struct OpenForm {
-    document: Document,
     source_bytes: Vec<u8>,
     fields: Vec<FormField>,
     locations: BTreeMap<String, FieldLocations>,
@@ -151,7 +150,6 @@ pub fn open_bytes(source_bytes: Vec<u8>) -> Result<OpenForm, AppError> {
     collect_fields(&document, None, &mut fields, &mut locations)?;
 
     Ok(OpenForm {
-        document,
         source_bytes,
         fields,
         locations,
@@ -261,7 +259,7 @@ fn collect_fields(
         let kids: Vec<Object> = dictionary
             .get(b"Kids")
             .and_then(Object::as_array)
-            .map(|kids| kids.clone())
+            .cloned()
             .unwrap_or_default();
 
         // Whether this dictionary is itself a widget: an annotation with a `/Subtype` and a
@@ -983,13 +981,8 @@ mod tests {
         open_bytes(bytes).expect("the fixture opens")
     }
 
-    trait AsBytes {
-        fn as_bytes(self) -> Vec<u8>;
-    }
-    impl AsBytes for Document {
-        fn as_bytes(mut self) -> Vec<u8> {
-            testpdf::bytes(&mut self)
-        }
+    fn fixture_bytes(document: Document) -> Vec<u8> {
+        testpdf::bytes(&document)
     }
 
     /// The three button spellings must each be read back as the document wrote them.
@@ -1003,7 +996,7 @@ mod tests {
             ("On", testpdf::form_checkbox_on),
             ("yes", testpdf::form_checkbox_lowercase_yes),
         ] {
-            let form = open_fixture(build().as_bytes());
+            let form = open_fixture(fixture_bytes(build()));
             let field = form
                 .field("agree")
                 .unwrap_or_else(|| panic!("the {spelling} fixture has a field named agree"));
@@ -1024,7 +1017,7 @@ mod tests {
     /// against, so the test names it.
     #[test]
     fn a_radio_groups_states_are_the_union_of_its_kids_appearances() {
-        let form = open_fixture(testpdf::form_radio_group().as_bytes());
+        let form = open_fixture(fixture_bytes(testpdf::form_radio_group()));
         let field = form.field("color").expect("the radio group is named color");
         assert_eq!(field.field_type, "Btn");
         assert!(
@@ -1046,7 +1039,7 @@ mod tests {
     /// indistinguishable from "nothing is selected".
     #[test]
     fn the_off_state_is_not_listed_as_a_fill_value() {
-        let form = open_fixture(testpdf::form_checkbox_yes().as_bytes());
+        let form = open_fixture(fixture_bytes(testpdf::form_checkbox_yes()));
         let field = form.field("agree").expect("field");
         assert!(
             !field.states.iter().any(|state| state == "Off"),
@@ -1057,7 +1050,7 @@ mod tests {
 
     #[test]
     fn text_fields_carry_their_type_flags_and_rects() {
-        let form = open_fixture(testpdf::form_text_fields().as_bytes());
+        let form = open_fixture(fixture_bytes(testpdf::form_text_fields()));
         let names: Vec<&str> = form.fields().iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["given", "notes"]);
 
@@ -1077,7 +1070,7 @@ mod tests {
 
     #[test]
     fn choice_fields_expose_their_options_and_selected_indices() {
-        let form = open_fixture(testpdf::form_choice_fields().as_bytes());
+        let form = open_fixture(fixture_bytes(testpdf::form_choice_fields()));
 
         let pick = form.field("pick").expect("the combo");
         assert_eq!(pick.field_type, "Ch");
@@ -1097,7 +1090,7 @@ mod tests {
 
     #[test]
     fn a_read_only_field_is_listed_but_not_fillable() {
-        let form = open_fixture(testpdf::form_read_only_field().as_bytes());
+        let form = open_fixture(fixture_bytes(testpdf::form_read_only_field()));
         let locked = form.field("locked").expect("locked");
         assert!(locked.read_only, "/Ff bit 1");
         assert!(
@@ -1109,7 +1102,7 @@ mod tests {
     /// D-F6: an XFA form is refused by name rather than half-filled.
     #[test]
     fn an_xfa_form_is_refused_rather_than_partially_filled() {
-        let error = open_bytes(testpdf::form_with_xfa().as_bytes())
+        let error = open_bytes(fixture_bytes(testpdf::form_with_xfa()))
             .expect_err("an XFA form must not open for filling");
         assert_eq!(
             error.code(),
@@ -1121,7 +1114,7 @@ mod tests {
     /// A document with no form is not an error; it has no fields.
     #[test]
     fn a_document_without_a_form_has_no_fields() {
-        let form = open_fixture(testpdf::blank_page().as_bytes());
+        let form = open_fixture(fixture_bytes(testpdf::blank_page()));
         assert!(form.fields().is_empty());
     }
 
@@ -1132,7 +1125,8 @@ mod tests {
     /// happy-path test would pass while the other two lie to the user.
     #[test]
     fn every_field_type_reads_back_the_value_that_was_written() {
-        let cases: [(&str, fn() -> Document, &str, &str); 4] = [
+        type Case = (&'static str, fn() -> Document, &'static str, &'static str);
+        let cases: [Case; 4] = [
             ("text", testpdf::form_text_fields, "given", "Ada Lovelace"),
             (
                 "multiline",
@@ -1148,7 +1142,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("temp dir");
             let source = dir.path().join("source.pdf");
             let target = dir.path().join("filled.pdf");
-            std::fs::write(&source, testpdf::bytes(&mut build())).expect("write fixture");
+            std::fs::write(&source, testpdf::bytes(&build())).expect("write fixture");
 
             let outcome = fill_to(
                 &source,
@@ -1183,7 +1177,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        let source_bytes = testpdf::bytes(&mut testpdf::form_checkbox_yes());
+        let source_bytes = testpdf::bytes(&testpdf::form_checkbox_yes());
         std::fs::write(&source, &source_bytes).expect("write fixture");
 
         let outcome = fill_to(
@@ -1220,7 +1214,7 @@ mod tests {
         let source = dir.path().join("source.pdf");
         let first = dir.path().join("first.pdf");
         let second = dir.path().join("second.pdf");
-        std::fs::write(&source, testpdf::bytes(&mut testpdf::form_text_fields()))
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_text_fields()))
             .expect("write fixture");
 
         fill_to(
@@ -1263,7 +1257,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        std::fs::write(&source, testpdf::bytes(&mut testpdf::form_checkbox_on()))
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_checkbox_on()))
             .expect("write fixture");
 
         let error = fill_to(
@@ -1295,7 +1289,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        std::fs::write(&source, testpdf::bytes(&mut testpdf::form_text_fields()))
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_text_fields()))
             .expect("write fixture");
 
         let error = fill_to(
@@ -1320,11 +1314,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        std::fs::write(
-            &source,
-            testpdf::bytes(&mut testpdf::form_read_only_field()),
-        )
-        .expect("write fixture");
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_read_only_field()))
+            .expect("write fixture");
 
         let error = fill_to(
             &source,
@@ -1351,7 +1342,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        std::fs::write(&source, testpdf::bytes(&mut testpdf::form_text_fields()))
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_text_fields()))
             .expect("write fixture");
 
         let error = fill_to(
@@ -1389,7 +1380,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        std::fs::write(&source, testpdf::bytes(&mut testpdf::form_choice_fields()))
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_choice_fields()))
             .expect("write fixture");
 
         fill_to(
@@ -1422,7 +1413,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        std::fs::write(&source, testpdf::bytes(&mut testpdf::form_radio_group()))
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_radio_group()))
             .expect("write fixture");
 
         fill_to(
@@ -1467,7 +1458,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.pdf");
         let target = dir.path().join("filled.pdf");
-        std::fs::write(&source, testpdf::bytes(&mut testpdf::form_text_fields()))
+        std::fs::write(&source, testpdf::bytes(&testpdf::form_text_fields()))
             .expect("write fixture");
 
         fill_to(
@@ -1513,7 +1504,7 @@ mod tests {
     /// not change.
     #[test]
     fn a_write_the_saved_file_does_not_carry_is_refused_rather_than_reported_as_filled() {
-        let readback = open_fixture(testpdf::form_checkbox_on().as_bytes());
+        let readback = open_fixture(fixture_bytes(testpdf::form_checkbox_on()));
         let field_id = readback
             .locations
             .get("agree")
@@ -1563,7 +1554,7 @@ mod tests {
     /// A write naming a field the readback does not have is also a non-persist, not a silent pass.
     #[test]
     fn a_write_for_a_field_missing_from_the_saved_file_is_refused() {
-        let readback = open_fixture(testpdf::form_text_fields().as_bytes());
+        let readback = open_fixture(fixture_bytes(testpdf::form_text_fields()));
         let field_id = readback
             .locations
             .get("given")

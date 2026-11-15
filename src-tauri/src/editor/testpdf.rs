@@ -3462,6 +3462,7 @@ fn text_widget(
 /// `selected` is a zero-based index into `/Opt`, written as `/I` plus the matching `/V`. A value
 /// rather than a flag because `/I` and `/V` have to agree: a fixture carrying one without the other
 /// would let a writer that updated only one of them pass.
+#[allow(clippy::too_many_arguments)]
 fn choice_widget(
     document: &mut Document,
     name: &str,
