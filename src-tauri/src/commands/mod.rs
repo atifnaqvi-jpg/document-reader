@@ -15,6 +15,7 @@ use crate::model::{
     Annotation, AnnotationKind, AnnotationStatus, AppError, Bookmark, DocumentMeta, Format,
     LibraryEntry, RedactionKind, RedactionMark, RenderedPage, SearchHit,
 };
+use crate::editor::forms::FormField;
 use crate::provider::ReaderProvider;
 use crate::render::RenderService;
 
@@ -748,6 +749,87 @@ pub fn save_edits(db: State<'_, Db>, document_id: String) -> Result<String, AppE
     // rasters of the original stay correct. Opening the edited file routes through
     // `open_document`, which invalidates by path (P2-D6).
     Ok(target.to_string_lossy().to_string())
+}
+
+/// The form fields of a document, with the page each widget sits on (P3.3 D6, design §10.1).
+///
+/// This is the read the overlay needs: rectangles, type, current value, name and page. Returns an
+/// empty vector for a document with no form rather than an error, because the *frontend* decides how
+/// to present "no form" and a viewer that is merely showing a flat PDF must not raise. The fill path
+/// refuses by name instead (D5, `NO_FILLABLE_FORM_FIELDS`) because a fill *request* on a flat
+/// document is a request that cannot be met.
+#[tauri::command]
+pub fn list_form_fields(db: State<'_, Db>, document_id: String) -> Result<Vec<FormField>, AppError> {
+    let path = document_path(&db, &document_id)?;
+    let bytes = std::fs::read(&path)
+        .map_err(|error| AppError::Other(format!("could not read {path}: {error}")))?;
+    Ok(crate::editor::forms::open_bytes(bytes)?.fields().to_vec())
+}
+
+/// The outcome of one successful fill: where the copy was written, and its fields as they now read.
+///
+/// The fields are returned rather than left to a second call because they are the only honest
+/// answer to "what is the value now". The alternative — having the frontend keep the typed string
+/// as the field's value — would show a value the file might not contain, which is exactly the class
+/// of lie this phase's first invariant (I-F1) forbids. Measured from the written bytes, not from
+/// the request.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillResult {
+    pub path: String,
+    pub fields: Vec<FormField>,
+}
+
+/// Fills one form field and writes a **new** sibling copy, never the original (P3.3 D6, P2-D2).
+///
+/// One field per call, not a batch: the overlay commits a field when the user leaves it, so a batch
+/// shape would have to accumulate values the UI does not have. The engine's batch API stays available
+/// to other callers; this command is the one the surface uses.
+///
+/// The value is written by the engine, which takes a button's on-state from the field's own `/AP /N`
+/// keys rather than from any spelling this layer could pass (D-F3, design §10.4). The caller supplies
+/// a field name and a value; it cannot supply a state name that the document does not have.
+///
+/// Read-only fields refuse with `FORM_FIELD_READ_ONLY` (D-F7, I-F4) and a document with no form
+/// refuses with `NO_FILLABLE_FORM_FIELDS` (D5) — both from the engine, so the frontend's own
+/// pre-checks are a fast path and never the guard.
+#[tauri::command]
+pub fn fill_form_field(
+    db: State<'_, Db>,
+    document_id: String,
+    field: String,
+    value: String,
+) -> Result<FillResult, AppError> {
+    let original_path = document_path(&db, &document_id)?;
+    refuse_if_certification_forbids(
+        &original_path,
+        crate::editor::signature::editpolicy::EditKind::FormFill,
+    )?;
+
+    let target = crate::editor::save::next_edited_path(Path::new(&original_path), |candidate| {
+        candidate.exists()
+    })?;
+    let outcome = crate::editor::forms::fill_to(
+        Path::new(&original_path),
+        &target,
+        &[crate::editor::forms::FillValue {
+            name: field,
+            value,
+        }],
+        |candidate| candidate.exists(),
+    )?;
+
+    // Re-read the copy that was just written. `fill_to` verifies the write before returning, so
+    // this is a second independent read of the bytes on disk rather than a second opinion on the
+    // same in-memory document.
+    let written = std::fs::read(&outcome.path)
+        .map_err(|error| AppError::Other(format!("could not read {}: {error}", outcome.path)))?;
+    let fields = crate::editor::forms::open_bytes(written)?.fields().to_vec();
+
+    Ok(FillResult {
+        path: outcome.path,
+        fields,
+    })
 }
 
 /// Re-inserts a deleted annotation under its original id, for undo (P2-D7).

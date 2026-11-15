@@ -11,6 +11,8 @@ import type {
   ContentOperation,
   DecryptOutcome,
   DocumentMeta,
+  FillResult,
+  FormField,
   IndexStatus,
   IndexSummary,
   LibraryEntry,
@@ -254,6 +256,31 @@ export const nextSavePath = (documentId: string) =>
  */
 export const saveEdits = (documentId: string) =>
   invoke<string>("save_edits", { documentId });
+
+/**
+ * The form fields of a document, with the page each widget sits on (P3.3 D6, design §10.1).
+ *
+ * `rectPages` is parallel to `rects`: entry `i` is the zero-based page for `rects[i]`, or
+ * `null` when the document does not say. A `null` page is not drawn — see `FormOverlay`.
+ *
+ * Returns an empty array for a document with no form. That is a *read*: a viewer showing a
+ * flat PDF must not raise. Filling one refuses by name instead (D5).
+ */
+export const listFormFields = (documentId: string) =>
+  invoke<FormField[]>("list_form_fields", { documentId });
+
+/**
+ * Fills one field and writes a new sibling copy (P3.3 D6, P2-D2).
+ *
+ * One field per call because the overlay commits on blur. A button's on-state spelling is chosen
+ * by the engine from the field's own appearance keys (D-F3); this layer passes only a field name
+ * and a value, so it cannot invent a state the document does not carry.
+ *
+ * Refuses with `FORM_FIELD_READ_ONLY` (D-F7) or `NO_FILLABLE_FORM_FIELDS` (D5). The returned
+ * `fields` are re-read from the copy that was written, not echoed from the request.
+ */
+export const fillFormField = (documentId: string, field: string, value: string) =>
+  invoke<FillResult>("fill_form_field", { documentId, field, value });
 
 /**
  * Overwrites the original file in place with the document's annotations (P2-D2).

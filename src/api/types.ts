@@ -257,6 +257,45 @@ export interface RenderedPage {
   height: number;
 }
 
+/**
+ * One form field, mirroring `editor::forms::FormField` (P3.3).
+ *
+ * `rects` and `rectPages` are parallel arrays and must stay so: entry `i` of
+ * `rectPages` is the zero-based page for `rects[i]`. A `null` page means the
+ * document does not say where the widget is — it is *not* page 0. The overlay
+ * must skip those rather than guess, because an input box drawn over unrelated
+ * content is worse than an absent one.
+ *
+ * `states` excludes `Off` deliberately: it lists the values a button can be
+ * filled *with*, and "off" is not one of them.
+ */
+export interface FormField {
+  name: string;
+  fieldType: string;
+  flags: number;
+  value: string | null;
+  states: string[];
+  options: string[];
+  selectedIndices: number[];
+  rects: [number, number, number, number][];
+  rectPages?: (number | null)[];
+  readOnly: boolean;
+  radio: boolean;
+}
+
+/**
+ * The result of one successful fill (P3.3 D6).
+ *
+ * `fields` is the document's field list **as re-read from the written copy**, so the overlay shows
+ * what the file contains rather than what the user typed. Those are usually the same and are
+ * allowed to differ — a checkbox normalising a state spelling, for one — and the file is the one
+ * that is true.
+ */
+export interface FillResult {
+  path: string;
+  fields: FormField[];
+}
+
 export interface AppError {
   code: string;
   message: string;

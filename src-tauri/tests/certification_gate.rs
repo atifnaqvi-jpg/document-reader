@@ -113,6 +113,10 @@ const GOVERNED: &[(&str, &str)] = &[
     ("remove_annotation_and_gc", "Annotation"),
     // Baking the annotation layer into the original file is the same edit, applied destructively.
     ("overwrite_edits", "Annotation"),
+    // Filling a form field already present in the document. `EditKind::FormFill` exists for exactly
+    // this and is the kind ISO 32000-1 §12.8.2.2 permits at `P=1` only for a fill, so naming
+    // `Content` instead would refuse a fill the certification allows.
+    ("fill_form_field", "FormFill"),
     // Content surgery. Refused at every level, `P=3` included.
     ("rotate_page", "Content"),
     ("delete_pages", "Content"),

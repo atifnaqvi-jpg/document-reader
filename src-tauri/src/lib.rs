@@ -83,6 +83,8 @@ pub fn run() {
             commands::next_save_path,
             commands::restore_annotation,
             commands::save_edits,
+            commands::list_form_fields,
+            commands::fill_form_field,
             commands::overwrite_edits,
             commands::rotate_page,
             commands::delete_pages,
