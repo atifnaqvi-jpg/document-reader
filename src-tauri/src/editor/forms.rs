@@ -1638,7 +1638,7 @@ mod tests {
     /// text so a reworded message cannot make it pass. It also checks no file was produced, because
     /// a gate that refuses after the write has already told the user their fill worked.
     #[test]
-    fn the_certification_gate_refuses_a_P1_fill_and_permits_P2_and_P3() {
+    fn the_certification_gate_refuses_a_p1_fill_and_permits_p2_and_p3() {
         for level in [2i64, 3] {
             let source_bytes = certified_form(level);
             // Guard the guard: if `certified_form` stopped producing a readable level, the
