@@ -253,6 +253,52 @@ describe("the overlay collects edits without writing them", () => {
     expect(backend.callsTo("save_form_fields")[0].values).toEqual([{ name: "agree", value: "Yes" }]);
   });
 
+  it("draws a tick the moment the box is clicked (D9)", async () => {
+    // The reported defect: the box rendered unticked and clicking did nothing visible. Under D8
+    // no write happens, so the raster cannot change — the mark must be drawn by the overlay.
+    // Asserting on the glyph and not only on `aria-pressed` is the whole point: a state attribute
+    // a sighted user cannot see is exactly what "clicking does nothing" looked like.
+    await renderWithFields([checkboxField()]);
+    const box = screen.getByRole("button", { name: "agree" });
+
+    expect(box.querySelector(".form-widget-tick")).toBeNull();
+
+    await userEvent.click(box);
+
+    expect(box.getAttribute("aria-pressed")).toBe("true");
+    const tick = box.querySelector(".form-widget-tick");
+    expect(tick, "a clicked box must show a drawn tick, not just a tint").not.toBeNull();
+    // Still no write: the mark is local state until the save (D8).
+    expect(backend.callsTo("save_form_fields")).toHaveLength(0);
+    expect(backend.callsTo("fill_form_field")).toHaveLength(0);
+
+    // Clicking again unticks it, and the glyph goes with the state.
+    await userEvent.click(box);
+    expect(box.getAttribute("aria-pressed")).toBe("false");
+    expect(box.querySelector(".form-widget-tick")).toBeNull();
+  });
+
+  it("a box whose /V is Off and states is [Yes] is clickable and toggles (D9)", async () => {
+    // The exact shape the forms engine reports for a reportlab 5.1.0 checkbox: `/V /Off`, one
+    // on-state `/Yes`. Measured from a generated file rather than assumed.
+    await renderWithFields([checkboxField({ value: "Off", states: ["Yes"] })]);
+    const box = screen.getByRole("button", { name: "agree" }) as HTMLButtonElement;
+
+    expect(box.disabled, "a checkbox with an on-state must be clickable").toBe(false);
+    await userEvent.click(box);
+    expect(box.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("a checkbox the engine reports with no states says why it is inert (D9)", async () => {
+    // The failure mode behind the report: an empty `states` used to produce a *disabled* button
+    // with no explanation. That is a silent skip, which this project bans. It is now drawn inert
+    // with a reason, so an unfillable box reads as unfillable rather than as a broken click.
+    const { container } = await renderWithFields([checkboxField({ states: [] })]);
+    const drawn = container.querySelector('.form-widget-inert[data-field="agree"]');
+    expect(drawn, "an unfillable checkbox must be drawn inert, not disabled and silent").toBeTruthy();
+    expect(drawn?.getAttribute("title")).toMatch(/on state/i);
+  });
+
   it("save is disabled until something is actually changed", async () => {
     backend.on("save_form_fields", () => ({ path: "/p.pdf", fields: [textField()] }));
     await renderWithFields([textField()]);
@@ -331,6 +377,14 @@ describe("the overlay collects edits without writing them", () => {
     const button = screen.getByRole("button", { name: "agree" });
     expect(button.getAttribute("aria-pressed")).toBe("true");
     expect(button.className).toContain("form-widget-checked");
+    // The class is not the claim: a checked box in the file already has a tick in the raster, so a
+    // translucent fill would show *that* tick through the overlay's, offset by a pixel or two.
+    // Opaque is what makes the drawn tick the only one on screen (D7/D9). Asserted on the inline
+    // style because that is where the component sets it — and because a class-name-only assertion
+    // once passed over a 0.45-alpha fill.
+    const background = (button as HTMLElement).style.background;
+    expect(background).toBe("rgb(255, 255, 255)");
+    expect(background).not.toMatch(/rgba/);
   });
 
   it("draws a read-only field inert, with no input to type into", async () => {

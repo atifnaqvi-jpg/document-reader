@@ -3624,6 +3624,110 @@ pub fn form_checkbox_yes() -> Document {
     })
 }
 
+/// A checkbox whose `/AP /N` is an **indirect** reference: `/AP<</N n 0 R>>`.
+///
+/// Legal under ISO 32000-1 (any value may be indirect) and ordinary producer output. It exists
+/// because a reader that dereferences only `/AP` and stops sees an opaque reference where the
+/// states dictionary should be, enumerates no states, and leaves the checkbox untickable — the
+/// reported D9 defect. The shape is measured from a reportlab-style producer, not invented.
+pub fn form_checkbox_indirect_n() -> Document {
+    form_document(|document, page_id| {
+        let (off_id, on_id) = checkbox_appearances(document);
+        let states_id = document.add_object(dictionary! {
+            "Yes" => Object::Reference(on_id),
+            "Off" => Object::Reference(off_id),
+        });
+        let ap_id = document.add_object(dictionary! { "N" => Object::Reference(states_id) });
+        let widget_id = document.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "FT" => "Btn",
+            "T" => Object::string_literal("agree"),
+            "Rect" => rect_array([72, 700, 86, 714]),
+            "F" => Object::Integer(4),
+            "P" => Object::Reference(page_id),
+            "V" => Object::Name(b"Off".to_vec()),
+            "AS" => Object::Name(b"Off".to_vec()),
+            "AP" => Object::Reference(ap_id),
+        });
+        FormSpec {
+            widgets: vec![widget_id],
+            parent_fields: Vec::new(),
+            form_extra: Dictionary::new(),
+        }
+    })
+}
+
+/// A checkbox whose appearance dictionary itself is indirect under `/AP`, with `/N` inline:
+/// `/AP n 0 R` where object `n` is `<</N<</Yes …/Off …>>>>`.
+///
+/// The sibling of [`form_checkbox_indirect_n`] and a separate case: a reader can dereference one
+/// level and not the other, so one fixture cannot prove both hops.
+pub fn form_checkbox_indirect_ap() -> Document {
+    form_document(|document, page_id| {
+        let (off_id, on_id) = checkbox_appearances(document);
+        let ap_id = document.add_object(dictionary! {
+            "N" => dictionary! {
+                "Yes" => Object::Reference(on_id),
+                "Off" => Object::Reference(off_id),
+            },
+        });
+        let widget_id = document.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "FT" => "Btn",
+            "T" => Object::string_literal("agree"),
+            "Rect" => rect_array([72, 700, 86, 714]),
+            "F" => Object::Integer(4),
+            "P" => Object::Reference(page_id),
+            "V" => Object::Name(b"Off".to_vec()),
+            "AS" => Object::Name(b"Off".to_vec()),
+            "AP" => Object::Reference(ap_id),
+        });
+        FormSpec {
+            widgets: vec![widget_id],
+            parent_fields: Vec::new(),
+            form_extra: Dictionary::new(),
+        }
+    })
+}
+
+/// A checkbox whose `/T`, `/V` and `/Rect` are each indirect objects: `/T n 0 R`, `/V n 0 R`,
+/// `/Rect n 0 R`.
+///
+/// ISO 32000-1 permits any value to be indirect, and reportlab writes `/Rect` and `/T` that way.
+/// Each key is a separate hop, so a reader that resolves one but not another still fails here.
+pub fn form_checkbox_indirect_entries() -> Document {
+    form_document(|document, page_id| {
+        let (off_id, on_id) = checkbox_appearances(document);
+        let name_id = document.add_object(Object::string_literal("agree"));
+        let value_id = document.add_object(Object::Name(b"Off".to_vec()));
+        let rect_id = document.add_object(rect_array([72, 700, 86, 714]));
+        let widget_id = document.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "FT" => "Btn",
+            "T" => Object::Reference(name_id),
+            "Rect" => Object::Reference(rect_id),
+            "F" => Object::Integer(4),
+            "P" => Object::Reference(page_id),
+            "V" => Object::Reference(value_id),
+            "AS" => Object::Name(b"Off".to_vec()),
+            "AP" => dictionary! {
+                "N" => dictionary! {
+                    "Yes" => Object::Reference(on_id),
+                    "Off" => Object::Reference(off_id),
+                },
+            },
+        });
+        FormSpec {
+            widgets: vec![widget_id],
+            parent_fields: Vec::new(),
+            form_extra: Dictionary::new(),
+        }
+    })
+}
+
 /// A checkbox whose on-state is `/On`.
 ///
 /// No producer in this repo emits `/On`; it exists because a writer that hardcodes `/Yes` passes

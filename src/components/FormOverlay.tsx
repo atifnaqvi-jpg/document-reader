@@ -109,6 +109,13 @@ export function inertReason(field: FormField): string | null {
   if (field.readOnly) return "Read-only field";
   if (!isFillable(field)) return `Unsupported field type: ${field.fieldType}`;
   if (field.fieldType === "Ch") return "Dropdown and list fields are not fillable in this build";
+  // A button with no on-state names is a push button, or a checkbox whose `/AP /N` this build
+  // could not read. Either way there is no value a click could write, so the box is inert — and
+  // it says so. Reporting it as merely disabled made an unreadable checkbox indistinguishable
+  // from a click that did nothing (P3.3 D9).
+  if (field.fieldType === "Btn" && field.states.length === 0) {
+    return "This button has no on state in the file, so it cannot be ticked here";
+  }
   return null;
 }
 
@@ -190,7 +197,6 @@ export function FormOverlay({ metrics, fields, onPendingChange, savedAt = 0 }: F
         }
 
         if (field.fieldType === "Btn") {
-          const target = buttonFillValue(field);
           // Local intent wins over the stored value while unsaved (P3.3 D8): a click changes what
           // the user *wants*, and only a save changes the file.
           const checked = toggled[field.name] ?? buttonIsSet(field);
@@ -199,16 +205,24 @@ export function FormOverlay({ metrics, fields, onPendingChange, savedAt = 0 }: F
               key={widget.key}
               type="button"
               className={`form-widget form-widget-button${checked ? " form-widget-checked" : ""}`}
-              style={box}
+              // Opaque on purpose (P3.3 D7), for the same reason the text box is: the raster
+              // underneath already draws a checked box's own tick, and a translucent control would
+              // show that mark through the one drawn here — two ticks, slightly offset. Set inline
+              // rather than in CSS so the opacity is a property of this component, which is what
+              // the D7 test asserts.
+              style={{ ...box, background: "#fff" }}
               data-field={field.name}
               aria-label={field.name}
               aria-pressed={checked}
-              disabled={target === null}
-              onClick={() => {
-                if (target === null) return;
-                setToggled((current) => ({ ...current, [field.name]: !checked }));
-              }}
-            />
+              onClick={() => setToggled((current) => ({ ...current, [field.name]: !checked }))}
+            >
+              {/* The tick has to be *drawn*, not implied (P3.3 D9). Nothing is written until the
+                  user saves, so the page raster keeps showing the widget's own unticked
+                  appearance; a tinted box alone reads as "the click did nothing", because the mark
+                  the user is looking for never appears. This glyph is the only feedback a click
+                  can have before the save, so it is a real mark rather than a colour change. */}
+              {checked ? <span className="form-widget-tick" aria-hidden="true" /> : null}
+            </button>
           );
         }
 

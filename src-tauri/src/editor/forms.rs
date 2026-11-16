@@ -184,6 +184,32 @@ pub fn open_bytes(source_bytes: Vec<u8>) -> Result<OpenForm, AppError> {
     })
 }
 
+/// One object, with an indirect reference followed to the object it names.
+///
+/// ISO 32000-1 lets *any* value be indirect, and producers use that freedom: reportlab writes
+/// `/Rect` and `/T` through references, and an appearance dictionary is routinely `/AP 5 0 R`.
+/// A lookup that reads the reference and stops sees `Object::Reference` where it expects a
+/// dictionary, an array or a name. Every such miss is silent — an empty `states` makes a
+/// checkbox untickable rather than raising — so the dereference has to be part of the lookup.
+fn resolve<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Object> {
+    match object {
+        Object::Reference(id) => document.get_object(*id).ok(),
+        other => Some(other),
+    }
+}
+
+/// `dictionary[key]`, following an indirect reference. `None` when absent or unresolvable.
+fn get_resolved<'a>(
+    document: &'a Document,
+    dictionary: &'a lopdf::Dictionary,
+    key: &[u8],
+) -> Option<&'a Object> {
+    dictionary
+        .get(key)
+        .ok()
+        .and_then(|object| resolve(document, object))
+}
+
 /// Whether the catalog's `/AcroForm` carries `/XFA`.
 ///
 /// `/XFA` may be an array of alternating name/stream pairs rather than a single stream, so its
@@ -255,9 +281,7 @@ fn collect_fields(
                 .as_ref()
                 .map(|parent| parent.name.clone())
                 .unwrap_or_default(),
-            field_type: dictionary
-                .get(b"FT")
-                .ok()
+            field_type: get_resolved(document, dictionary, b"FT")
                 .and_then(|ft| ft.as_name().ok())
                 .map(|ft| String::from_utf8_lossy(ft).to_string())
                 .or_else(|| {
@@ -265,9 +289,7 @@ fn collect_fields(
                         .as_ref()
                         .and_then(|parent| parent.field_type.clone())
                 }),
-            flags: dictionary
-                .get(b"Ff")
-                .ok()
+            flags: get_resolved(document, dictionary, b"Ff")
                 .and_then(|ff| ff.as_i64().ok())
                 .or_else(|| inherited.as_ref().and_then(|parent| parent.flags)),
             children: Vec::new(),
@@ -276,7 +298,8 @@ fn collect_fields(
         // The qualified name: a segment with no `/T` contributes nothing, which is how a widget
         // kid of a named parent ends up with the parent's name rather than an empty segment.
         let mut name = inherited.name.clone();
-        if let Ok(title) = dictionary.get(b"T").and_then(|t| t.as_str()) {
+        if let Some(title) = get_resolved(document, dictionary, b"T").and_then(|t| t.as_str().ok())
+        {
             let segment = decode_text_string(title);
             if !segment.is_empty() {
                 if !name.is_empty() {
@@ -286,21 +309,19 @@ fn collect_fields(
             }
         }
 
-        let kids: Vec<Object> = dictionary
-            .get(b"Kids")
-            .and_then(Object::as_array)
+        let kids: Vec<Object> = get_resolved(document, dictionary, b"Kids")
+            .and_then(|kids| kids.as_array().ok())
             .cloned()
             .unwrap_or_default();
 
         // Whether this dictionary is itself a widget: an annotation with a `/Subtype` and a
         // `/Rect`. A field may be merged with its single widget (the common case), in which case
         // it is both the field and the widget and there is nothing to descend into.
-        let is_widget = dictionary
-            .get(b"Subtype")
-            .and_then(|subtype| subtype.as_name())
+        let is_widget = get_resolved(document, dictionary, b"Subtype")
+            .and_then(|subtype| subtype.as_name().ok())
             .map(|subtype| subtype == b"Widget")
             .unwrap_or(false)
-            || dictionary.has(b"Rect");
+            || get_resolved(document, dictionary, b"Rect").is_some();
 
         if !kids.is_empty() {
             // Descend. `Kids` may mix widgets (radio group kids) with real sub-fields (a
@@ -450,7 +471,7 @@ fn describe_field(
     let flags = inherited.flags.unwrap_or(0);
 
     let value = dictionary
-        .and_then(|dictionary| dictionary.get(b"V").ok())
+        .and_then(|dictionary| get_resolved(document, dictionary, b"V"))
         .and_then(object_text);
 
     let mut states = Vec::new();
@@ -461,11 +482,9 @@ fn describe_field(
         let widgets: Vec<ObjectId> = if is_widget {
             vec![id]
         } else {
-            document
-                .get_object(id)
-                .ok()
-                .and_then(|object| object.as_dict().ok())
-                .and_then(|dictionary| dictionary.get(b"Kids").and_then(Object::as_array).ok())
+            dictionary
+                .and_then(|dictionary| get_resolved(document, dictionary, b"Kids"))
+                .and_then(|kids| kids.as_array().ok())
                 .map(|kids| {
                     kids.iter()
                         .filter_map(|kid| kid.as_reference().ok())
@@ -481,11 +500,11 @@ fn describe_field(
             else {
                 continue;
             };
-            if let Some(rect) = widget_dict.get(b"Rect").ok().and_then(rect_of) {
+            if let Some(rect) = get_resolved(document, widget_dict, b"Rect").and_then(rect_of) {
                 rects.push(rect);
                 rect_pages.push(page_of_widget(document, widget));
             }
-            for state in appearance_states(widget_dict) {
+            for state in appearance_states(document, widget_dict) {
                 if state != "Off" && !states.contains(&state) {
                     states.push(state);
                 }
@@ -493,7 +512,7 @@ fn describe_field(
         }
     } else if is_widget {
         if let Some(rect) = dictionary
-            .and_then(|dictionary| dictionary.get(b"Rect").ok())
+            .and_then(|dictionary| get_resolved(document, dictionary, b"Rect"))
             .and_then(rect_of)
         {
             rects.push(rect);
@@ -502,7 +521,7 @@ fn describe_field(
     }
 
     let options: Vec<String> = dictionary
-        .and_then(|dictionary| dictionary.get(b"Opt").ok())
+        .and_then(|dictionary| get_resolved(document, dictionary, b"Opt"))
         .and_then(|opt| opt.as_array().ok())
         .map(|entries| {
             entries
@@ -518,7 +537,7 @@ fn describe_field(
         .unwrap_or_default();
 
     let selected_indices: Vec<i64> = dictionary
-        .and_then(|dictionary| dictionary.get(b"I").ok())
+        .and_then(|dictionary| get_resolved(document, dictionary, b"I"))
         .and_then(|indices| indices.as_array().ok())
         .map(|indices| {
             indices
@@ -560,7 +579,7 @@ fn page_of_widget(document: &Document, widget_id: ObjectId) -> Option<u32> {
         .get_object(widget_id)
         .ok()
         .and_then(|object| object.as_dict().ok())
-        .and_then(|dictionary| dictionary.get(b"P").ok())
+        .and_then(|dictionary| get_resolved(document, dictionary, b"P"))
         .and_then(|page| page.as_reference().ok())
     {
         // `get_pages()` is keyed 1-based, which is the PDF page label; the UI counts from zero.
@@ -579,7 +598,7 @@ fn page_of_widget(document: &Document, widget_id: ObjectId) -> Option<u32> {
                 .get_object(**page_id)
                 .ok()
                 .and_then(|object| object.as_dict().ok())
-                .and_then(|page| page.get(b"Annots").ok())
+                .and_then(|page| get_resolved(document, page, b"Annots"))
                 .and_then(|annots| annots.as_array().ok())
                 .map(|annots| {
                     annots
@@ -596,17 +615,19 @@ fn page_of_widget(document: &Document, widget_id: ObjectId) -> Option<u32> {
 /// `/N` is either a single stream (one appearance, no states — a text field or a push button) or a
 /// dictionary whose keys are the state names. Only the dictionary form has states, so a stream
 /// yields none, which is the honest answer: a push button has no value to write.
-fn appearance_states(widget: &lopdf::Dictionary) -> Vec<String> {
-    let Some(normal) = widget
-        .get(b"AP")
-        .and_then(Object::as_dict)
-        .ok()
-        .and_then(|ap| ap.get(b"N").ok())
+///
+/// Both `/AP` and `/N` are resolved through references. `/AP 5 0 R` and `/AP<</N 6 0 R>>` are
+/// ordinary producer output, and reading either as an opaque `Object::Reference` yields no states —
+/// which the UI turns into a disabled control, not an error (D9).
+fn appearance_states(document: &Document, widget: &lopdf::Dictionary) -> Vec<String> {
+    let Some(normal) = get_resolved(document, widget, b"AP")
+        .and_then(|ap| ap.as_dict().ok())
+        .and_then(|ap| get_resolved(document, ap, b"N"))
     else {
         return Vec::new();
     };
     match normal {
-        Object::Reference(_) => Vec::new(), // a single stream: no states to enumerate
+        // A single stream: no states to enumerate. A push button has no value to write.
         Object::Dictionary(states) => states
             .iter()
             .map(|(key, _)| String::from_utf8_lossy(key).to_string())
@@ -903,12 +924,25 @@ impl OpenForm {
             write.apply_to_field(field_dictionary);
 
             for widget in &write.widget_ids {
+                // `/AP` is resolved against the *previous* document: the staged widget is a clone
+                // whose `/AP` still points at objects in the original revision, which is where the
+                // appearance streams live. Resolving it against the new document would find nothing
+                // and silently write `Off` for a state `Off`-only check — the check has to see the
+                // same streams a reader will (D9).
+                let states = incremental
+                    .get_prev_documents()
+                    .get_object(*widget)
+                    .ok()
+                    .and_then(|object| object.as_dict().ok())
+                    .map(|original| appearance_states(incremental.get_prev_documents(), original))
+                    .unwrap_or_default();
+
                 let widget_dictionary = incremental
                     .new_document
                     .get_object_mut(*widget)
                     .and_then(Object::as_dict_mut)
                     .map_err(|_| AppError::Other("the widget is not a dictionary".to_string()))?;
-                write.apply_to_widget(widget_dictionary);
+                write.apply_to_widget(widget_dictionary, &states);
             }
         }
 
@@ -1054,11 +1088,14 @@ impl PlannedWrite {
     /// `/AS /blue` to every kid tells the red kid to show a stream its `/AP` does not contain — the
     /// measured result is a group with the tick under both options. `Off` is always a legal `/AS`
     /// because every button's appearance dictionary carries an `/Off` entry.
-    fn apply_to_widget(&self, dictionary: &mut lopdf::Dictionary) {
+    ///
+    /// `states` is passed in rather than read from `dictionary` because the dictionary being
+    /// written is a staged clone whose `/AP` still resolves in the previous revision (D9).
+    fn apply_to_widget(&self, dictionary: &mut lopdf::Dictionary, states: &[String]) {
         let WriteKind::Button(state) = &self.kind else {
             return;
         };
-        let drawable = state == "Off" || appearance_states(dictionary).iter().any(|s| s == state);
+        let drawable = state == "Off" || states.iter().any(|s| s == state);
         let written = if drawable { state.as_str() } else { "Off" };
         dictionary.set("AS", Object::Name(written.as_bytes().to_vec()));
     }
@@ -1147,6 +1184,210 @@ mod tests {
         assert!(
             !field.states.iter().any(|state| state == "Off"),
             "Off is every button's unselected state, not a value the user picks: {:?}",
+            field.states
+        );
+    }
+
+    #[test]
+    fn an_indirect_appearance_dictionary_still_yields_its_states() {
+        // D9. `/AP<</N 12 0 R>>` is legal and ordinary producer output; a lookup that stops at the
+        // reference finds an opaque object, reports no states, and leaves the checkbox untickable
+        // with no error anywhere — exactly how the reported defect looked.
+        let form = open_fixture(fixture_bytes(testpdf::form_checkbox_indirect_n()));
+        let field = form.field("agree").expect("field");
+        assert_eq!(
+            field.states,
+            vec!["Yes".to_string()],
+            "a states dictionary reached through a reference must still be read: {:?}",
+            field.states
+        );
+        // And the widget still places, so the box is drawn where the click can reach it.
+        assert_eq!(field.rects.len(), 1, "the widget must still have a rect");
+        assert_eq!(
+            field.rect_pages,
+            vec![Some(0)],
+            "and still resolve to its page"
+        );
+    }
+
+    #[test]
+    fn an_indirect_ap_dictionary_still_yields_its_states() {
+        // The other hop: `/AP n 0 R` with `/N` inline. One fixture cannot prove both, because a
+        // reader can dereference the outer level and still miss the inner one.
+        let form = open_fixture(fixture_bytes(testpdf::form_checkbox_indirect_ap()));
+        let field = form.field("agree").expect("field");
+        assert_eq!(
+            field.states,
+            vec!["Yes".to_string()],
+            "an /AP reached through a reference must still be read: {:?}",
+            field.states
+        );
+    }
+
+    #[test]
+    fn an_indirect_appearance_widget_can_be_filled_and_reads_back() {
+        // The writer shares the reader's blindness, so this is the half that proves a tick can
+        // *persist*: fill through an indirect `/AP /N`, then re-read the written file.
+        for document in [
+            testpdf::form_checkbox_indirect_n(),
+            testpdf::form_checkbox_indirect_ap(),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source = dir.path().join("source.pdf");
+            let target = dir.path().join("filled.pdf");
+            std::fs::write(&source, testpdf::bytes(&document)).expect("write fixture");
+
+            let outcome = fill_to(
+                &source,
+                &target,
+                &[FillValue {
+                    name: "agree".to_string(),
+                    value: "Yes".to_string(),
+                }],
+                |path| path.exists(),
+            )
+            .expect("a fill against an indirect appearance must not be refused");
+
+            let back = open_bytes(std::fs::read(&outcome.path).expect("read back"))
+                .expect("the filled copy opens");
+            let field = back.field("agree").expect("field");
+            assert_eq!(
+                field.value.as_deref(),
+                Some("Yes"),
+                "the tick must persist, not fall back to Off: {:?}",
+                field.value
+            );
+
+            // `/V` alone is not the claim: the pixels come from `/AS`, and a writer that had to
+            // fall back to `Off` because it could not read the indirect `/AP` would still pass a
+            // `/V`-only assertion on a file whose appearance says otherwise.
+            let written = Document::load(&outcome.path).expect("reopen the written file");
+            let states: Vec<String> = written
+                .objects
+                .values()
+                .filter_map(|object| object.as_dict().ok())
+                .filter(|dictionary| {
+                    dictionary
+                        .get(b"Subtype")
+                        .and_then(Object::as_name)
+                        .map(|name| name == b"Widget")
+                        .unwrap_or(false)
+                })
+                .map(|dictionary| {
+                    dictionary
+                        .get(b"AS")
+                        .and_then(Object::as_name)
+                        .map(|name| String::from_utf8_lossy(name).to_string())
+                        .unwrap_or_else(|_| "<none>".to_string())
+                })
+                .collect();
+            assert_eq!(
+                states,
+                vec!["Yes".to_string()],
+                "the widget's /AS must name the state that was written: {states:?}"
+            );
+        }
+    }
+
+    /// The D9 acceptance shape, end to end: a tick through an indirect `/AP /N` produces exactly
+    /// one sibling copy, leaves the original byte-identical, and the copy reads back ticked.
+    ///
+    /// Separate from `an_indirect_appearance_widget_can_be_filled_and_reads_back` because that one
+    /// proves the *value* survives; this one proves the *file arrangement* the user asked for — one
+    /// new file beside the original, never over it (P2-D2), and never two because the command was
+    /// driven twice.
+    #[test]
+    fn an_indirect_tick_writes_exactly_one_sibling_copy_and_leaves_the_original_alone() {
+        for document in [
+            testpdf::form_checkbox_indirect_n(),
+            testpdf::form_checkbox_indirect_ap(),
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let source = dir.path().join("form.pdf");
+            let source_bytes = testpdf::bytes(&document);
+            std::fs::write(&source, &source_bytes).expect("write fixture");
+
+            // The same target-selection the command uses, so "one copy" is the real naming rule
+            // rather than a name this test invented.
+            let target =
+                crate::editor::save::next_edited_path(&source, |candidate| candidate.exists())
+                    .expect("a target must be available");
+
+            fill_to(
+                &source,
+                &target,
+                &[FillValue {
+                    name: "agree".to_string(),
+                    value: "Yes".to_string(),
+                }],
+                |path| path.exists(),
+            )
+            .expect("an indirect tick must be written");
+
+            // Exactly one file was added to the directory, and it is not the original.
+            let mut pdfs: Vec<String> = std::fs::read_dir(dir.path())
+                .expect("read the directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.ends_with(".pdf"))
+                .collect();
+            pdfs.sort();
+            assert_eq!(
+                pdfs,
+                vec!["form (edited 1).pdf".to_string(), "form.pdf".to_string()],
+                "one sibling copy, not two and not an overwrite: {pdfs:?}"
+            );
+
+            // The original is untouched, byte for byte.
+            assert_eq!(
+                std::fs::read(&source).expect("read the original"),
+                source_bytes,
+                "the user's original must not be written to"
+            );
+
+            // And the copy is the one a viewer will show ticked.
+            let back =
+                open_bytes(std::fs::read(&target).expect("read the copy")).expect("the copy opens");
+            assert_eq!(
+                back.field("agree")
+                    .and_then(|field| field.value.clone())
+                    .as_deref(),
+                Some("Yes"),
+                "reopening the copy must show the tick"
+            );
+        }
+    }
+
+    #[test]
+    fn an_indirect_name_value_and_rect_are_all_resolved() {
+        // Each of `/T`, `/V` and `/Rect` is a separate hop, and reportlab writes `/T` and `/Rect`
+        // through references. A reader that handles `/AP` but not these loses the field's name, its
+        // value, or the place to draw it — three different silent failures from one cause.
+        let form = open_fixture(fixture_bytes(testpdf::form_checkbox_indirect_entries()));
+        let field = form
+            .field("agree")
+            .expect("the field must be named through /T n 0 R");
+        assert_eq!(
+            field.value.as_deref(),
+            Some("Off"),
+            "the value must be read through /V n 0 R: {:?}",
+            field.value
+        );
+        assert_eq!(
+            field.rects,
+            vec![[72.0, 700.0, 86.0, 714.0]],
+            "the rect must be read through /Rect n 0 R: {:?}",
+            field.rects
+        );
+        assert_eq!(
+            field.rect_pages,
+            vec![Some(0)],
+            "and still place on its page"
+        );
+        assert_eq!(
+            field.states,
+            vec!["Yes".to_string()],
+            "and its states still enumerate: {:?}",
             field.states
         );
     }

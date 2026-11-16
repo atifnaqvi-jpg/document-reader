@@ -457,11 +457,28 @@ button:disabled {
 
 .form-widget-button {
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent, #1f6feb);
 }
 
+/* The fill is set inline in FormOverlay (opaque, see D7/D9 there) rather than here, so that "this
+   control hides the raster's own tick" is one property with one owner. This rule only says which
+   border a checked box has. */
 .form-widget-checked {
-  background: rgba(31, 111, 235, 0.45);
   border-color: var(--accent, #1f6feb);
+}
+
+/* The drawn tick (P3.3 D9). Two borders rotated 45° make a check with no font, no icon file and
+   no dependency; the size is in percentages so it scales with the widget at any zoom. */
+.form-widget-tick {
+  width: 30%;
+  height: 55%;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translate(-10%, -20%);
+  pointer-events: none;
 }
 
 /* Drawn but inert: a read-only field, or a type this build does not fill (§10.4, §10.6).
