@@ -102,10 +102,52 @@ const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
 /// list cannot rot into a permanent hole. It exists because a design is governed from the moment it
 /// is written (§ `GOVERNED_DOCS`) and necessarily names acceptance tests that do not exist yet.
 ///
-/// Empty since 2026-11-15: `the_checkbox_ticks_in_a_real_viewer` was the only entry, and the guard
-/// demanded its removal the moment the test landed. The list stays because the next governed design
-/// that lands ahead of its tests will need it.
-const PLANNED_SYMBOLS: [(&str, &str); 0] = [];
+/// Empty since 2026-11-15 for the forms phase; repopulated 2026-11-20 by
+/// `docs/P3.3a-fill-and-sign-DESIGN.md`, which is governed from the moment it is written and names
+/// the acceptance tests its phase owes. Each entry is removed by this guard the moment its test
+/// lands, so the list cannot rot into a permanent hole.
+const PLANNED_SYMBOLS: [(&str, &str); 10] = [
+    (
+        "a_drawn_signature_is_an_ink_annotation_with_an_appearance",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "a_typed_signature_resolves_its_default_appearance",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "the_visual_signature_label_is_written_into_the_page",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "an_overlay_never_makes_an_unsigned_document_look_signed",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "an_overlay_leaves_a_signed_documents_badge_unchanged",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "placing_a_signature_writes_nothing_until_the_save",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "the_certification_gate_refuses_a_p1_and_p2_signature_placement",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "a_signature_snaps_to_a_measured_box_and_skips_a_suspicious_one",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "a_saved_signature_is_visible_in_a_real_viewer",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+    (
+        "the_lea_form_accepts_a_signature_on_its_own_line",
+        "docs/P3.3a-fill-and-sign-DESIGN.md",
+    ),
+];
 
 /// Symbols a governed document cites **in order to assert that they are absent**, with the reason
 /// the absence is load-bearing.
@@ -346,7 +388,8 @@ fn cited_paths(text: &str) -> Citations {
 /// crate API that moved, is wrong before a line of code exists. `docs/P3.1-annotations-DESIGN.md`
 /// is the case in point: writing it turned up that `docs/P2-DESIGN.md` F1 had overstated the
 /// `pub(crate)` boundary, which is exactly the drift this list is here to catch.
-const GOVERNED_DOCS: [&str; 12] = [
+const GOVERNED_DOCS: [&str; 13] = [
+    "docs/P3.3a-fill-and-sign-DESIGN.md",
     "docs/P3.3-forms-DESIGN.md",
     "docs/P3.2-protect-redact-signatures-DESIGN.md",
     "docs/P3.2-FACTS-cms-signing.md",
