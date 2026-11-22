@@ -274,9 +274,26 @@ fi
 # new passes, no new ignored: `editor/xfdf.rs`'s form-data tests need no PDFium, including the
 # round-trip that fills, exports, re-imports and fills a fresh copy. Unlike W4's pixel test this one
 # proves the writer and the interchange agree on field names, which no parser unit test can.
-PIN_PLAIN_PASSED=997
+#
+# 2026-11-22 (P3.3 closeout: the D5/D6/D9 tests): 997/108 -> 1010/108 and 1105/0 -> 1118/0. Net +13
+# in both shapes, no new ignored -- every one is PDFium-independent, so `ignored` is unmoved at
+# 108/0 and the whole move is in the passing counts.
+#
+# These three commits added tests and left the pin at 997: 54e1ff9 (D5, +4 added and one renamed --
+# `a_document_without_a_form_has_no_fields` became `a_document_without_a_form_is_refused_by_name`, so
+# net +3), c3fdfd3 (D6 widget-to-page, +5), eb1c1dd (D9 indirect references, +5). 25 -> 38 `#[test]`
+# in `editor/forms.rs`, and 3 + 5 + 5 = 13. The gate was therefore RED from 54e1ff9 through
+# e29bfb3 and nobody saw it, because `ci.yml` pins a *floor* (`-lt 959`) rather than an exact count:
+# CI green and this gate red were both true at once, which is the reason a floor cannot replace a
+# pin. The number is measured here, not incremented from memory -- `cargo test` reported 1010/108 and
+# `cargo test -- --include-ignored` reported 1118/0 on a clean tree at e29bfb3.
+#
+# The arithmetic is checkable and was checked by diffing `#[test]` function names between
+# 4833897 and eb1c1dd rather than by trusting a total, because the count alone cannot distinguish
+# "+13 added" from "+14 added, 1 deleted".
+PIN_PLAIN_PASSED=1010
 PIN_PLAIN_IGNORED=108
-PIN_IGNORED_PASSED=1105
+PIN_IGNORED_PASSED=1118
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
