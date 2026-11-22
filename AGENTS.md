@@ -314,6 +314,37 @@ attempt 2 of the same SHA, which is the re-run policy this section already manda
 correctness claim rests on a single Windows run, and every Windows-only assertion has a Linux-side
 equivalent.
 
+## Recorded intermittent: the local gate goes red with no failing step
+
+Ruling 2026-11-15 23:30 UTC: **an unreproducible intermittent is recorded, not chased.** This
+row exists so the policy is applied to a real event rather than described in the abstract.
+
+| Field | Value |
+|---|---|
+| First seen | 2026-11-03 (iteration 20, P2.7.6 work) |
+| Shape | `gate.sh` printed `gate red` with **no failing step in its log** |
+| Runs after it | **eleven** clean runs on tree code that did not change between the red and the first green: six full gate runs, five direct suite runs |
+| Source change between red and green | none |
+| Diagnosis | **none.** Recorded, not explained |
+| Suspected, unproven | contention from concurrent temp use |
+
+**It is not a flake to retry past, and it is not a bug to fix.** It is a third member of the
+recorded-intermittents family alongside K20 and the Windows `STATUS_ACCESS_VIOLATION`, and it
+carries the same terms:
+
+* no claim may rest on a single local gate run either, which is a stronger statement than it
+  sounds: the gate is the thing that certifies everything else;
+* a re-run that goes green is **not** a diagnosis and does not close this row;
+* it becomes a unit only if a reproduction recipe appears. Until then, no time is spent on it.
+
+**Why the "no failing step" shape matters and is not merely odd.** Every step in `gate.sh`
+prints its name and exits non-zero on failure, so a red with an empty failure slot means the
+fail came from something outside the five named steps -- an unset variable, a pipeline status,
+or the script's own bookkeeping. The one recorded way to produce that reading *without* a real
+red is `gate.sh | tail -3; echo $?`, which reports `tail`'s status, not the gate's; that trap is
+documented in `scripts/ralph/` notes and was already blamed once. That is a hypothesis about the
+*reading*, not about the run, and it does not explain the red itself.
+
 ## Gates
 
 `ci.yml` runs on **every branch**; do not reintroduce a `branches:` filter. The toolchain is
