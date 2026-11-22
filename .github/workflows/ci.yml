@@ -362,8 +362,12 @@ jobs:
           # 959, measured on 2026-11-12: two more PDFium-independent tests, one in
           # `tests/ci_workflow.rs` and one in `tests/release_workflow.rs`, pinning the Windows job
           # timeouts. See `tests/ci_workflow.rs` for why an unbounded hang is worse than a red.
-          if [ "$passed" -lt 959 ]; then
-            echo "::error::only $passed tests ran; 959 is the non-PDFium baseline. A test stopped being collected."
+          # Raised from 959 to the measured tree (1029) on 2026-11-22. The floor had drifted 62
+          # below what the tree reports, and a floor that far below cannot notice tests that stop
+          # being collected -- which is the only thing it is for. The value is held identical to
+          # `tests/test_count_pins.rs`; that file fails if this line and the source disagree.
+          if [ "$passed" -lt 1029 ]; then
+            echo "::error::only $passed tests ran; 1029 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
@@ -544,7 +548,11 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          if ($passed -lt 400) {
+          # Measured at 1139 on this target (run 45074416363). Three below the Linux
+          # include-ignored count because three tests are compiled out off Linux: two
+          # `cfg(not(windows))` certificate-store refusals and the `cfg(unix)` poppler render.
+          # Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
+          if ($passed -lt 1139) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }

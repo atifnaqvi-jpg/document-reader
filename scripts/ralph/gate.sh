@@ -304,15 +304,19 @@ fi
 # +6 even here while a checkout without the fixture would still report +6 with five printed skips.
 # Measured, not computed: `cargo test` reported 1011/113 and `-- --include-ignored` 1124/0.
 # 2026-11-22 (P3.3a U2: the artifact-resident label): 1011/113 -> 1021/113 and 1124/0 -> 1134/0.
+# 2026-11-22 (P3.3a U-G: one source for every pin): 1021/113 -> 1029/113 and 1134/0 -> 1142/0. The
+# eight are `tests/test_count_pins.rs`, which now owns every count in this repository; the numbers
+# below are that file's values, and it fails if they disagree. Changing a count means changing it
+# there first, and the red then names every carrier that has to follow.
 # Ten tests, +10 in both shapes and the ignored count unmoved -- every one is PDFium-independent,
 # because the label is written and then inspected in the saved bytes rather than rendered. Six in
 # `editor/export.rs` (the string, the encoding, the refusal, the mechanism, the font reuse, the
 # position guard) and four in `editor/annotate.rs` (drawn, typed, ordinary-mark negative, and the
 # no-drawable-mark refusal). Measured, not computed: `cargo test` reported 1021/113 and
 # `-- --include-ignored` 1134/0.
-PIN_PLAIN_PASSED=1021
+PIN_PLAIN_PASSED=1029
 PIN_PLAIN_IGNORED=113
-PIN_IGNORED_PASSED=1134
+PIN_IGNORED_PASSED=1142
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

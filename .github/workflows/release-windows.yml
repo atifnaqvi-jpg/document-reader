@@ -146,7 +146,11 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          if ($passed -lt 400) {
+          # Measured at 1139 on this target (run 45074416363). Three below the Linux
+          # include-ignored count because three tests are compiled out off Linux: two
+          # `cfg(not(windows))` certificate-store refusals and the `cfg(unix)` poppler render.
+          # Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
+          if ($passed -lt 1139) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }
