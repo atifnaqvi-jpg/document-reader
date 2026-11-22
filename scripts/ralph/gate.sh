@@ -291,9 +291,21 @@ fi
 # The arithmetic is checkable and was checked by diffing `#[test]` function names between
 # 4833897 and eb1c1dd rather than by trusting a total, because the count alone cannot distinguish
 # "+13 added" from "+14 added, 1 deleted".
-PIN_PLAIN_PASSED=1010
-PIN_PLAIN_IGNORED=108
-PIN_IGNORED_PASSED=1118
+# 2026-11-22 (P3.3a U1: the facts-first measurement): 1010/108 -> 1011/113 and 1118/0 -> 1124/0.
+# Six tests in `tests/fillsign_facts.rs`. Five are `#[ignore]`d because they need a real PDFium
+# library *and* the LEA fixture, so the plain shape gains one pass and five skips; the
+# include-ignored shape gains all six, which is the shape that actually runs them. The one
+# non-ignored test is `the_lea_fixture_is_not_committed_to_the_repository`, and it is deliberately
+# plain: it is a data-protection rule about the tree, not a render.
+#
+# The five skipped ones also skip themselves when `LEA_FIXTURE` is unset, printing the skip rather
+# than passing silently -- an identity document lives outside the repo, so a fresh checkout does
+# not have it. That is a second gate behind `#[ignore]`, and it is why the include-ignored count is
+# +6 even here while a checkout without the fixture would still report +6 with five printed skips.
+# Measured, not computed: `cargo test` reported 1011/113 and `-- --include-ignored` 1124/0.
+PIN_PLAIN_PASSED=1011
+PIN_PLAIN_IGNORED=113
+PIN_IGNORED_PASSED=1124
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
