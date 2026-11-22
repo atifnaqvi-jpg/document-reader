@@ -312,8 +312,8 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
         "`--include-ignored` here runs the PDFium tests with no library: measured as 27 failures"
     );
     assert!(
-        tests_step.contains("ignored") && tests_step.contains("ne 108"),
-        "the Linux job must assert exactly the 108 known machine-dependent tests: 76 from before
+        tests_step.contains("ignored") && tests_step.contains("ne 113"),
+        "the Linux job must assert exactly the 113 known machine-dependent tests: 76 from before
          the Form XObject walk, the three PDFium-side walk tests it added, the two that compose
          the picker path (font search; describe/edit/save/re-open), two from P2.7.7's Type0
          writer (row6a renders pixels, row6c reads the program's hmtx; row6b is not ignored),
@@ -326,7 +326,9 @@ fn the_linux_job_does_not_force_pdfium_tests_without_a_library() {
          while fixing the 1.2.0 hand-test defects, which opens a document this app protected --
          the same reason as those five, and P3.3 W4's pixel tick test, which renders the checkbox
          before and after a fill because the claim is that a viewer draws the tick -- a dictionary
-         assertion cannot make that claim at all"
+         assertion cannot make that claim at all, and P3.3a U1's five facts tests, which measure
+         placement geometry through PDFium's character grid on a document that is not in this
+         repository, so they are ignored here twice over -- no library and no fixture"
     );
 }
 
