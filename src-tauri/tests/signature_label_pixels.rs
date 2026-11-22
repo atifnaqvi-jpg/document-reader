@@ -213,7 +213,9 @@ fn the_label_lands_where_it_was_placed_not_at_a_fixed_origin() {
     let at_low = dark_pixels_in(&rendered, SCALE, band_at(LOW));
     let at_high = dark_pixels_in(&rendered, SCALE, band_at(HIGH));
 
-    eprintln!("label written at y={HIGH}: ink at y={LOW} band = {at_low}, at y={HIGH} band = {at_high}");
+    eprintln!(
+        "label written at y={HIGH}: ink at y={LOW} band = {at_low}, at y={HIGH} band = {at_high}"
+    );
 
     assert_eq!(
         at_low, 0,
