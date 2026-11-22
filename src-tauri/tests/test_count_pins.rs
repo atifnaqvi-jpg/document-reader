@@ -58,14 +58,14 @@ fn read(relative: &str) -> String {
 /// `cargo test`, plain shape, on this machine (Linux, PDFium present, LEA fixture present).
 pub const PLAIN_PASSED: usize = 1029;
 /// `cargo test`, plain shape: tests that carry `#[ignore]`.
-pub const PLAIN_IGNORED: usize = 113;
+pub const PLAIN_IGNORED: usize = 115;
 /// `cargo test -- --include-ignored`: nothing may remain ignored.
-pub const INCLUDED_PASSED: usize = 1142;
+pub const INCLUDED_PASSED: usize = 1144;
 pub const INCLUDED_IGNORED: usize = 0;
 
 /// The Linux CI job runs without PDFium, so every gated test stays ignored. It asserts the ignored
 /// count exactly, because a test that silently stops being collected is the failure mode there.
-pub const CI_LINUX_IGNORED: usize = 113;
+pub const CI_LINUX_IGNORED: usize = 115;
 
 /// The Linux CI job's `passed` floor. This is a *floor*, not an equality, and it had drifted below
 /// the tree: it said 959 while the tree reports 1021, so 62 tests could stop being collected before
@@ -82,7 +82,7 @@ pub const CI_LINUX_PASSED_FLOOR: usize = 1029;
 /// are `#[cfg(not(windows))]`, and `tests/embed_acceptance.rs`'s
 /// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. 1134 - 3 = 1131. A floor
 /// that does not name that arithmetic is a floor nobody can check.
-pub const CI_WINDOWS_PASSED_FLOOR: usize = 1139;
+pub const CI_WINDOWS_PASSED_FLOOR: usize = 1141;
 
 // ---------------------------------------------------------------------------------------------
 // Parsing helpers. Each carrier is read as the artifact it is -- shell, YAML, Rust -- rather than

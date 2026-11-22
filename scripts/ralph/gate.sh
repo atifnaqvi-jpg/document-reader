@@ -308,6 +308,11 @@ fi
 # eight are `tests/test_count_pins.rs`, which now owns every count in this repository; the numbers
 # below are that file's values, and it fails if they disagree. Changing a count means changing it
 # there first, and the red then names every carrier that has to follow.
+# 2026-11-22 (P3.3a U3: the label through a real render): 1029/113 -> 1029/115 and 1144/0. Two
+# tests, both `#[ignore]`d because they need PDFium and neither is a fact about the bytes -- one
+# renders the saved file and measures ink in the label's band, the other moves the band and
+# requires the ink to follow. Both shapes move by two; the plain passed count is unchanged because
+# neither can run without a library.
 # Ten tests, +10 in both shapes and the ignored count unmoved -- every one is PDFium-independent,
 # because the label is written and then inspected in the saved bytes rather than rendered. Six in
 # `editor/export.rs` (the string, the encoding, the refusal, the mechanism, the font reuse, the
@@ -315,8 +320,8 @@ fi
 # no-drawable-mark refusal). Measured, not computed: `cargo test` reported 1021/113 and
 # `-- --include-ignored` 1134/0.
 PIN_PLAIN_PASSED=1029
-PIN_PLAIN_IGNORED=113
-PIN_IGNORED_PASSED=1142
+PIN_PLAIN_IGNORED=115
+PIN_IGNORED_PASSED=1144
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

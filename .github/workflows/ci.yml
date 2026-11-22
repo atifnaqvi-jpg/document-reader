@@ -185,8 +185,8 @@ jobs:
           # so a checkout without either prints its skip instead of passing, and that moves this
           # pin by exactly five. The sixth test in that file, the fixture-not-committed guard, is
           # plain and moved the `passed` floor instead.
-          if [ "$ignored" -ne 113 ]; then
-            echo "::error::$ignored tests ignored; 113 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          if [ "$ignored" -ne 115 ]; then
+            echo "::error::$ignored tests ignored; 115 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -548,11 +548,11 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          # Measured at 1139 on this target (run 45074416363). Three below the Linux
+          # Measured at 1141 on this target (run 45074416363). Three below the Linux
           # include-ignored count because three tests are compiled out off Linux: two
           # `cfg(not(windows))` certificate-store refusals and the `cfg(unix)` poppler render.
           # Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
-          if ($passed -lt 1139) {
+          if ($passed -lt 1141) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }
