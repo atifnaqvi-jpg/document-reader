@@ -7,10 +7,7 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
-## 1.3.0 — **not yet released**
-
-**This section is written before the bump, as the section above requires.** The six carriers move to
-1.3.0 in the commit that follows this one; there is no 1.3.0 tag and no 1.3.0 installer yet.
+## 1.3.0
 
 **DocuPro 1.3.0 — fill in forms.** The file goes in blank and comes back filled. Text fields,
 checkboxes, radio groups, combo boxes and list boxes all take a value, and the value survives in
@@ -79,17 +76,84 @@ barcode fields are refused by name rather than attempted, because a partial writ
 produces a file that opens, shows the old values, and looks like a save that silently failed.
 
 Fill & Sign (drawing a signature image onto a page) is its own phase after this one. It shares no
-machinery with form filling and would have doubled this release's testing surface.
+machinery with form filling and would have doubled this release's testing surface. The design is
+written and frozen; no code for it exists in this build.
+
+### The 1.2.0 redaction limit is unchanged
+
+One limit carried over and still true, stated here because this release's notes are the page a
+reader lands on:
+
+- **Redact.** Marked content is deleted, not covered — a black rectangle over live text is a
+  redaction a copy-paste defeats. **Vector drawing is not removed.** A chart, a logo or a line
+  drawing under a mark is not deleted: such a redaction refuses, writes nothing, and reports how
+  many paths would have remained, rather than claiming a removal it did not make.
+
+That is the decided behaviour, not a defect found late. It is unchanged by this release, and form
+filling does not touch it.
 
 ### Verifying it
 
-The gate runs 997 tests without the renderer and 1105 with it — the difference is the renderer-gated
-set, which includes the pixel test above.
+The gate runs 1010 tests without the renderer and 1118 with it — the difference is the
+renderer-gated set, which includes the pixel test above. Both are exact pins rather than floors, so
+a test that stops being collected fails the gate instead of quietly passing it.
+
+That distinction is not academic here. The pins sat **13 tests behind the tree** for three commits
+— the D5, D6 and D9 work — and CI stayed green the whole time, because the workflow asserts a floor
+(`-lt 959`) while the gate asserts an exact count. A floor cannot detect a suite that lost a test;
+it only detects one that lost hundreds. The closeout measured both shapes afresh on a clean tree and
+moved the pins to what ran, and this note states those numbers as measured rather than as derived.
 
 The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**;
 verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml`, which is the pair 1.2.0
 and 1.2.1 recorded and no change in this release touches it — the bump is a version string, not a
 toolchain move.
+
+### Status: hand-tested and tagged; the tag is past the build, and the delta is only docs and scripts
+
+The installer below was run by a human on **2026-11-22**. This section is the record of that build,
+not of a tree:
+
+- **Installer:** `DocuPro_1.3.0_x64-setup.exe`, **11,132,829 bytes**, SHA-256
+  `3678e92de2636ee7f5c1a30a9f3a54306b0979d19f9bad8f39a478ee2952c8d2`.
+- **Built by** `release-windows.yml` **build-only dispatch** `43779925996`, from `eb1c1dd`. A
+  dispatch rather than a tag run, deliberately: the phase gate requires a hand-test before a tag
+  exists, and a tag run would have published before anyone had run it.
+- **Hand-test verdict:** the full P3.3 acceptance list passed on that installer — install and the
+  About version; a checkbox tick that appears on click with no write, one sibling copy on save, and
+  the tick visible after reopening in both this app and a separate viewer; a single-rendered text
+  field that persists; the flat LEA form refused by name; the protect prompt and a protected
+  reopen; redaction text removal with the vector warning; signature permitted at `P=2` and refused
+  at `P=1`; the badge states valid-with-anchor, modified and unsigned; and an XFDF round trip.
+- **Tag:** `v1.3.0` on the commit carrying this section. Naming that SHA in this file would change
+  the commit it names, so it is given as a measured distance instead — `git describe --tags
+  --exact-match` is the authority.
+
+**The tag is not the hand-tested commit.** Tagging `eb1c1dd` itself would have published a release
+page whose own notes say *"not yet released … there is no 1.3.0 installer yet"*, which is the v1.0.1
+stale-headline defect in its purest form, and it would also have left the tree permanently failing
+`the_tree_version_is_ahead_of_every_published_tag` — that guard returns early only when `HEAD` *is*
+the tagged commit, so an untagged `HEAD` still claiming `1.3.0` is exactly what it refuses. So the
+tag follows the record instead of the build, the same order `v1.1.0` and `v1.2.0` used. The delta
+between the tested build and the tag is:
+
+| Path | Why it moved | Can it change the installer? |
+|---|---|---|
+| `docs/RELEASE-NOTES.md` | this section | No — prose |
+| `docs/P3-PLAN.md` | the P3.3 row to hand-tested, with its provenance | No — prose |
+| `docs/P3.3a-fill-and-sign-DESIGN.md` | the next phase's design, written while the hand-test was out | No — prose |
+| `scripts/ralph/gate.sh` | pins moved to the measured 1010/108 and 1118/0 | No — the floor only rises |
+| `src-tauri/tests/docs_citations.rs` | governs the new design doc | No — a test file |
+
+**No file under `src-tauri/src/` or `src/` differs from `eb1c1dd`**, which was checked with a file
+list rather than assumed. That is what makes the hand-test verdict apply to the shipped installer
+and not merely to some earlier build.
+
+**The published asset is a fresh build, not the bytes a human ran.** A tag run executes the whole
+workflow and compiles again from the tagged commit; it does not upload the dispatch's artifact. The
+claim here is about the **source commit**, which is exact, and it cannot make the binary
+reproducible — `v1.0.1` differs from its own hand-tested artifact by 221 bytes and `v1.0.0` by
+3,748, from identical commits.
 
 ## 1.2.1 — development version, **not a release**
 
