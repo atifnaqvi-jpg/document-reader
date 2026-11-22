@@ -7,6 +7,38 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
+## 1.3.1 — development version, **not a release**
+
+**There is no 1.3.1 installer, no 1.3.1 tag, and this section describes no shipped build.** It
+exists because of a guard, not because of a decision to ship — the same situation 1.2.1 was created
+to solve, and this is the same answer.
+
+`the_tree_version_is_ahead_of_every_published_tag` refuses any commit whose version carriers still
+name a published tag. Once `v1.3.0` existed, the first post-tag commit — the P3.3a Fill & Sign
+design freeze — could not land while the tree still said `1.3.0`: an untagged commit claiming
+`1.3.0` is indistinguishable from the release itself.
+
+So **1.3.1 is a development reservation.** The six carriers move here so post-1.3.0 work can land,
+and **the number is spent when P3.3a ships its own 1.4.0 section.** Do not tag it.
+
+**What moved with the bump, and why it had to.** `the_release_body_names_the_version_being_published`
+holds the publish body to `Cargo.toml`, so the body headline moves too — a body still headed
+"DocuPro 1.3.0" under a 1.3.1 tree is precisely the stale-headline defect v1.0.1 shipped. The body
+now says 1.3.1 **is a development version and not a release**, and points a reader at the 1.3.0
+section for what actually shipped.
+
+**What is in this tree that 1.3.0 does not have:** `docs/P3.3a-fill-and-sign-DESIGN.md` frozen and
+signed off, the P3.3a plan row corrected to two signature kinds, and a corrected comment in
+`editor/export.rs` that had claimed ink is flattened by a pass that does not exist. **No
+`src-tauri/src/` behaviour changed** — the export.rs change is a comment only, and every test count
+is unmoved at 1010/108 and 1118/0.
+
+The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml` and the one every gate ran
+on for this tree — the same pair 1.2.0 and 1.2.1 recorded, unchanged by a version-string bump.
+
+---
+
 ## 1.3.0
 
 **DocuPro 1.3.0 — fill in forms.** The file goes in blank and comes back filled. Text fields,
