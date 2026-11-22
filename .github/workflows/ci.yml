@@ -179,8 +179,14 @@ jobs:
           # claim it makes is that a viewer draws the tick, and the `passed` floor cannot express
           # that. The nine form-data tests that arrived in the same phase need no library and moved
           # the `passed` floor instead.
-          if [ "$ignored" -ne 108 ]; then
-            echo "::error::$ignored tests ignored; 108 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured at 113, not 108: P3.3a U1's five Fill & Sign facts tests in
+          # `tests/fillsign_facts.rs` each need a real PDFium *and* the identity document the
+          # measurement runs against, which lives outside the repository. They are `#[ignore]`d
+          # so a checkout without either prints its skip instead of passing, and that moves this
+          # pin by exactly five. The sixth test in that file, the fixture-not-committed guard, is
+          # plain and moved the `passed` floor instead.
+          if [ "$ignored" -ne 113 ]; then
+            echo "::error::$ignored tests ignored; 113 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
