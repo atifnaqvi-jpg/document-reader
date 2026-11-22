@@ -115,9 +115,12 @@ fn append_marks(
             AnnotationKind::Highlight => ("ca", None),
             AnnotationKind::Underline | AnnotationKind::Strikeout => ("CA", Some(1.0_f32)),
             AnnotationKind::Note | AnnotationKind::Rect => ("CA", None),
-            // Ink is flattened from its stroke paths by its own pass. Squiggly is a wavy line
-            // that this flattening path can only approximate as a straight one, so it is left
-            // to the viewer's own synthesis from /QuadPoints rather than drawn wrong. The
+            // Ink is NOT flattened: the flatten loop above skips it and this match continues past
+            // it, so a saved signature stays a real annotation the viewer can move. There is no
+            // ink-flattening pass anywhere in this file, and `flattening_keeps_ink_as_an_annotation_
+            // rather_than_deleting_it` asserts that ink survives with `flattened == 0`. Squiggly is
+            // a wavy line that this flattening path can only approximate as a straight one, so it is
+            // left to the viewer's own synthesis from /QuadPoints rather than drawn wrong. The
             // remaining P3.1 kinds have no flattening yet.
             AnnotationKind::Ink
             | AnnotationKind::Squiggly
