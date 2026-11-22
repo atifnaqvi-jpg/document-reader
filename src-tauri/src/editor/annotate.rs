@@ -17,7 +17,7 @@ use lopdf::{Document, Object};
 pub mod appearance;
 
 use crate::editor::geometry::PdfRect;
-use crate::editor::lopdf_write;
+use crate::editor::{export, lopdf_write};
 use crate::model::{Annotation, AnnotationKind, AnnotationStatus, AppError, FreeTextMode};
 
 /// The `data` blob shape this module understands. `v` is explicit so a future
@@ -28,6 +28,27 @@ use crate::model::{Annotation, AnnotationKind, AnnotationStatus, AppError, FreeT
 /// 1.0.x build rather than misread, which is what lets a hand-test install share a database
 /// with a 1.1.0 one during the transition.
 const SUPPORTED_BLOB_VERSION: u32 = 2;
+
+/// The blob key that marks an `Ink` or `FreeText` row as a **visual signature** (P3.3a D-N2).
+///
+/// A drawn signature is `AnnotationKind::Ink` and a typed one is `FreeText` (D-N3a/N1/N2), so
+/// the *kind* cannot say which rows are signatures and which are ordinary marks. This flag can.
+/// It is additive and read with `serde(default)`, so no version bump is needed: an older build
+/// reads a signature row as the plain annotation it already knows how to draw and merely omits
+/// the label, which is a downgrade rather than a misread.
+///
+/// The label is not a per-row visual preference that a user might want to switch off: D-N2 makes
+/// it part of the artifact, so a row carrying this flag gets the label written into page content
+/// on every save. If the flag were dropped on a later save the label would vanish from the next
+/// written file, and the disclosure would depend on which build happened to save last.
+pub const SIGNATURE_FLAG: &str = "visualSignature";
+
+/// The vertical gap between a signature's rect and the label's baseline, in points.
+///
+/// Small and negative -- *below* the mark, not above it -- because a signature sits on a line and
+/// a label above it would land in the text of the row above. Two points clears the mark's own
+/// descender without crowding the next line.
+const SIGNATURE_LABEL_GAP: f32 = 2.0;
 
 /// A highlight with no stored opacity: matches the UI's default so a blob missing
 /// the field renders the same as one that has it.
@@ -88,6 +109,10 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
     // ordered parent-first.
     let mut written: HashMap<String, lopdf::ObjectId> = HashMap::new();
     let mut replies: Vec<(lopdf::ObjectId, String)> = Vec::new();
+    // (page index, rect) for every row that is a visual signature, so the disclosure can be
+    // written once per row after the annotations exist. Collected rather than written inline
+    // because `signature_label` needs `&mut document` while the row's own write already holds it.
+    let mut labels: Vec<(u32, PdfRect)> = Vec::new();
 
     for annotation in annotations {
         // `get_pages()` is keyed by lopdf's **1-based** page number, while the DB and the
@@ -100,6 +125,12 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
             // an unrelated page.
             continue;
         };
+        // A row flagged as a visual signature is resolved *before* the writeability check
+        // below, because that check `continue`s on a row it cannot draw -- and a signature row
+        // is exactly the one that must not be skipped in silence. A flagged row that draws
+        // nothing therefore fails the save here rather than being saved with no disclosure.
+        let signature = signature_label_rect(annotation)?;
+
         let Some(mut dictionary) = dictionary_for(&mut document, annotation)? else {
             continue;
         };
@@ -113,6 +144,12 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
         let blob: serde_json::Value = serde_json::from_str(&annotation.data).unwrap_or_default();
         apply_review_state(&mut dictionary, &blob);
         let parent = common_blob(&blob).parent;
+
+        // Recorded for the third pass, where the disclosure is written into page content.
+        if let Some(rect) = signature {
+            labels.push((annotation.page, rect));
+        }
+
         let object_id = lopdf_write::attach_annotation(&mut document, page_id, dictionary)?;
         written.insert(annotation.id.clone(), object_id);
         if let Some(parent) = parent {
@@ -136,7 +173,96 @@ pub fn apply_annotations(bytes: &[u8], annotations: &[Annotation]) -> Result<Vec
         dictionary.set("IRT", Object::Reference(parent_id));
     }
 
+    // Third pass: the disclosure. Written after the annotations so the page carries both, and
+    // after the reply pass so a failure here cannot leave a half-written reply chain.
+    for (page, rect) in labels {
+        // The label's baseline sits just under the mark's own bottom edge. `rect` is normalised
+        // by the caller, so `y0` is the lower edge in page space and the label reads left to
+        // right from the mark's left edge -- aligned with the signature rather than centred on
+        // it, because a centred label drifts as the mark grows.
+        let baseline = rect.y0 - SIGNATURE_LABEL_GAP;
+        export::signature_label(
+            &mut document,
+            page,
+            rect.x0,
+            baseline,
+            export::SIGNATURE_LABEL_FONT_SIZE,
+        )?;
+    }
+
     lopdf_write::save_to_bytes(&mut document)
+}
+
+/// Whether a blob marks its row as a visual signature (D-N2).
+fn is_visual_signature(blob: &serde_json::Value) -> bool {
+    blob.get(SIGNATURE_FLAG)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The rect a signature label is placed against: the **same** rect the mark itself is drawn to.
+///
+/// Derived per kind, mirroring `dictionary_for`, and *not* through [`appearance_for`]: that
+/// function answers a different question -- "what does flattening bake?" -- and correctly returns
+/// `None` for `Ink` and `FreeText`, which D-N10 leaves as annotations. A label placer built on it
+/// would therefore refuse every real signature, which is how this was found.
+///
+/// The distinction that actually matters: an ink blob carries `strokes`, not a `rect`, so any
+/// helper that reads `blob["rect"]` finds nothing for a drawn signature and silently places no
+/// label while the save reports success.
+///
+/// A flagged row that draws nothing, or whose kind cannot carry a signature, is an **error**: the
+/// row claims to be a signature, so it either has a mark to disclose or the save must not pretend
+/// it succeeded.
+fn signature_label_rect(annotation: &Annotation) -> Result<Option<PdfRect>, AppError> {
+    let blob: serde_json::Value = serde_json::from_str(&annotation.data).unwrap_or_default();
+    if !is_visual_signature(&blob) {
+        return Ok(None);
+    }
+
+    let rect = match annotation.kind {
+        // A drawn signature: the box is the ink's extent, exactly as the writer computes it.
+        AnnotationKind::Ink => {
+            let parsed: InkBlob = serde_json::from_value(blob).map_err(|error| {
+                AppError::Other(format!("annotation {}: {error}", annotation.id))
+            })?;
+            let strokes: Vec<Vec<(f32, f32)>> = parsed
+                .strokes
+                .iter()
+                .map(|stroke| stroke.iter().map(|point| (point[0], point[1])).collect())
+                .collect();
+            if !strokes.iter().any(|stroke| stroke.len() >= 2) {
+                return Err(no_label_error(&annotation.id));
+            }
+            strokes_bounds(&strokes)
+        }
+        // A typed signature: the box is the one the writer draws text into.
+        AnnotationKind::FreeText(_) => {
+            let parsed: ShapeBlob = serde_json::from_value(blob).map_err(|error| {
+                AppError::Other(format!("annotation {}: {error}", annotation.id))
+            })?;
+            rect_from(&parsed.rect)
+        }
+        // Every other kind is refused rather than labelled: a highlight is not a signature, and
+        // labelling one would put a legal disclosure on a page the user never signed.
+        _ => {
+            return Err(AppError::Other(format!(
+                "annotation {} is flagged as a visual signature but is a {}, which cannot carry a \
+                 signature; only ink and free text can, so the flag is wrong and the save stops",
+                annotation.id,
+                annotation.kind.as_str()
+            )))
+        }
+    };
+
+    Ok(Some(rect.normalised()))
+}
+
+fn no_label_error(id: &str) -> AppError {
+    AppError::Other(format!(
+        "annotation {id} is flagged as a visual signature but draws nothing, so it would carry no \
+         required label; refusing rather than saving a signature with no disclosure"
+    ))
 }
 
 /// Builds an annotation dictionary from a stored row, or `None` if the row's
@@ -1540,6 +1666,132 @@ mod tests {
             created_at: 0,
             modified_at: 0,
         }
+    }
+
+    /// Collects every content stream on page 0 as **raw bytes**, so a test can look for an
+    /// operator or a literal without caring which stream the writer put it in.
+    ///
+    /// Bytes rather than `String` because the label contains the WinAnsi em dash `0x97`, which is
+    /// not valid UTF-8 on its own: `from_utf8_lossy` replaces it with U+FFFD and would make the
+    /// encoding untestable, which is the one thing about the label most likely to break.
+    fn page_0_content(document: &Document) -> Vec<u8> {
+        let pages = document.get_pages();
+        let page_id = *pages.get(&1).expect("page 1");
+        let page = document.get_object(page_id).unwrap().as_dict().unwrap();
+        let contents = page.get(b"Contents").unwrap();
+        let ids: Vec<lopdf::ObjectId> = match contents {
+            Object::Reference(id) => vec![*id],
+            Object::Array(items) => items
+                .iter()
+                .filter_map(|item| item.as_reference().ok())
+                .collect(),
+            other => panic!("unexpected /Contents: {other:?}"),
+        };
+        let mut all = Vec::new();
+        for id in ids {
+            let stream = document.get_object(id).unwrap().as_stream().unwrap();
+            all.extend_from_slice(&stream.content);
+            all.push(b'\n');
+        }
+        all
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    }
+
+    /// A **drawn** signature puts the disclosure in page content, positioned under the mark.
+    ///
+    /// This is the case a naive implementation gets wrong and reports success on. An ink row's
+    /// blob carries `strokes`, not a `rect`, so a label placer that read `blob["rect"]` would find
+    /// nothing, place no label, and return `Ok` -- a saved document with a signature and no
+    /// disclosure, which is precisely what D-N2 forbids. The test therefore starts from a real
+    /// ink blob with no rect in it at all.
+    #[test]
+    fn a_drawn_signature_carries_its_label_in_page_content() {
+        let annotations = vec![ink_row(
+            r##"{"v":2,"visualSignature":true,"strokes":[[[100.0,500.0],[140.0,540.0],[180.0,500.0]]],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let content = page_0_content(&document);
+
+        assert!(
+            contains_bytes(&content, "Visual signature"),
+            "the label must be in page content, not only on the annotation"
+        );
+        // The em dash is WinAnsi 0x97, not UTF-8 `E2 80 94`. Asserting on the byte is what proves
+        // the encoding rather than proving "some bytes that roughly spell the label".
+        assert!(
+            content.contains(&0x97),
+            "the em dash must be the WinAnsi byte 0x97 in the content stream"
+        );
+        assert!(
+            !content.windows(3).any(|w| w == [0xE2, 0x80, 0x94]),
+            "the em dash must not be written as UTF-8; a WinAnsi font would draw three glyphs"
+        );
+        // The label uses its own font, and is positioned from the mark's own left edge: the ink
+        // strokes span x 100-180, y 500-540, so the baseline is just under y=500 at x=100.
+        assert!(
+            contains_bytes(&content, "SignLbl"),
+            "the label must be drawn with its own font resource"
+        );
+        assert!(
+            contains_bytes(&content, "100") && contains_bytes(&content, "498"),
+            "the label must sit at the mark's left edge, just below its bottom: 100 / ~498"
+        );
+    }
+
+    /// The same label is written for a **typed** signature, which is a `FreeText` row with a rect.
+    #[test]
+    fn a_typed_signature_carries_its_label_in_page_content() {
+        let annotations = vec![free_text_row(
+            FreeTextMode::Textbox,
+            r##"{"v":2,"visualSignature":true,"rect":[72,600,272,640],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        assert!(
+            contains_bytes(&page_0_content(&document), "Visual signature"),
+            "a typed signature carries the same mandatory disclosure as a drawn one"
+        );
+    }
+
+    /// An ordinary ink mark is **not** a signature and gets no label.
+    ///
+    /// The negative half of D-N2. Without it, "the label appears" could be satisfied by labelling
+    /// every ink mark, which would put a legal disclosure on a hand-drawn arrow.
+    #[test]
+    fn an_ordinary_ink_mark_is_not_labelled_as_a_signature() {
+        let annotations = vec![ink_row(
+            r##"{"v":2,"strokes":[[[100.0,500.0],[140.0,540.0]]],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        assert!(
+            !contains_bytes(&page_0_content(&document), "Visual signature"),
+            "a plain ink mark must not be labelled as a signature"
+        );
+    }
+
+    /// A row that claims to be a signature but draws nothing is refused, not saved unlabelled.
+    ///
+    /// This is the honest failure. A single-point stroke has no extent, so there is no mark and
+    /// therefore nothing to disclose; writing the file anyway would produce a document that
+    /// silently lost the user's signature while the save reported success.
+    #[test]
+    fn a_signature_that_draws_nothing_is_refused_rather_than_saved_unlabelled() {
+        let annotations = vec![ink_row(
+            r##"{"v":2,"visualSignature":true,"strokes":[[[100.0,500.0]]],"color":"#000000"}"##,
+        )];
+        let error = apply_annotations(&sample_pdf(), &annotations)
+            .expect_err("a signature with no drawable mark must not save silently");
+        assert!(
+            error.to_string().contains("carry no required label"),
+            "the refusal must say why; got {error}"
+        );
     }
 
     /// Reads an array of reals as floats. lopdf preserves the written numeric type, so a

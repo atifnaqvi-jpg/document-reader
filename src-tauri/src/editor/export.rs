@@ -451,11 +451,206 @@ pub fn watermark(document: &mut Document, text: &str) -> Result<usize, AppError>
     Ok(document.get_pages().len())
 }
 
-/// Escapes a string for a PDF `Tj` literal.
+/// The resource name a Fill & Sign label's font is installed under.
+///
+/// Same reasoning as [`WATERMARK_FONT`]: a page's own text almost always draws with `F1`, and
+/// taking that name over would redraw the page in the label's font. `SignLbl` is short, legal in
+/// a PDF name (no delimiter, no `#`), and cannot collide with a name this app writes.
+const SIGNATURE_LABEL_FONT: &[u8] = b"SignLbl";
+
+/// The label a visual signature carries, verbatim (D-N2, Q3 signed off 2026-11-22).
+///
+/// This constant is the single source for the page-content string **and** the UI string. One
+/// string, two readers, so the label in the artefact and the label on screen cannot drift -- which
+/// is the only way "the file says what the app says" stays true after an edit to either.
+///
+/// The em dash is deliberate and is why [`win_ansi_bytes`] exists: `—` as UTF-8 is three bytes
+/// (`E2 80 94`) and a `/WinAnsiEncoding` font would draw three glyphs of garbage. It is `0x97` in
+/// WinAnsi. Q3 approved this wording *including* the dash, so the dash is encoded rather than
+/// swapped for a hyphen.
+pub const VISUAL_SIGNATURE_LABEL: &str =
+    "Visual signature \u{2014} no cryptographic weight. This is not a digital signature.";
+
+/// Font size for the label, in points.
+///
+/// Small on purpose: the label must be legible when reading the page, and must not compete with
+/// the document. 6pt is the same floor the watermark uses for a fitted mark.
+pub const SIGNATURE_LABEL_FONT_SIZE: f32 = 6.0;
+
+/// Encodes `text` as WinAnsi bytes for a `/WinAnsiEncoding` font.
+///
+/// Only the two characters this label needs are mapped beyond ASCII, and anything unmapped is
+/// refused rather than written as `?`: a label that silently loses a character no longer says what
+/// the ruling approved, and this is a disclosure string where "nearly the same words" is not good
+/// enough.
+fn win_ansi_bytes(text: &str) -> Result<Vec<u8>, AppError> {
+    let mut bytes = Vec::with_capacity(text.len());
+    for character in text.chars() {
+        let byte = match character {
+            // WinAnsi 0x97 is the em dash. `0x80`-`0x9F` are the range where WinAnsi differs
+            // from Latin-1, so this cannot be inferred from a cast.
+            '\u{2014}' => 0x97_u8,
+            '\u{2013}' => 0x96_u8, // en dash, mapped for completeness of the same range
+            c if (c as u32) < 0x80 => c as u8,
+            other => {
+                return Err(AppError::Other(format!(
+                    "the signature label contains {other:?}, which WinAnsi cannot encode; the \
+                     label is a disclosure and must be written exactly"
+                )))
+            }
+        };
+        bytes.push(byte);
+    }
+    Ok(bytes)
+}
+
+/// Escapes WinAnsi bytes for a PDF `Tj` literal.
+///
+/// The sibling of [`escape_text`], which takes a `&str` and so cannot carry a `0x97` byte: an
+/// escaped string is only correct once the *encoding* has been decided, not before. Bytes above
+/// `0x7F` need no escape in a literal string, only `\`, `(` and `)` do.
+fn escape_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut escaped = Vec::with_capacity(bytes.len());
+    for &byte in bytes {
+        match byte {
+            b'\\' => escaped.extend_from_slice(b"\\\\"),
+            b'(' => escaped.extend_from_slice(b"\\("),
+            b')' => escaped.extend_from_slice(b"\\)"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// Writes the visual-signature disclosure beside a placed signature (D-N2).
+///
+/// **This is page content, not an annotation**, and that is the whole point of D-N2: an annotation
+/// disappears when a viewer hides annotations, and the disclosure has to survive being mailed to
+/// someone else. So this appends a content stream, exactly as `watermark` does, and for the same
+/// stated reason.
+///
+/// The call is deliberately narrow -- one line of text at a given size, at a given page position --
+/// because the two things it must not do are (a) become a general text writer with reflow and
+/// wrapping it cannot justify, and (b) touch the page's own resources. It reuses one font object
+/// across all pages like the watermark, and installs it under its own name.
+///
+/// `page` is a **0-based index**, matching the DB, the UI and the renderer. lopdf's `get_pages()`
+/// is keyed from 1, so the conversion happens here, once, at the boundary where the two notions
+/// meet -- the same place and the same `+ 1` as `annotate::apply_annotations`, and for the same
+/// reason: a caller should never have to remember which convention a given helper speaks.
+///
+/// `(x, y)` is the label's **baseline start** in page space, matching `Tj`'s own convention, so a
+/// caller positions it by the text's baseline rather than its top-left corner. Page rotation and a
+/// non-zero `/MediaBox` origin are not compensated here; the caller composes them, and the caller
+/// is the annotate path which already knows the page's geometry.
+pub fn signature_label(
+    document: &mut Document,
+    page: u32,
+    x: f32,
+    y: f32,
+    size: f32,
+) -> Result<(), AppError> {
+    let page_id = *document
+        .get_pages()
+        .get(&(page + 1))
+        .ok_or_else(|| AppError::Other(format!("page {page} is not in the document")))?;
+
+    // Refuse a nonsense position rather than writing a stream that draws nothing: a label that
+    // is silently off-page is the failure mode where everything looks fine and the file carries
+    // no disclosure at all.
+    if !(x.is_finite() && y.is_finite() && size.is_finite()) || size <= 0.0 {
+        return Err(AppError::Other(
+            "the signature label needs a finite position and a positive size".to_string(),
+        ));
+    }
+
+    let escaped = escape_bytes(&win_ansi_bytes(VISUAL_SIGNATURE_LABEL)?);
+
+    let operations = vec![
+        Operation::new("q", vec![]),
+        // A mid-grey, so the label reads as a disclosure rather than as part of the document's
+        // own text. It is not hidden and not white: the ruling asks for *visible*.
+        Operation::new("rg", vec![0.35.into(), 0.35.into(), 0.35.into()]),
+        Operation::new("BT", vec![]),
+        Operation::new(
+            "Tf",
+            vec![Object::Name(SIGNATURE_LABEL_FONT.to_vec()), size.into()],
+        ),
+        Operation::new("Td", vec![x.into(), y.into()]),
+        Operation::new("Tj", vec![Object::string_literal(escaped)]),
+        Operation::new("ET", vec![]),
+        Operation::new("Q", vec![]),
+    ];
+
+    let content = Content { operations };
+    let encoded = content
+        .encode()
+        .map_err(|error| AppError::Other(format!("could not encode the label: {error}")))?;
+    let stream_id = document.add_object(Stream::new(dictionary! {}, encoded));
+
+    let mut array = contents_array(document, page_id)?;
+    array.push(Object::Reference(stream_id));
+    let page_dict = document
+        .get_object_mut(page_id)
+        .map_err(|error| AppError::Other(format!("page unreadable: {error}")))?
+        .as_dict_mut()
+        .map_err(|error| AppError::Other(format!("page is not a dictionary: {error}")))?;
+    page_dict.set(b"Contents", Object::Array(array));
+
+    // Whether the font object is needed is decided *before* the mutable resources borrow below,
+    // because `add_object` also needs `&mut document` and the two cannot be held at once.
+    //
+    // A page whose `/Resources` is inherited reports no private `/Font` here, so the first write
+    // on such a page creates one object and `writable_resources_mut` gives the page its own
+    // resources; the second write then finds the name present and reuses it.
+    let label_font_present = document
+        .get_object(page_id)
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .and_then(|page| page.get(b"Resources").ok())
+        .and_then(|resources| resources.as_dict().ok())
+        .and_then(|resources| resources.get(b"Font").ok())
+        .and_then(|fonts| fonts.as_dict().ok())
+        .map(|fonts| fonts.has(SIGNATURE_LABEL_FONT))
+        .unwrap_or(false);
+
+    let label_font_id = if label_font_present {
+        None
+    } else {
+        Some(document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            // Explicit, because the em dash's byte is only the em dash under WinAnsi. Without
+            // this the reader would be free to pick a different encoding and 0x97 becomes a
+            // different glyph.
+            "Encoding" => "WinAnsiEncoding",
+        }))
+    };
+
+    let resources = textlocate::writable_resources_mut(document, page_id)?;
+    let mut fonts = resources
+        .get(b"Font")
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(font_id) = label_font_id {
+        fonts.set(SIGNATURE_LABEL_FONT, Object::Reference(font_id));
+    }
+    resources.set(b"Font", Object::Dictionary(fonts));
+
+    Ok(())
+}
+
+/// Escapes a string for a PDF `Tj` literal, for callers whose text is already known-encodable.
 ///
 /// PDF string literals treat `\`, `(` and `)` specially; unescaped text either fails to
 /// parse or silently truncates at the first `)`, which would make a watermark appear
 /// missing rather than wrong.
+///
+/// Takes a `&str` and pushes its `char`s, so it is only correct for ASCII text. The signature
+/// label needs `0x97` for its em dash and therefore goes through [`escape_bytes`] instead.
 fn escape_text(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
@@ -775,5 +970,163 @@ mod tests {
         assert_eq!(escape_text("DRAFT"), "DRAFT");
         assert_eq!(escape_text("50% (draft)"), "50% \\(draft\\)");
         assert_eq!(escape_text("back\\slash"), "back\\\\slash");
+    }
+
+    /// The label the content stream carries is the label the ruling approved, character for
+    /// character.
+    ///
+    /// Q3 approved a wording *verbatim*, so this is an exact comparison against a literal typed
+    /// out here rather than against the constant: comparing the constant with itself would pass
+    /// for any string, including an edited one, which is exactly the drift a verbatim ruling
+    /// exists to prevent.
+    #[test]
+    fn the_label_wording_is_the_one_that_was_approved() {
+        assert_eq!(
+            VISUAL_SIGNATURE_LABEL,
+            "Visual signature \u{2014} no cryptographic weight. This is not a digital signature.",
+            "the approved wording must not be paraphrased; Q3 approved this sentence exactly"
+        );
+    }
+
+    /// The em dash is encoded as WinAnsi `0x97`, not as three UTF-8 bytes.
+    ///
+    /// This is the defect the encoding exists to prevent and it is invisible without a test: a
+    /// `/WinAnsiEncoding` font reads `0x97` as an em dash and `E2 80 94` as three unrelated
+    /// glyphs. The label would still be *present* -- it would just say something else.
+    #[test]
+    fn the_em_dash_becomes_one_win_ansi_byte_not_three_utf8_bytes() {
+        let bytes = win_ansi_bytes(VISUAL_SIGNATURE_LABEL).expect("the label is encodable");
+        assert!(
+            bytes.contains(&0x97),
+            "the em dash must be WinAnsi 0x97; got {bytes:?}"
+        );
+        assert!(
+            !bytes.windows(3).any(|w| w == [0xE2, 0x80, 0x94]),
+            "the em dash must not be written as UTF-8; a WinAnsi font would draw three glyphs"
+        );
+        // The rest of the label is ASCII, so the encoded length is the char count.
+        assert_eq!(bytes.len(), VISUAL_SIGNATURE_LABEL.chars().count());
+    }
+
+    /// A character WinAnsi cannot encode is refused rather than written as a placeholder.
+    #[test]
+    fn an_unencodable_character_is_refused_rather_than_mangled() {
+        let error = win_ansi_bytes("signed by 李")
+            .expect_err("a CJK character has no WinAnsi byte and must not be silently dropped");
+        assert!(
+            error.to_string().contains("WinAnsi cannot encode"),
+            "the refusal must name the reason; got {error}"
+        );
+    }
+
+    /// The label is appended as a **content stream** and installs its font in the page resources.
+    ///
+    /// The assertion that matters is the negative one: the page's `Contents` grows by exactly one
+    /// stream and the page gains no annotation. D-N2 chose content over annotation because an
+    /// annotation can be switched off by a viewer, and a test that only checked "the label text
+    /// appears somewhere in the file" would pass for the wrong mechanism.
+    #[test]
+    fn the_label_is_written_into_page_content_and_not_as_an_annotation() {
+        let mut document = blank_page_pdf();
+        let page_id = *document.get_pages().get(&1).expect("page 1");
+        let before = contents_array(&document, page_id).expect("contents").len();
+        let annotations_before = document
+            .get_object(page_id)
+            .and_then(|o| o.as_dict())
+            .ok()
+            .and_then(|d| d.get(b"Annots").ok())
+            .and_then(|a| a.as_array().ok())
+            .map(|a| a.len())
+            .unwrap_or(0);
+
+        signature_label(&mut document, 0, 72.0, 100.0, 6.0).expect("label writes");
+
+        let after = contents_array(&document, page_id).expect("contents").len();
+        assert_eq!(
+            after,
+            before + 1,
+            "the label must append exactly one content stream, not rewrite the page's contents"
+        );
+
+        let annotations_after = document
+            .get_object(page_id)
+            .and_then(|o| o.as_dict())
+            .ok()
+            .and_then(|d| d.get(b"Annots").ok())
+            .and_then(|a| a.as_array().ok())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(
+            annotations_after, annotations_before,
+            "the label must be content, not an annotation: an annotation is switchable, and a \
+             disclosure that a viewer can hide is not a disclosure"
+        );
+
+        // The font really is installed under the label's own name, with the encoding that makes
+        // 0x97 an em dash.
+        let resources = document
+            .get_object(page_id)
+            .and_then(|o| o.as_dict())
+            .ok()
+            .and_then(|d| d.get(b"Resources").ok())
+            .and_then(|r| r.as_dict().ok())
+            .expect("the page must have private resources after the write");
+        let fonts = resources
+            .get(b"Font")
+            .and_then(|f| f.as_dict())
+            .expect("a /Font dictionary");
+        let font_ref = fonts
+            .get(SIGNATURE_LABEL_FONT)
+            .expect("the label font must be registered");
+        let font = document
+            .get_object(font_ref.as_reference().expect("a reference"))
+            .and_then(|o| o.as_dict())
+            .expect("the font object");
+        assert_eq!(
+            font.get(b"Encoding").and_then(Object::as_name).unwrap(),
+            b"WinAnsiEncoding",
+            "the font must declare WinAnsi or the em dash byte means something else"
+        );
+    }
+
+    /// Writing twice reuses the font object rather than adding a second one.
+    #[test]
+    fn a_second_label_reuses_the_font_rather_than_growing_the_file() {
+        let mut document = blank_page_pdf();
+        signature_label(&mut document, 0, 72.0, 100.0, 6.0).expect("first");
+        let font_objects_after_first = count_font_objects(&document);
+        signature_label(&mut document, 0, 72.0, 120.0, 6.0).expect("second");
+        assert_eq!(
+            count_font_objects(&document),
+            font_objects_after_first,
+            "the label's font is identical on every page and must not be duplicated"
+        );
+    }
+
+    fn count_font_objects(document: &Document) -> usize {
+        document
+            .objects
+            .values()
+            .filter(|object| {
+                object
+                    .as_dict()
+                    .map(|d| d.get(b"BaseFont").is_ok())
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    /// A non-finite or non-positive position is refused, because a label drawn off-page is a
+    /// document that claims to carry a disclosure and does not.
+    #[test]
+    fn a_nonsense_position_is_refused_rather_than_drawn_off_page() {
+        let mut document = blank_page_pdf();
+        assert!(signature_label(&mut document, 0, f32::NAN, 100.0, 6.0).is_err());
+        assert!(signature_label(&mut document, 0, 72.0, f32::INFINITY, 6.0).is_err());
+        assert!(signature_label(&mut document, 0, 72.0, 100.0, 0.0).is_err());
+        assert!(
+            signature_label(&mut document, 1, 72.0, 100.0, 6.0).is_err(),
+            "page 1 is past this one-page document"
+        );
     }
 }
