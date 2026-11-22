@@ -292,14 +292,16 @@ fn the_windows_count_is_the_linux_count_less_the_tests_that_are_linux_only() {
 
 /// The Linux floor cannot exceed what the tree reports, or CI would fail on a correct commit. It
 /// also cannot sit below it, which is exactly the state this unit found it in, at 62 below.
+///
+/// Only the equality is asserted. An `assert!(CI_LINUX_PASSED_FLOOR <= PLAIN_PASSED)` beside it
+/// would be the weaker half of the same fact *and* clippy is right that
+/// `assertions_on_constants` deletes it, so it is not written: a guard the compiler removes is
+/// worse than no guard, because it looks like one.
 #[test]
 fn the_linux_floor_is_reachable_and_not_vacuous() {
-    assert!(
-        CI_LINUX_PASSED_FLOOR <= PLAIN_PASSED,
-        "the Linux floor exceeds the measured plain count, so CI would fail on a correct tree"
-    );
     assert_eq!(
         CI_LINUX_PASSED_FLOOR, PLAIN_PASSED,
-        "the Linux floor is below the measured count; headroom here means the floor cannot fail"
+        "the Linux floor must equal the measured count: above it, CI fails on a correct tree; \
+         below it, the floor cannot fail and stops noticing tests that are no longer collected"
     );
 }
