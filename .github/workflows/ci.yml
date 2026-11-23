@@ -185,8 +185,13 @@ jobs:
           # so a checkout without either prints its skip instead of passing, and that moves this
           # pin by exactly five. The sixth test in that file, the fixture-not-committed guard, is
           # plain and moved the `passed` floor instead.
-          if [ "$ignored" -ne 115 ]; then
-            echo "::error::$ignored tests ignored; 115 machine-dependent tests are expected. Add the mark deliberately or fix the test."
+          # Measured at 117, not 113: §6's last two rows. `a_saved_signature_is_visible_in_a_real_viewer`
+          # reopens the saved file and inspects an `/AP` stream, and
+          # `the_lea_form_accepts_a_signature_on_its_own_line` renders the fixture twice and
+          # compares ink -- both need a real PDFium by construction, and the second also needs the
+          # LEA identity document, so both are `#[ignore]`d here and move this pin by two.
+          if [ "$ignored" -ne 117 ]; then
+            echo "::error::$ignored tests ignored; 117 machine-dependent tests are expected. Add the mark deliberately or fix the test."
             exit 1
           fi
           # Measured, not computed: 489 on Linux without PDFium -- 479 before the MSRV
@@ -366,8 +371,8 @@ jobs:
           # below what the tree reports, and a floor that far below cannot notice tests that stop
           # being collected -- which is the only thing it is for. The value is held identical to
           # `tests/test_count_pins.rs`; that file fails if this line and the source disagree.
-          if [ "$passed" -lt 1029 ]; then
-            echo "::error::only $passed tests ran; 1029 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 1040 ]; then
+            echo "::error::only $passed tests ran; 1040 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
@@ -548,11 +553,11 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          # Measured at 1141 on this target (run 45074416363). Three below the Linux
-          # include-ignored count because three tests are compiled out off Linux: two
-          # `cfg(not(windows))` certificate-store refusals and the `cfg(unix)` poppler render.
-          # Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
-          if ($passed -lt 1141) {
+          # Measured at 1154 on this tree. Three below the Linux include-ignored count (1157)
+          # because three tests are compiled out off Linux: two `cfg(not(windows))`
+          # certificate-store refusals and the `cfg(unix)` poppler render. Held identical to
+          # `tests/test_count_pins.rs`, which fails on disagreement.
+          if ($passed -lt 1154) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }

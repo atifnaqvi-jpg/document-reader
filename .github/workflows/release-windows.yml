@@ -150,7 +150,7 @@ jobs:
           # include-ignored count because three tests are compiled out off Linux: two
           # `cfg(not(windows))` certificate-store refusals and the `cfg(unix)` poppler render.
           # Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
-          if ($passed -lt 1141) {
+          if ($passed -lt 1154) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }

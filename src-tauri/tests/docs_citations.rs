@@ -116,10 +116,15 @@ const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
 /// `docs/P3.3a-fill-and-sign-DESIGN.md`, which is governed from the moment it is written and names
 /// the acceptance tests its phase owes. Each entry is removed by this guard the moment its test
 /// lands, so the list cannot rot into a permanent hole.
-const PLANNED_SYMBOLS: [(&str, &str); 1] = [(
-    "an_overlay_leaves_a_signed_documents_badge_unchanged",
-    "docs/P3.3a-fill-and-sign-DESIGN.md",
-)];
+///
+/// **Empty again since 2026-11-23.** The last entry was
+/// `an_overlay_leaves_a_signed_documents_badge_unchanged`, which never landed *and never could*:
+/// the row it named was amended by ruling (D-N6, "I will go with option a") to
+/// `an_overlay_never_improves_a_signed_documents_badge`, and that test now exists. The old name was
+/// removed rather than carried, because an entry whose test was renamed out from under it is not a
+/// plan, it is a stale token that would have sat here forever. The design document no longer names
+/// the old symbol either, so this is not an exemption running with nothing to exempt.
+const PLANNED_SYMBOLS: [(&str, &str); 0] = [];
 
 /// Symbols a governed document cites **in order to assert that they are absent**, with the reason
 /// the absence is load-bearing.

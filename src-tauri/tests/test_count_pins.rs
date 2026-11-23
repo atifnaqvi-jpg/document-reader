@@ -56,33 +56,34 @@ fn read(relative: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 
 /// `cargo test`, plain shape, on this machine (Linux, PDFium present, LEA fixture present).
-pub const PLAIN_PASSED: usize = 1029;
+pub const PLAIN_PASSED: usize = 1040;
 /// `cargo test`, plain shape: tests that carry `#[ignore]`.
-pub const PLAIN_IGNORED: usize = 115;
+pub const PLAIN_IGNORED: usize = 117;
 /// `cargo test -- --include-ignored`: nothing may remain ignored.
-pub const INCLUDED_PASSED: usize = 1144;
+pub const INCLUDED_PASSED: usize = 1157;
 pub const INCLUDED_IGNORED: usize = 0;
 
 /// The Linux CI job runs without PDFium, so every gated test stays ignored. It asserts the ignored
 /// count exactly, because a test that silently stops being collected is the failure mode there.
-pub const CI_LINUX_IGNORED: usize = 115;
+pub const CI_LINUX_IGNORED: usize = 117;
 
 /// The Linux CI job's `passed` floor. This is a *floor*, not an equality, and it had drifted below
 /// the tree: it said 959 while the tree reports 1021, so 62 tests could stop being collected before
 /// CI noticed. Raised here to the measured value, which is what the file's own comment says the
 /// floor is for -- headroom is a floor that cannot fail.
-pub const CI_LINUX_PASSED_FLOOR: usize = 1029;
+pub const CI_LINUX_PASSED_FLOOR: usize = 1040;
 
-/// The shipping target's floor, measured on Windows (run 45074416363: `PDFium tests ran: 1131`).
+/// The shipping target's floor, measured on Windows (run 45097197891: `PDFium tests ran: 1153`,
+/// re-measured for 1154 in this unit's own change).
 ///
 /// It is three below [`INCLUDED_PASSED`] and the difference is accounted for, not absorbed: three
 /// tests are compiled out off Linux. `tests/signing_store.rs`'s
 /// `listing_refuses_off_windows_rather_than_reporting_an_empty_store` and
 /// `tests/signing_certificates.rs`'s `a_non_windows_build_refuses_the_certificate_store_instead_of_reporting_none`
 /// are `#[cfg(not(windows))]`, and `tests/embed_acceptance.rs`'s
-/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. 1134 - 3 = 1131. A floor
+/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. 1157 - 3 = 1154. A floor
 /// that does not name that arithmetic is a floor nobody can check.
-pub const CI_WINDOWS_PASSED_FLOOR: usize = 1141;
+pub const CI_WINDOWS_PASSED_FLOOR: usize = 1154;
 
 // ---------------------------------------------------------------------------------------------
 // Parsing helpers. Each carrier is read as the artifact it is -- shell, YAML, Rust -- rather than

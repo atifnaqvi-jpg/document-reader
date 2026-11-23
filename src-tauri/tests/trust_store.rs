@@ -1097,3 +1097,116 @@ fn an_overlay_never_makes_an_unsigned_document_look_signed() {
     );
     assert!(!rendered.is_green, "`unsigned` must never be green");
 }
+
+/// §6 row, as amended by the 2026-11-23 ruling (D-N6): **an overlay never makes a signed
+/// document's badge better than a later revision already makes it.**
+///
+/// The row was first written as "the badge is byte-identical before and after". That is
+/// unsatisfiable, and not because the test was hard: `annotate.rs` rewrites the whole file rather
+/// than appending, so a save with *zero* annotations already damages the signature's byte range;
+/// and `badge.rs` defines `Modified` to include "a later revision was appended", so even the
+/// incremental shape that keeps the range intact still reads `Modified`. Both causes are recorded
+/// in the design document under D-N6 with the measurement that showed them.
+///
+/// The ruling kept the half that is a real safety property and dropped the half that described a
+/// state the product does not have. What is asserted is a **relation**, not a literal badge:
+///
+///   * the signed file must still assess as signed after an overlay -- no signature disappearing;
+///   * the badge must never *improve* -- `Valid` must not survive an overlay, because the signed
+///     bytes were rewritten and a reader that called that `Valid` would be lying;
+///   * the badge must never become `Unsigned`, which would be the worst possible false negative.
+///
+/// An earlier draft asserted only `after == Modified`, which would have passed for the wrong
+/// reason on a file that was already `Modified` before the overlay. Asserting the *relation* is
+/// what makes the `Valid` -> `Modified` transition the thing under test.
+#[test]
+fn an_overlay_never_improves_a_signed_documents_badge() {
+    // Anchored before signing, so the untouched file is `Valid` and the transition below is real
+    // rather than a move between two bad states.
+    let (_dir, written) = signed_with(&leaf_identity(), "a signed page");
+    let connection = store_db();
+    store::add_anchor(&connection, &fixture("ca.der"), 1_800_000_000).expect("anchor imports");
+    // Both halves of a `Valid` badge: an anchor proves *who* signed, a clean list proves the
+    // certificate was not revoked. With the anchor alone the honest badge is `unknown`, and the
+    // control below would be asserting a weaker property than the row claims.
+    store::add_crl(&connection, &fixture("crl-empty.der"), 1_800_000_000).expect("crl imports");
+    let now = 1_800_000_000;
+
+    let before = store::assess(&connection, &written, now)
+        .expect("the signed file parses")
+        .expect("the signed file carries a signature");
+    assert_eq!(
+        before.badge,
+        Badge::Valid,
+        "control: the untouched signed file must be `Valid`, or the overlay is not being tested \
+         against the best case and the improvement half of this row is vacuous"
+    );
+    assert_eq!(before.integrity, Integrity::Intact, "control: nothing has touched it yet");
+
+    // Place the overlay through the shipped save path.
+    let after = apply_annotations(&written, &[signature_row(0)]).expect("the overlay saves");
+
+    // The overlay really is in the file. Without this the row could pass on a save that wrote
+    // nothing, which would make the badge stable for the wrong reason.
+    let written_document = Document::load_mem(&after).expect("the overlaid file parses");
+    let page_id = *written_document
+        .get_pages()
+        .values()
+        .next()
+        .expect("one page");
+    assert_eq!(
+        written_document
+            .get_page_annotations(page_id)
+            .expect("annotations")
+            .len(),
+        2,
+        "the overlay must be in the saved file alongside the signature field. The signed fixture \
+         already carries one annotation (the signature's widget), so the measured count is 2"
+    );
+
+    let assessment = store::assess(&connection, &after, now)
+        .expect("the overlaid file parses")
+        .expect(
+            "the signature must still be found after an overlay: losing it would report `unsigned` \
+             on a document the user signed, which is the worst answer available",
+        );
+
+    // The product truth the ruling records: an edit marks the earlier signature `Modified`.
+    assert_eq!(
+        assessment.badge,
+        Badge::Modified,
+        "adding a visual signature to a signed document marks the earlier signature `Modified`, \
+         which is what an edit does in any PDF reader. Got {:?}",
+        assessment.badge
+    );
+    assert!(
+        !assessment.badge.is_green(),
+        "the badge must never improve: a `Valid` badge after the signed bytes were rewritten \
+         would be the product telling the user their signature is intact when it is not"
+    );
+    assert_ne!(
+        assessment.badge,
+        Badge::Unsigned,
+        "an overlay must never make a signed document report as unsigned"
+    );
+    assert!(
+        assessment.badge != Badge::Valid,
+        "an overlay must not leave `Valid` standing"
+    );
+
+    // The relation, spelled out, so a future change to `Badge`'s ordering cannot make this row
+    // pass by re-ranking rather than by holding. `Unsigned` is not ranked here: it is asserted
+    // unreachable above, and giving it a position would invite it being treated as ordinary.
+    let rank = |badge: Badge| match badge {
+        Badge::Valid => 0,
+        Badge::Unknown => 1,
+        Badge::Modified => 2,
+        Badge::Unsigned => 3,
+    };
+    assert!(
+        rank(assessment.badge) >= rank(before.badge),
+        "an overlay must not improve the badge: before {:?}, after {:?}",
+        before.badge,
+        assessment.badge
+    );
+}

@@ -319,9 +319,16 @@ fi
 # position guard) and four in `editor/annotate.rs` (drawn, typed, ordinary-mark negative, and the
 # no-drawable-mark refusal). Measured, not computed: `cargo test` reported 1021/113 and
 # `-- --include-ignored` 1134/0.
-PIN_PLAIN_PASSED=1029
-PIN_PLAIN_IGNORED=115
-PIN_IGNORED_PASSED=1144
+# 2026-11-23 (P3.3a §6 close-out, D-N6 amended by ruling): 1029/115 -> 1040/117 and
+# 1144/0 -> 1157/0. Two ignored arrived with §6's last two rows -- the viewer row inspects an
+# `/AP` stream and the LEA row renders the fixture twice and compares ink -- so both need a real
+# PDFium and cannot run in this shape. Nine plain tests arrived alongside them in earlier units
+# of this phase, plus `an_overlay_never_improves_a_signed_documents_badge`, which replaced the
+# blocked "badge unchanged" row after the ruling and needs no library. Measured, not computed:
+# `cargo test` reported 1040/117 and `-- --include-ignored` 1157/0.
+PIN_PLAIN_PASSED=1040
+PIN_PLAIN_IGNORED=117
+PIN_IGNORED_PASSED=1157
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
