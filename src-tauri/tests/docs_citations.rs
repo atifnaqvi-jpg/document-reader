@@ -116,20 +116,10 @@ const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
 /// `docs/P3.3a-fill-and-sign-DESIGN.md`, which is governed from the moment it is written and names
 /// the acceptance tests its phase owes. Each entry is removed by this guard the moment its test
 /// lands, so the list cannot rot into a permanent hole.
-const PLANNED_SYMBOLS: [(&str, &str); 3] = [
-    (
-        "an_overlay_leaves_a_signed_documents_badge_unchanged",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-    (
-        "a_saved_signature_is_visible_in_a_real_viewer",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-    (
-        "the_lea_form_accepts_a_signature_on_its_own_line",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-];
+const PLANNED_SYMBOLS: [(&str, &str); 1] = [(
+    "an_overlay_leaves_a_signed_documents_badge_unchanged",
+    "docs/P3.3a-fill-and-sign-DESIGN.md",
+)];
 
 /// Symbols a governed document cites **in order to assert that they are absent**, with the reason
 /// the absence is load-bearing.

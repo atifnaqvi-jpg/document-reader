@@ -21,6 +21,8 @@
 
 use std::path::{Path, PathBuf};
 
+use document_reader_lib::editor::annotate::apply_annotations;
+use document_reader_lib::model::{Annotation, AnnotationKind};
 use document_reader_lib::provider::{DocumentHandles, PdfProvider, RasterizedPage};
 use image::GenericImageView;
 
@@ -329,4 +331,258 @@ fn collect_named(dir: &Path, found: &mut Vec<PathBuf>, depth: usize) {
             found.push(path);
         }
     }
+}
+
+/// §6 row: **a signature placed on the LEA form renders on the line it was placed on.**
+///
+/// The other tests in this file measure the form. This one places a signature on it and looks at
+/// the ink, which is the only check that can catch a placement that is arithmetically right and
+/// visually wrong — the failure the design's own §3.1 warns about, where a rise moves the mark and
+/// the code still reports success.
+///
+/// ## How "on the line" is decided without a human eye
+///
+/// A run's box bottom is a descender below its baseline; D-N1 places the mark on the baseline by
+/// subtracting that depth. So the check is differential rather than absolute: render the page
+/// without the signature, render it with one, and locate the ink that appeared. That ink must be
+/// **narrower in y than an em** (it is sitting on one line, not spanning several) and its bottom
+/// must land within a line of the run's own box bottom, where "a line" is that run's font size.
+///
+/// A mark placed a line too low, or at the page origin, fails the first bound; one placed in the
+/// middle of a paragraph fails the second. Printing the measured band keeps the number reviewable
+/// rather than only asserted.
+#[test]
+#[ignore = "requires a real PDFium library and the LEA fixture; `cargo test -- --include-ignored`"]
+fn the_lea_form_accepts_a_signature_on_its_own_line() {
+    let Some(fixture_path) = fixture() else {
+        return;
+    };
+
+    // A run on page 0 to place the signature against, and its font size, measured.
+    let handles = DocumentHandles::new();
+    let grid = PdfProvider::char_grid(&handles, &fixture_path, None, 0).expect("char grid");
+    // The widest run of real glyphs at the page's largest size, so the stroke spans a word rather
+    // than one character. A single character is a few points wide, and the writer refuses a box
+    // too small to draw in -- which is a real refusal, not something to work around.
+    let size = grid
+        .chars
+        .iter()
+        .filter(|c| c.unicode.is_some() && !c.generated && c.font_size > 0.0)
+        .map(|c| c.font_size)
+        .fold(0.0_f32, f32::max);
+    let run = grid
+        .chars
+        .iter()
+        .filter(|c| {
+            c.unicode.is_some()
+                && !c.generated
+                && (c.font_size - size).abs() < 0.01
+                && c.unicode.is_some_and(|ch| !ch.is_whitespace())
+        })
+        .max_by(|a, b| {
+            (a.x1 - a.x0)
+                .partial_cmp(&(b.x1 - b.x0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("the LEA page carries text");
+    // The baseline, page space: the origin minus the box's descender depth, which is the same
+    // correction `state/fillsign.ts` applies as `DESCENT_EM`.
+    let baseline = run.origin_y - (run.origin_y - run.y0).clamp(0.0, size);
+    // A drawn signature has height as well as width: the stroke rises and falls across the word.
+    // A flat line would satisfy the writer but not resemble a mark, and its band would be a
+    // one-pixel row that says nothing about whether it landed on the line.
+    let x0 = run.x0;
+    let x1 = run.x1;
+    let rise = size * 0.7;
+    let baseline_rise = baseline + rise;
+    eprintln!(
+        "LEA placement target: {:?} at size {size}, box y0={}, origin_y={}, baseline={baseline}",
+        run.unicode.map(|c| c.to_string()),
+        run.y0,
+        run.origin_y
+    );
+
+    // Sign it through the shipped save path: an Ink row flagged as a visual signature, its stroke
+    // drawn on the resolved baseline across the run's own width.
+    let row = Annotation {
+        id: "lea-sig".to_string(),
+        document_id: "lea".to_string(),
+        page: 0,
+        kind: AnnotationKind::Ink,
+        data: format!(
+            r##"{{"v":1,"visualSignature":true,"color":"#000000","strokes":[[[{x0},{baseline}],[{x0},{baseline_rise}],[{x1},{baseline_rise}],[{x1},{baseline}]]]}}"##
+        ),
+        text: None,
+        created_at: 0,
+        modified_at: 0,
+    };
+    let source = std::fs::read(&fixture_path).expect("the fixture is readable");
+    let signed = apply_annotations(&source, &[row]).expect("the signature saves");
+
+    // Write beside the fixture, so the real document is never modified.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let signed_path = dir.path().join("lea-signed.pdf");
+    std::fs::write(&signed_path, &signed).expect("the signed copy is written");
+
+    // Differential ink: the dark pixels the overlay added, and where they are.
+    let before = PdfProvider::render_page_at(&fixture_path, 0, 2.0).expect("render original");
+    let after = PdfProvider::render_page_at(&signed_path, 0, 2.0).expect("render signed");
+    assert_eq!(
+        (before.width, before.height),
+        (after.width, after.height),
+        "the overlay must not change the page extent, or the two renders cannot be compared"
+    );
+
+    let before_image = image::load_from_memory(&before.bytes)
+        .expect("decodes")
+        .to_luma8();
+    let after_image = image::load_from_memory(&after.bytes)
+        .expect("decodes")
+        .to_luma8();
+    assert_eq!(before_image.dimensions(), after_image.dimensions());
+
+    // Every pixel that became dark is ink the overlay added. Reported as a bounding band in
+    // *page* units, dividing the pixel rows by the scale, so the numbers compare to the run.
+    let scale = 2.0_f32;
+    let mut min_row = u32::MAX;
+    let mut max_row = 0u32;
+    let mut added = 0usize;
+    for (x, y, pixel) in after_image.enumerate_pixels() {
+        let was = before_image.get_pixel(x, y).0[0];
+        if was >= 128 && pixel.0[0] < 128 {
+            added += 1;
+            min_row = min_row.min(y);
+            max_row = max_row.max(y);
+        }
+    }
+    assert!(
+        added > 20,
+        "the signature must actually draw something: {added} pixels changed. A placement that          saved but drew nothing would otherwise pass this row"
+    );
+
+    // Pixel rows run top-down; PDF y runs bottom-up. Convert the band's extent, not its position,
+    // because the extent is what says "one line" or "half a paragraph".
+    let band_height = (max_row - min_row + 1) as f32 / scale;
+    let page_height = after.height as f32 / scale;
+    let band_bottom = page_height - (max_row as f32 / scale);
+    eprintln!(
+        "LEA overlay ink: {added} px, band {band_height:.1}pt tall, bottom at y={band_bottom:.1} \
+         (target baseline {baseline:.1}, size {size:.1})"
+    );
+
+    assert!(
+        band_height <= size * 1.5,
+        "the mark must sit on one line, not span several: the added ink is {band_height:.1}pt \
+         tall and the line is {size:.1}pt"
+    );
+    assert!(
+        (band_bottom - baseline).abs() <= size,
+        "the mark must land on the line it was placed on: its bottom is at y={band_bottom:.1}, \
+         the target baseline is {baseline:.1}, and the line is {size:.1}pt tall"
+    );
+}
+
+/// §6 row: **a saved signature ticks/renders in a real viewer, not only in our own raster.**
+///
+/// "Our raster" is PDFium through `PdfProvider`. The claim this row makes is that a *different*
+/// reader sees the mark too, which no amount of re-rendering through the same library can
+/// establish. What can be established here, without shipping a second PDF engine, is that the
+/// artifact carries the things every reader keys on independently of us:
+///
+///   * an `/Annot` with a `/Subtype` of `Ink` — a reader that walks annotations finds it;
+///   * a `/Rect` that is non-degenerate and inside the page — a reader that clips to the page
+///     keeps it;
+///   * an `/AP` appearance stream that actually draws — a reader that never runs our code still
+///     paints something, because the appearance is in the file.
+///
+/// The honest limit is stated rather than papered over: this does not prove Adobe Reader paints
+/// it. It proves the file carries an appearance rather than only a `/Contents` our own renderer
+/// happens to interpret, which is the failure this row exists to exclude. The remaining check is
+/// the hand test on a real viewer, which the phase gate already requires.
+#[test]
+#[ignore = "requires a real PDFium library and the LEA fixture; `cargo test -- --include-ignored`"]
+fn a_saved_signature_is_visible_in_a_real_viewer() {
+    let Some(fixture_path) = fixture() else {
+        return;
+    };
+
+    let row = Annotation {
+        id: "lea-visible".to_string(),
+        document_id: "lea".to_string(),
+        page: 0,
+        kind: AnnotationKind::Ink,
+        data: r##"{"v":1,"visualSignature":true,"color":"#000000","strokes":[[[100,400],[160,440],[220,400]]]}"##
+            .to_string(),
+        text: None,
+        created_at: 0,
+        modified_at: 0,
+    };
+    let source = std::fs::read(&fixture_path).expect("the fixture is readable");
+    let signed = apply_annotations(&source, &[row]).expect("the signature saves");
+
+    // Read the file the way another application would: parse it, walk the page's annotations.
+    let document = lopdf::Document::load_mem(&signed).expect("the saved file parses");
+    let page_id = *document.get_pages().values().next().expect("one page");
+    let annotations = document
+        .get_page_annotations(page_id)
+        .expect("the page's annotations are readable");
+    assert_eq!(
+        annotations.len(),
+        1,
+        "exactly the placed signature must be on the page"
+    );
+
+    let annotation = &annotations[0];
+    assert_eq!(
+        annotation.get(b"Subtype").and_then(|s| s.as_name()).ok(),
+        Some(b"Ink".as_ref()),
+        "a reader keys on /Subtype; it must be Ink"
+    );
+
+    // `/Rect` must be real and inside the page, or a reader clips the mark away entirely.
+    let rect = annotation
+        .get(b"Rect")
+        .and_then(|value| value.as_array())
+        .expect("/Rect is an array");
+    let numbers: Vec<f32> = rect
+        .iter()
+        .map(|value| value.as_float().unwrap_or(0.0))
+        .collect();
+    assert_eq!(numbers.len(), 4, "/Rect is four numbers");
+    assert!(
+        numbers[2] > numbers[0] && numbers[3] > numbers[1],
+        "the rectangle must be non-degenerate, got {numbers:?}; a zero-area rect is clipped away"
+    );
+
+    // `/AP` with a stream: the appearance another reader paints. Without this the mark exists
+    // only in a form our own renderer understands.
+    let appearance = annotation
+        .get(b"AP")
+        .and_then(|value| value.as_dict())
+        .expect("the annotation must carry /AP, or a viewer that does not run our code paints                  nothing");
+    let normal = appearance
+        .get(b"N")
+        .expect("/AP must name a normal appearance");
+    let stream_id = normal.as_reference().expect("/AP /N is a stream reference");
+    let stream = document
+        .get_object(stream_id)
+        .and_then(|object| object.as_stream())
+        .expect("/AP /N resolves to a stream");
+    // "Non-empty" is not enough: a stream holding only `q`/`Q` is non-empty and paints nothing.
+    // The claim is that the appearance *paints a stroked path*, so the operators that do that are
+    // named. `m`/`l` build the path, `S` strokes it -- without the stroke the path is constructed
+    // and never drawn, which renders exactly as blank as an empty stream.
+    let content = String::from_utf8_lossy(&stream.content).into_owned();
+    for operator in ["m", "l", "S"] {
+        assert!(
+            content.split_whitespace().any(|token| token == operator),
+            "the appearance must paint the stroke: no `{operator}` operator in {content:?}. A \
+             stream with only `q`/`Q` is present and paints nothing, which is the failure this \
+             row exists to exclude"
+        );
+    }
+    assert!(
+        stream.dict.get(b"BBox").is_ok(),
+        "/AP must declare a /BBox, or a reader has no box to paint the appearance into"
+    );
 }
