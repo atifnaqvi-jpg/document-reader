@@ -116,13 +116,9 @@ const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
 /// `docs/P3.3a-fill-and-sign-DESIGN.md`, which is governed from the moment it is written and names
 /// the acceptance tests its phase owes. Each entry is removed by this guard the moment its test
 /// lands, so the list cannot rot into a permanent hole.
-const PLANNED_SYMBOLS: [(&str, &str); 4] = [
+const PLANNED_SYMBOLS: [(&str, &str); 3] = [
     (
         "an_overlay_leaves_a_signed_documents_badge_unchanged",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-    (
-        "placing_a_signature_writes_nothing_until_the_save",
         "docs/P3.3a-fill-and-sign-DESIGN.md",
     ),
     (
