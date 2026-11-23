@@ -554,11 +554,11 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          # 1156 is derived from the Linux include-ignored count (1159) by subtracting the
-          # three tests compiled out off Linux: two `cfg(not(windows))` certificate-store
-          # refusals and the `cfg(unix)` poppler render. Last measured on Windows at 1154 (run
-          # 45176179504, SHA 2dd51ed) before two platform-independent source guards joined the
-          # tree. Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
+          # Measured at 1156 on this tree (run 45267725552, SHA ff28a0a: "PDFium tests ran:
+          # 1156 passed, 0 ignored"). Three below the Linux include-ignored count (1159)
+          # because three tests are compiled out off Linux: two `cfg(not(windows))`
+          # certificate-store refusals and the `cfg(unix)` poppler render. Held identical to
+          # `tests/test_count_pins.rs`, which fails on disagreement.
           if ($passed -lt 1156) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1

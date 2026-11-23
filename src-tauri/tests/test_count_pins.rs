@@ -73,22 +73,16 @@ pub const CI_LINUX_IGNORED: usize = 117;
 /// floor is for -- headroom is a floor that cannot fail.
 pub const CI_LINUX_PASSED_FLOOR: usize = 1042;
 
-/// The shipping target's floor, derived from [`INCLUDED_PASSED`] by arithmetic and not yet
-/// re-measured on Windows for this tree.
+/// The shipping target's floor, measured on Windows (run 45267725552, 2026-11-23, SHA `ff28a0a`:
+/// `PDFium tests ran: 1156 passed, 0 ignored`).
 ///
-/// Last **measured** on Windows at 1154 (run 45176179504, 2026-11-23, SHA `2dd51ed`); the tree has
-/// since gained two frontend-source guards (`the_error_boundary_wraps_the_app_rather_than_sitting_inside_it`
-/// and `the_release_workflow_comment_states_the_floor_it_enforces`), which are platform-independent,
-/// so 1159 - 3 = 1156 is what this target should report. Stated as derived rather than measured
-/// because no Windows run has confirmed it yet; the dispatch this change accompanies is the
-/// confirmation, and if it reports a different number that is the measurement to record here.
-///
-/// The subtraction is accounted for, not absorbed: three tests are compiled out off Linux.
+/// It is three below [`INCLUDED_PASSED`] and the difference is accounted for, not absorbed: three
+/// tests are compiled out off Linux.
 /// `tests/signing_store.rs`'s `listing_refuses_off_windows_rather_than_reporting_an_empty_store` and
 /// `tests/signing_certificates.rs`'s `a_non_windows_build_refuses_the_certificate_store_instead_of_reporting_none`
 /// are `#[cfg(not(windows))]`, and `tests/embed_acceptance.rs`'s
-/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. A floor that does not name
-/// that arithmetic is a floor nobody can check.
+/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. 1159 - 3 = 1156. A floor
+/// that does not name that arithmetic is a floor nobody can check.
 pub const CI_WINDOWS_PASSED_FLOOR: usize = 1156;
 
 // ---------------------------------------------------------------------------------------------

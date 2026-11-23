@@ -326,7 +326,8 @@ fi
 # of this phase, plus `an_overlay_never_improves_a_signed_documents_badge`, which replaced the
 # blocked "badge unchanged" row after the ruling and needs no library. Measured, not computed:
 # `cargo test` reported 1040/117 and `-- --include-ignored` 1157/0.
-# 2026-11-23 (D10 instrument): 1040/117 -> 1042/117 and 1157/0 -> 1159/0. Two tests arrived with
+# 2026-11-23 (D10 instrument): 1040/117 -> 1042/117 and 1157/0 -> 1159/0. Windows measured at
+# 1156 on the same SHA (run 45267725552), so the shipping floor moved 1154 -> 1156. Two tests arrived with
 # the render-error boundary: a frontend-source guard in `tests/app_css_chrome.rs` that the boundary
 # wraps `App`, and one in `tests/test_count_pins.rs` that the release workflow's comment above its
 # floor states the number that floor enforces. Both read files, so neither needs PDFium and the
