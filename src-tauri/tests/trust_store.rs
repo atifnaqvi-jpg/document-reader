@@ -13,6 +13,7 @@
 //! unit, the "before" half was unreachable -- the command passed `anchored: false` as a literal --
 //! which is why the `valid` state had never been produced by the shipped path on a real file.
 
+use document_reader_lib::editor::annotate::apply_annotations;
 use document_reader_lib::editor::signature::badge::{Badge, Integrity};
 use document_reader_lib::editor::signature::pfx::import_bytes;
 use document_reader_lib::editor::signature::pfx::ImportedIdentity;
@@ -21,6 +22,7 @@ use document_reader_lib::editor::signature::revocation::{
 };
 use document_reader_lib::editor::signature::sign::sign_save;
 use document_reader_lib::editor::signature::store;
+use document_reader_lib::model::{Annotation, AnnotationKind};
 use lopdf::{dictionary, Document};
 
 const PFX_PASSWORD: &str = "correct-horse";
@@ -991,4 +993,107 @@ fn forgetting_an_unknown_crl_reports_not_removed_rather_than_failing() {
         !forget_trust_crl_with(&db, "bm90IGEgcmVhbCBpZGVudGl0eQ==").expect("bogus id"),
         "an id that never matched must not be reported as removed"
     );
+}
+
+/// A drawn signature as the app would hand it to the save: an `Ink` row flagged `visualSignature`.
+fn signature_row(page: u32) -> Annotation {
+    Annotation {
+        id: "sig-1".to_string(),
+        document_id: "doc-1".to_string(),
+        page,
+        kind: AnnotationKind::Ink,
+        data: r##"{"v":1,"visualSignature":true,"color":"#000000","strokes":[[[72,600],[110,640],[150,600]]]}"##
+            .to_string(),
+        text: None,
+        created_at: 0,
+        modified_at: 0,
+    }
+}
+
+/// §6 row: **an overlay does not change an unsigned document's assessment.**
+///
+/// The dangerous shape this rules out is a signature *appearance* being mistaken for a signature.
+/// A placed overlay adds an `/Annot` with a `/Subtype` of `Ink`, a `/Rect`, an `/AP` and -- because
+/// P3.3a D-N2 requires the disclosure -- text in the page content saying "Visual signature". Every
+/// one of those is a thing a naive detector might count. A detector that counted them would report
+/// a *cryptographically signed* document on a file that has never been signed, which is the single
+/// worst false badge this product could show.
+///
+/// `assess` answers that question, and it answers `None` -- no signature -- before and after the
+/// overlay, on the same bytes.
+#[test]
+fn an_overlay_never_makes_an_unsigned_document_look_signed() {
+    // An ordinary unsigned PDF, built the same way `signed_with` builds its source.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut document = Document::with_version("1.7");
+    let pages_id = document.new_object_id();
+    let content_id = document.add_object(lopdf::Stream::new(
+        dictionary! {},
+        b"BT /F1 24 Tf 72 720 Td (unsigned) Tj ET".to_vec(),
+    ));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+    });
+    document.objects.insert(
+        pages_id,
+        lopdf::Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    let unsigned = dir.path().join("unsigned.pdf");
+    document.save(&unsigned).expect("the source PDF is written");
+    let before = std::fs::read(&unsigned).expect("read the source");
+
+    let connection = store_db();
+
+    // Before: nothing to assess. This is the control -- if it were already non-None the rest of
+    // the test would be measuring something else.
+    assert!(
+        store::assess(&connection, &before, 1_800_000_000)
+            .expect("the unsigned file parses")
+            .is_none(),
+        "control: an unsigned document has no signature to assess"
+    );
+
+    // Place the overlay through the shipped save path.
+    let after = apply_annotations(&before, &[signature_row(0)]).expect("the overlay saves");
+
+    // The overlay really is in the file. Without this the test could pass on a save that quietly
+    // wrote nothing, which would prove the badge is stable for the wrong reason.
+    let written = Document::load_mem(&after).expect("the overlaid file parses");
+    let page_id = *written.get_pages().values().next().expect("one page");
+    assert_eq!(
+        written
+            .get_page_annotations(page_id)
+            .expect("annotations")
+            .len(),
+        1,
+        "the overlay must actually be in the saved file, or this test proves nothing"
+    );
+
+    let assessment =
+        store::assess(&connection, &after, 1_800_000_000).expect("the overlaid file parses");
+    assert!(
+        assessment.is_none(),
+        "an overlay is not a signature: placing one must not make the document assess as signed. \
+         Got {assessment:?}"
+    );
+
+    // And the shipped mapping turns that `None` into `unsigned`, not `unknown`. The two are
+    // different claims and the UI shows them differently.
+    let rendered = document_reader_lib::commands::badge_for(None);
+    assert_eq!(
+        rendered.badge, "unsigned",
+        "an overlaid unsigned document must render as unsigned"
+    );
+    assert!(!rendered.is_green, "`unsigned` must never be green");
 }
