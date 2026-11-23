@@ -12,7 +12,7 @@
  * event to them.
  */
 
-import { mockIPC } from "@tauri-apps/api/mocks";
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { Annotation } from "../api/types";
 
 /** A handler for one command. Receives the Rust-side (snake_case) argument object. */
@@ -91,6 +91,13 @@ export function installFakeBackend(): FakeBackend {
   /** Live event subscriptions: what `listen` registered, keyed by the callback id Tauri handed back. */
   const subscriptions: { event: string; handlerId: number; eventId: number }[] = [];
   let nextEventId = 1;
+
+  // The window metadata a real webview always carries. `mockIPC` installs the IPC internals
+  // but not this, so without it `getCurrentWindow()` throws `Cannot read properties of
+  // undefined (reading 'currentWindow')` -- synchronously, from inside a mount effect, where
+  // no `.catch` can see it. That made a full `App` mount impossible to test, which is how
+  // the app shell went unrendered by every test (D10).
+  mockWindows("main");
 
   mockIPC((command, args) => {
     const record = overTheWire(args) as Record<string, unknown>;

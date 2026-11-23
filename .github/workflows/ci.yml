@@ -367,12 +367,13 @@ jobs:
           # 959, measured on 2026-11-12: two more PDFium-independent tests, one in
           # `tests/ci_workflow.rs` and one in `tests/release_workflow.rs`, pinning the Windows job
           # timeouts. See `tests/ci_workflow.rs` for why an unbounded hang is worse than a red.
-          # Raised from 959 to the measured tree (1029) on 2026-11-22. The floor had drifted 62
+          # Raised from 959 to the measured tree (1029) on 2026-11-22, then to 1042 on
+          # 2026-11-23 with two PDFium-independent source guards. The floor had drifted 62
           # below what the tree reports, and a floor that far below cannot notice tests that stop
           # being collected -- which is the only thing it is for. The value is held identical to
           # `tests/test_count_pins.rs`; that file fails if this line and the source disagree.
-          if [ "$passed" -lt 1040 ]; then
-            echo "::error::only $passed tests ran; 1040 is the non-PDFium baseline. A test stopped being collected."
+          if [ "$passed" -lt 1042 ]; then
+            echo "::error::only $passed tests ran; 1042 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
 
@@ -553,11 +554,12 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          # Measured at 1154 on this tree. Three below the Linux include-ignored count (1157)
-          # because three tests are compiled out off Linux: two `cfg(not(windows))`
-          # certificate-store refusals and the `cfg(unix)` poppler render. Held identical to
-          # `tests/test_count_pins.rs`, which fails on disagreement.
-          if ($passed -lt 1154) {
+          # 1156 is derived from the Linux include-ignored count (1159) by subtracting the
+          # three tests compiled out off Linux: two `cfg(not(windows))` certificate-store
+          # refusals and the `cfg(unix)` poppler render. Last measured on Windows at 1154 (run
+          # 45176179504, SHA 2dd51ed) before two platform-independent source guards joined the
+          # tree. Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
+          if ($passed -lt 1156) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }

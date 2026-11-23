@@ -190,6 +190,55 @@ fn the_signature_badge_is_mounted_in_the_app_not_only_imported() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// The render-error boundary (D10)
+// ---------------------------------------------------------------------------------------------
+
+/// The diagnostic boundary is mounted, and mounted in the one position where it can work.
+///
+/// Same defect as `the_signature_badge_is_mounted_in_the_app_not_only_imported`: a component
+/// that exists, is tested, and is never mounted satisfies nothing. For a boundary the position
+/// matters as much as the presence — a boundary *inside* `App` cannot catch a throw from `App`
+/// itself, so it would look wired up, pass a "does the file mention it" check, and still leave
+/// the white window in place.
+///
+/// The tree lives in `src/root.tsx` rather than `main.tsx` so a test can render it; `main.tsx`
+/// creates a React root as a side effect and cannot be imported.
+#[test]
+fn the_error_boundary_wraps_the_app_rather_than_sitting_inside_it() {
+    let main = frontend_file("src/main.tsx");
+    let main_body: String = main
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("import "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        main_body.contains("<Root />"),
+        "main.tsx must mount `Root`, which is the tree carrying the boundary; mounting `App` \
+         directly leaves the app unguarded and the entry point unread by every test"
+    );
+
+    let root = frontend_file("src/root.tsx");
+    let root_body: String = root
+        .lines()
+        .filter(|line| {
+            !line.trim_start().starts_with("import ") && !line.trim_start().starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let boundary = root_body.find("<ErrorBoundary>").unwrap_or_else(|| {
+        panic!("root.tsx imports the boundary but never renders it, so a throw still blanks the window")
+    });
+    let app = root_body
+        .find("<App />")
+        .expect("root.tsx must render `App`; a root without it is not the app");
+    assert!(
+        boundary < app,
+        "`<ErrorBoundary>` must open before `<App />`: a boundary nested inside `App`, or placed \
+         after it, cannot catch the render throw that unmounts the root"
+    );
+}
+
 /// `unknown` is the honest answer offline, so it must not be styled as a fault. The quiet style is
 /// `.sig-badge--neutral`, and only `.sig-badge--valid` may be green.
 #[test]

@@ -56,11 +56,11 @@ fn read(relative: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 
 /// `cargo test`, plain shape, on this machine (Linux, PDFium present, LEA fixture present).
-pub const PLAIN_PASSED: usize = 1040;
+pub const PLAIN_PASSED: usize = 1042;
 /// `cargo test`, plain shape: tests that carry `#[ignore]`.
 pub const PLAIN_IGNORED: usize = 117;
 /// `cargo test -- --include-ignored`: nothing may remain ignored.
-pub const INCLUDED_PASSED: usize = 1157;
+pub const INCLUDED_PASSED: usize = 1159;
 pub const INCLUDED_IGNORED: usize = 0;
 
 /// The Linux CI job runs without PDFium, so every gated test stays ignored. It asserts the ignored
@@ -71,19 +71,25 @@ pub const CI_LINUX_IGNORED: usize = 117;
 /// the tree: it said 959 while the tree reports 1021, so 62 tests could stop being collected before
 /// CI noticed. Raised here to the measured value, which is what the file's own comment says the
 /// floor is for -- headroom is a floor that cannot fail.
-pub const CI_LINUX_PASSED_FLOOR: usize = 1040;
+pub const CI_LINUX_PASSED_FLOOR: usize = 1042;
 
-/// The shipping target's floor, measured on Windows (run 45097197891: `PDFium tests ran: 1153`,
-/// re-measured for 1154 in this unit's own change).
+/// The shipping target's floor, derived from [`INCLUDED_PASSED`] by arithmetic and not yet
+/// re-measured on Windows for this tree.
 ///
-/// It is three below [`INCLUDED_PASSED`] and the difference is accounted for, not absorbed: three
-/// tests are compiled out off Linux. `tests/signing_store.rs`'s
-/// `listing_refuses_off_windows_rather_than_reporting_an_empty_store` and
+/// Last **measured** on Windows at 1154 (run 45176179504, 2026-11-23, SHA `2dd51ed`); the tree has
+/// since gained two frontend-source guards (`the_error_boundary_wraps_the_app_rather_than_sitting_inside_it`
+/// and `the_release_workflow_comment_states_the_floor_it_enforces`), which are platform-independent,
+/// so 1159 - 3 = 1156 is what this target should report. Stated as derived rather than measured
+/// because no Windows run has confirmed it yet; the dispatch this change accompanies is the
+/// confirmation, and if it reports a different number that is the measurement to record here.
+///
+/// The subtraction is accounted for, not absorbed: three tests are compiled out off Linux.
+/// `tests/signing_store.rs`'s `listing_refuses_off_windows_rather_than_reporting_an_empty_store` and
 /// `tests/signing_certificates.rs`'s `a_non_windows_build_refuses_the_certificate_store_instead_of_reporting_none`
 /// are `#[cfg(not(windows))]`, and `tests/embed_acceptance.rs`'s
-/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. 1157 - 3 = 1154. A floor
-/// that does not name that arithmetic is a floor nobody can check.
-pub const CI_WINDOWS_PASSED_FLOOR: usize = 1154;
+/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. A floor that does not name
+/// that arithmetic is a floor nobody can check.
+pub const CI_WINDOWS_PASSED_FLOOR: usize = 1156;
 
 // ---------------------------------------------------------------------------------------------
 // Parsing helpers. Each carrier is read as the artifact it is -- shell, YAML, Rust -- rather than
@@ -236,6 +242,51 @@ fn the_release_workflow_floor_matches_the_shipping_floor() {
         CI_WINDOWS_PASSED_FLOOR,
         "the release workflow runs the same suite as CI's Windows job on the same target, so its \
          floor must be the same number; two floors for one suite is how one of them gets stale"
+    );
+}
+
+/// The comment above `release-windows.yml`'s floor states the number that line enforces.
+///
+/// This exists because the comment had already drifted: it said "Measured at 1141" while the
+/// assertion below it enforced 1154. The guard above cannot see that, because it only parses the
+/// `-lt` value -- a stale *explanation* passes every check that reads the code. That is the same
+/// class of defect as a design doc citing a renamed test: plausible, and wrong when read.
+///
+/// So the prose is held to the number. Editing the floor without editing the comment is now red,
+/// which is the only thing that keeps a rationale attached to the value it justifies.
+#[test]
+fn the_release_workflow_comment_states_the_floor_it_enforces() {
+    let release = read(".github/workflows/release-windows.yml");
+    let anchor = release
+        .find("Assert the PDFium tests actually ran")
+        .expect("the release workflow must still assert the PDFium tests ran");
+    let step = &release[anchor..];
+    let assertion = step
+        .find("$passed -lt")
+        .expect("the assertion must follow its own comment");
+    // The comment block is the run of `#` lines immediately above the assertion. The match
+    // starts at `$passed`, mid-line, so the partial line it sits on is discarded first --
+    // the first version of this guard kept it, found a non-comment line, and collected
+    // nothing at all, failing on its own bug rather than on the workflow's.
+    let line_start = step[..assertion]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let comment: String = step[..line_start]
+        .lines()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take_while(|line| line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        comment.contains(&CI_WINDOWS_PASSED_FLOOR.to_string()),
+        "the comment above release-windows.yml's floor does not state the number it enforces \
+         ({CI_WINDOWS_PASSED_FLOOR}). A comment justifying a different number is how the previous \
+         one came to say 1141 above an assertion of 1154.\n--- comment found ---\n{comment}"
     );
 }
 

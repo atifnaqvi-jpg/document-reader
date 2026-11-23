@@ -326,9 +326,15 @@ fi
 # of this phase, plus `an_overlay_never_improves_a_signed_documents_badge`, which replaced the
 # blocked "badge unchanged" row after the ruling and needs no library. Measured, not computed:
 # `cargo test` reported 1040/117 and `-- --include-ignored` 1157/0.
-PIN_PLAIN_PASSED=1040
+# 2026-11-23 (D10 instrument): 1040/117 -> 1042/117 and 1157/0 -> 1159/0. Two tests arrived with
+# the render-error boundary: a frontend-source guard in `tests/app_css_chrome.rs` that the boundary
+# wraps `App`, and one in `tests/test_count_pins.rs` that the release workflow's comment above its
+# floor states the number that floor enforces. Both read files, so neither needs PDFium and the
+# ignored count does not move. Measured, not computed: `cargo test` reported 1042/117 and
+# `-- --include-ignored` 1159/0.
+PIN_PLAIN_PASSED=1042
 PIN_PLAIN_IGNORED=117
-PIN_IGNORED_PASSED=1157
+PIN_IGNORED_PASSED=1159
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts
