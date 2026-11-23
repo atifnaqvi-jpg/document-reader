@@ -1141,7 +1141,11 @@ fn an_overlay_never_improves_a_signed_documents_badge() {
         "control: the untouched signed file must be `Valid`, or the overlay is not being tested \
          against the best case and the improvement half of this row is vacuous"
     );
-    assert_eq!(before.integrity, Integrity::Intact, "control: nothing has touched it yet");
+    assert_eq!(
+        before.integrity,
+        Integrity::Intact,
+        "control: nothing has touched it yet"
+    );
 
     // Place the overlay through the shipped save path.
     let after = apply_annotations(&written, &[signature_row(0)]).expect("the overlay saves");
