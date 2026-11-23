@@ -127,7 +127,10 @@ fn the_annotation_kind_is_refused_at_p1_and_p2_but_permitted_at_p3() {
         "P=2 permits form filling and signatures, not annotation, so a placement must be refused"
     );
     assert_eq!(
-        permits(Some(CertificationLevel::AnnotationsToo), EditKind::Annotation),
+        permits(
+            Some(CertificationLevel::AnnotationsToo),
+            EditKind::Annotation
+        ),
         Verdict::Permitted,
         "P=3 permits annotation, so refusing a placement there would break a legitimate use"
     );

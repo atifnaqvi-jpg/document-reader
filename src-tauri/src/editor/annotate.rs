@@ -1744,6 +1744,187 @@ mod tests {
         );
     }
 
+    /// §6 row: **a drawn signature is written as an `/Ink` annotation with an `/AP` the viewer
+    /// draws.**
+    ///
+    /// Distinct from `an_ink_annotation_writes_an_appearance_stream`, which covers the plain row.
+    /// A signature sets `visualSignature`, which sends the same row down an *extra* code path --
+    /// the mandatory label. That path is the one that could break this: it reads the blob for a
+    /// rect, and an ink blob has none, so a label placer that rebuilt or returned early on the
+    /// annotation would leave a signature that Adobe draws from `/InkList` and every other viewer
+    /// draws as nothing. The row asserts both halves at once, because "the label is there" and
+    /// "the mark is there" have to be true of the same file.
+    #[test]
+    fn a_drawn_signature_is_an_ink_annotation_with_an_appearance() {
+        let annotations = vec![ink_row(
+            r##"{"v":1,"visualSignature":true,"color":"#000000","strokes":[[[100.0,500.0],[140.0,540.0],[180.0,500.0]]]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        // (1) It is an ink annotation. A signature is not a new subtype: D-N3a keeps it an Ink so
+        // the ordinary annotation pipeline writes, prints and round-trips it.
+        assert_eq!(
+            dictionary
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"Ink",
+            "a drawn signature must be written as /Ink"
+        );
+        // (2) It carries an appearance a viewer draws without knowing /InkList.
+        assert_appearance_is_a_non_empty_form(dictionary);
+        // (3) The appearance still draws the stroke path, not a box around it. Coordinates are in
+        // the appearance's own box space: the stroke spans x 100-180, y 500-540, so its first
+        // point is the box origin and the apex is (40, 40) in box space. Asserting page-space
+        // numbers here would pass only if the path were drawn in the wrong space.
+        let stream = appearance_stream_of(&document, dictionary);
+        let content = String::from_utf8_lossy(&stream.content).into_owned();
+        let operators: Vec<&str> = content.lines().map(str::trim).collect();
+        assert!(
+            operators.contains(&"0 0 m"),
+            "the stroke must start at its own box origin, got {content:?}"
+        );
+        assert!(
+            operators.contains(&"40 40 l"),
+            "the stroke's apex must be in box space, got {content:?}"
+        );
+        assert!(
+            operators.contains(&"S"),
+            "the path must be stroked, not filled, got {content:?}"
+        );
+        assert!(
+            !operators.iter().any(|line| line.ends_with(" re")),
+            "an ink appearance must draw the stroke, not a bounding rectangle, got {content:?}"
+        );
+        // (4) And the label coexist with it in page content: one file, both claims.
+        assert!(
+            contains_bytes(&page_0_content(&document), "Visual signature"),
+            "the flagged row must still carry its disclosure in page content"
+        );
+    }
+
+    /// §6 row: **a typed signature is written as `/FreeText` and its `/DA` resolves against its own
+    /// `/DR`.**
+    ///
+    /// The plain case is covered above. The signature case adds the label, and the failure this
+    /// guards is specific: `/DA` and `/DR` are written by the free-text writer, while the label
+    /// needs its *own* font resource added to the page. A label implementation that added its font
+    /// to the annotation's `/DR` -- or that rebuilt `/DR` to hold only its own font -- would leave
+    /// `/DA` naming a font that no longer resolves, and an editor reopening the annotation would
+    /// silently re-lay-out the text in another font. So this asserts the resolution, not the
+    /// presence of the string.
+    #[test]
+    fn a_typed_signature_resolves_its_default_appearance() {
+        let annotations = vec![free_text_row(
+            FreeTextMode::Textbox,
+            r##"{"v":1,"visualSignature":true,"rect":[72,600,272,640],"color":"#000000"}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+        let document = Document::load_mem(&saved).unwrap();
+        let dictionary = only_annotation(&document);
+
+        assert_eq!(
+            dictionary
+                .get(b"Subtype")
+                .and_then(Object::as_name)
+                .unwrap(),
+            b"FreeText",
+            "a typed signature must be written as /FreeText"
+        );
+
+        // `/DA` resolves against *this* annotation's `/DR`: walk the same path a consumer would.
+        let da = dictionary.get(b"DA").and_then(Object::as_str).unwrap();
+        let da = String::from_utf8_lossy(da).into_owned();
+        assert!(
+            da.contains(appearance::FREE_TEXT_FONT),
+            "/DA must name the free-text font, got {da:?}"
+        );
+        let fonts = dictionary
+            .get(b"DR")
+            .and_then(Object::as_dict)
+            .and_then(|dr| dr.get(b"Font"))
+            .and_then(Object::as_dict)
+            .expect("/DR /Font is how /DA's font name resolves");
+        let declared = fonts
+            .get(appearance::FREE_TEXT_FONT.as_bytes())
+            .expect("/DR must still declare the font /DA names once the label has been placed")
+            .as_reference()
+            .expect("the declared font is a reference to a font dictionary");
+        let font = document.get_object(declared).unwrap().as_dict().unwrap();
+        assert_eq!(
+            font.get(b"BaseFont").and_then(Object::as_name).unwrap(),
+            b"Helvetica",
+            "the font /DA resolves to must be the one /DA names"
+        );
+
+        // The label's own font must NOT have displaced the text's: it lives in page resources.
+        assert!(
+            !fonts.has(b"SignLbl"),
+            "the label font belongs in page resources, not the annotation's /DR; putting it here \
+             is how /DA stops resolving"
+        );
+    }
+
+    /// §6 row: **the label is in the page content and survives a save.**
+    ///
+    /// The two tests above prove the label is *written*. This one proves it is *in the file*: the
+    /// bytes are reloaded from disk and read again, so the claim holds for a document that was
+    /// written and reopened rather than one still in memory. That distinction is the whole point of
+    /// D-N2 -- a label that only exists in the writer's own buffer is a disclosure the reader never
+    /// sees, and it would pass every assertion made before the save.
+    ///
+    /// It is also the claim a viewer actually relies on: the label must be in **page content**, so
+    /// it draws even for a reader that ignores annotations entirely and only paints the page.
+    #[test]
+    fn the_visual_signature_label_is_written_into_the_page() {
+        let annotations = vec![ink_row(
+            r##"{"v":1,"visualSignature":true,"color":"#000000","strokes":[[[100.0,500.0],[140.0,540.0],[180.0,500.0]]]}"##,
+        )];
+        let saved = apply_annotations(&sample_pdf(), &annotations).unwrap();
+
+        // Read the bytes back from scratch: nothing from the write path is reused here.
+        let reopened = Document::load_mem(&saved).unwrap();
+        assert!(
+            contains_bytes(&page_0_content(&reopened), "Visual signature"),
+            "the label must be in the saved file's page content, not only in the writer's buffer"
+        );
+
+        // And it must not be in the annotation's own /Contents or /AP: a label stored there is a
+        // label that a page-only renderer never draws, which is the failure this row exists for.
+        let dictionary = only_annotation(&reopened);
+        for key in [b"Contents".as_slice(), b"AP".as_slice()] {
+            if let Ok(object) = dictionary.get(key) {
+                let rendered = match object {
+                    Object::Stream(stream) => stream.content.clone(),
+                    Object::Reference(id) => match reopened.get_object(*id) {
+                        Ok(Object::Stream(stream)) => stream.content.clone(),
+                        _ => Vec::new(),
+                    },
+                    other => format!("{other:?}").into_bytes(),
+                };
+                assert!(
+                    !contains_bytes(&rendered, "Visual signature"),
+                    "the label belongs in page content, not in /{}: a reader that paints only the \
+                     page would drop it",
+                    String::from_utf8_lossy(key)
+                );
+            }
+        }
+
+        // A second save of the reopened file keeps it: the label is part of the artifact, so
+        // re-saving must not be the step that loses the disclosure.
+        let resaved = lopdf_write::save_to_bytes(&mut Document::load_mem(&saved).unwrap()).unwrap();
+        assert!(
+            contains_bytes(
+                &page_0_content(&Document::load_mem(&resaved).unwrap()),
+                "Visual signature"
+            ),
+            "a round-trip save must preserve the label"
+        );
+    }
+
     /// The same label is written for a **typed** signature, which is a `FreeText` row with a rect.
     #[test]
     fn a_typed_signature_carries_its_label_in_page_content() {

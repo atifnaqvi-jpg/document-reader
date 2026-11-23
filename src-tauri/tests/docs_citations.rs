@@ -55,11 +55,12 @@ fn rust_sources() -> Vec<(PathBuf, String)> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|ext| {
-                ext == "rs" || ext == "ts" || ext == "tsx"
-            }) && path
-                .file_name()
-                .is_some_and(|name| name != "docs_citations.rs")
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext == "rs" || ext == "ts" || ext == "tsx")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name != "docs_citations.rs")
             {
                 let text = read(&path);
                 files.push((path, text));
@@ -115,19 +116,7 @@ const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
 /// `docs/P3.3a-fill-and-sign-DESIGN.md`, which is governed from the moment it is written and names
 /// the acceptance tests its phase owes. Each entry is removed by this guard the moment its test
 /// lands, so the list cannot rot into a permanent hole.
-const PLANNED_SYMBOLS: [(&str, &str); 8] = [
-    (
-        "a_drawn_signature_is_an_ink_annotation_with_an_appearance",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-    (
-        "a_typed_signature_resolves_its_default_appearance",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-    (
-        "the_visual_signature_label_is_written_into_the_page",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
+const PLANNED_SYMBOLS: [(&str, &str); 5] = [
     (
         "an_overlay_never_makes_an_unsigned_document_look_signed",
         "docs/P3.3a-fill-and-sign-DESIGN.md",
