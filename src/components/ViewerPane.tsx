@@ -10,6 +10,7 @@ import {
 import type { AppError, FormField, LibraryEntry, RenderedPage } from "../api/types";
 import { AnnotationOverlay } from "./AnnotationOverlay";
 import { FormOverlay } from "./FormOverlay";
+import { FillSignSurface } from "./FillSignSurface";
 import { RedactionOverlay } from "./RedactionOverlay";
 import type { PageMetrics } from "./AnnotationOverlay";
 import { TextRunOverlay, EncryptedBanner } from "./TextEdit";
@@ -79,6 +80,12 @@ export const ViewerPane = forwardRef<ViewerHandle, {
    */
   const [fillError, setFillError] = useState<AppError | null>(null);
   /**
+   * Why a signature placement was refused. Kept apart from `fillError`, which holds a failed
+   * command: a refusal is a rule the user hit (I-F7), so showing it as a backend error would
+   * suggest the app is broken rather than that the placement was not allowed.
+   */
+  const [signNotice, setSignNotice] = useState<string | null>(null);
+  /**
    * Field values the user has changed but not saved (P3.3 D8).
    *
    * The overlay reports them and never writes, so this array is the whole of "there are unsaved
@@ -97,6 +104,9 @@ export const ViewerPane = forwardRef<ViewerHandle, {
     redactMode,
     redactionMarks,
     addRedactionMark,
+    fillSignMode,
+    fillSignKind,
+    fillSignText,
   } = useEditor();
 
   // Renders are async and can be superseded by a newer page/zoom request. Tracking the
@@ -446,6 +456,16 @@ export const ViewerPane = forwardRef<ViewerHandle, {
               />
             ) : textEditMode ? (
               <TextRunOverlay metrics={pageMetrics(rendered, page, zoom)} runs={pageRuns} />
+            ) : fillSignMode ? (
+              // A drawn signature is a drag over the page, so it needs the surface to itself: with
+              // the annotation layer live underneath, a stroke would also create an ink row.
+              <FillSignSurface
+                metrics={pageMetrics(rendered, page, zoom)}
+                runs={pageRuns}
+                mode={fillSignKind}
+                typedText={fillSignText}
+                onRefused={setSignNotice}
+              />
             ) : (
               <>
                 {annotationsVisible ? (
@@ -472,6 +492,12 @@ export const ViewerPane = forwardRef<ViewerHandle, {
         ) : null}
 
         {rendering ? <p className="muted">Rendering page…</p> : null}
+
+        {signNotice ? (
+          <p className="form-notice" role="status">
+            {signNotice}
+          </p>
+        ) : null}
 
         {fillError ? (
           <p className="form-error" role="alert">

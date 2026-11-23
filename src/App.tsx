@@ -7,6 +7,7 @@ import { listLibrary, openDocument, toAppError } from "./api/invoke";
 import type { AppError, LibraryEntry } from "./api/types";
 import { CommentPane } from "./components/CommentPane";
 import { RedactPanel } from "./components/RedactPanel";
+import { FillSignPanel } from "./components/FillSignPanel";
 import { EditorPane } from "./components/EditorPane";
 import { ErrorBanner, LibraryPane } from "./components/LibraryPane";
 import { PasswordPrompt } from "./components/PasswordPrompt";
@@ -243,6 +244,11 @@ function Workspace() {
                 overlay read the same list, so a mark drawn on the page appears in the list and a
                 removal in the list disappears from the page. */}
             <RedactPanel documentId={selected?.id ?? null} />
+            {/* Fill & Sign. Mounted beside Redact rather than in the annotation palette: both are
+                a mode over the page rather than a mark kind, and the placement surface needs the
+                page to itself. This is also the only caller that sets `visualSignature`, so without
+                it the backend's label had no way to be reached. */}
+            <FillSignPanel documentId={selected?.id ?? null} page={visiblePage} />
             {/* D-SG7 requires the badge to be *rendered*, not merely computed. Mounted here rather
                 than inside a pane so it is never conditional on which pane is open: a signature
                 the user cannot see is a check they cannot benefit from. */}

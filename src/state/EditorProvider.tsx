@@ -41,6 +41,7 @@ import type {
   ToolStyle,
 } from "../api/types";
 import { ANNOTATION_KINDS, commonOf, sameTextRunId } from "../api/types";
+import type { SignatureMode } from "./fillsign";
 
 /**
  * Editing state (docs/P2-DESIGN.md D7/D10).
@@ -174,6 +175,22 @@ interface EditorContextValue {
    * the page, and two live captures would make what a drag means depend on z-order.
    */
   redactMode: boolean;
+  /**
+   * Whether the Fill & Sign placement surface is active (P3.3a §5).
+   *
+   * A *mode*, not a tool in the annotation palette: the palette writes a row of a kind the user
+   * picks, while this one additionally declares the row a visual signature, which is a different
+   * guarantee (D-N2's artifact label, I-F6). Keeping it out of the palette is what stops it being
+   * reimplemented as "ink with a checkbox" -- the shape in which the flag was forgotten.
+   */
+  fillSignMode: boolean;
+  setFillSignMode: (on: boolean) => void;
+  /** Which signature kind the surface places. Persisted with the mode so a re-entry matches. */
+  fillSignKind: SignatureMode;
+  setFillSignKind: (kind: SignatureMode) => void;
+  /** The typed signature's text, collected before placement. */
+  fillSignText: string;
+  setFillSignText: (text: string) => void;
   setRedactMode: (on: boolean) => void;
   /** Pending redaction marks for the open document, from the database. */
   redactionMarks: RedactionMark[];
@@ -306,6 +323,9 @@ export function EditorProvider({
   const [runsLoading, setRunsLoading] = useState(false);
   const [textEditMode, setTextEditMode] = useState(false);
   const [redactMode, setRedactModeState] = useState(false);
+  const [fillSignMode, setFillSignModeState] = useState(false);
+  const [fillSignKind, setFillSignKind] = useState<SignatureMode>("drawn");
+  const [fillSignText, setFillSignText] = useState("");
   const [redactionMarks, setRedactionMarks] = useState<RedactionMark[]>([]);
   const [selectedRun, setSelectedRun] = useState<PageTextRun | null>(null);
   const [selection, setSelection] = useState<PageTextRun[]>([]);
@@ -403,6 +423,21 @@ export function EditorProvider({
   const setRedactMode = useCallback((on: boolean) => {
     setRedactModeState(on);
     if (on) setTextEditMode(false);
+  }, []);
+
+  /**
+   * Turns Fill & Sign on, and the other full-surface pointer layers off.
+   *
+   * Three layers now want every drag over the page: redaction, text edit, and this one. Leaving two
+   * on would make what a drag means depend on which div received it, so the same rule the other two
+   * already follow is applied here rather than left for the user to discover.
+   */
+  const setFillSignMode = useCallback((on: boolean) => {
+    setFillSignModeState(on);
+    if (on) {
+      setTextEditMode(false);
+      setRedactModeState(false);
+    }
   }, []);
 
   const refreshRedactionMarks = useCallback(async () => {
@@ -911,6 +946,12 @@ export function EditorProvider({
       textEditMode,
       setTextEditMode,
       redactMode,
+      fillSignMode,
+      setFillSignMode,
+      fillSignKind,
+      setFillSignKind,
+      fillSignText,
+      setFillSignText,
       setRedactMode,
       redactionMarks,
       refreshRedactionMarks,
@@ -949,6 +990,15 @@ export function EditorProvider({
       redactionMarks,
       refreshRedactionMarks,
       addRedactionMark,
+      // `useMemo` over a hand-kept list: an entry missing here is a context value that
+      // is exposed but never rebuilt, so a setter changes state nothing re-renders for.
+      // New context state must be added to the object above AND to this list.
+      fillSignMode,
+      setFillSignMode,
+      fillSignKind,
+      setFillSignKind,
+      fillSignText,
+      setFillSignText,
       selectedRun,
       selection,
       selectRun,

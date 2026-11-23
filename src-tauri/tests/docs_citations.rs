@@ -37,8 +37,16 @@ fn read(path: &Path) -> String {
 /// tree" and the guard would pass on the strength of its own prose.
 fn rust_sources() -> Vec<(PathBuf, String)> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // The frontend tree is scanned too. The design's acceptance table names "frontend" rows as well
+    // as backend ones, and a name is not less real for living in `.ts`: while this list stopped at
+    // Rust, a frontend acceptance test could neither satisfy nor violate the guard, so the table's
+    // frontend half was unchecked -- a green pass over a claim nobody was testing.
     let mut files = Vec::new();
-    let mut stack = vec![root.join("src"), root.join("tests")];
+    let mut stack = vec![
+        root.join("src"),
+        root.join("tests"),
+        root.parent().expect("src-tauri has a parent").join("src"),
+    ];
     while let Some(path) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&path) else {
             continue;
@@ -47,10 +55,11 @@ fn rust_sources() -> Vec<(PathBuf, String)> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path
-                    .file_name()
-                    .is_some_and(|name| name != "docs_citations.rs")
+            } else if path.extension().is_some_and(|ext| {
+                ext == "rs" || ext == "ts" || ext == "tsx"
+            }) && path
+                .file_name()
+                .is_some_and(|name| name != "docs_citations.rs")
             {
                 let text = read(&path);
                 files.push((path, text));
@@ -106,7 +115,7 @@ const CITED_CRATES: [&str; 2] = ["pdfium-render", "lopdf"];
 /// `docs/P3.3a-fill-and-sign-DESIGN.md`, which is governed from the moment it is written and names
 /// the acceptance tests its phase owes. Each entry is removed by this guard the moment its test
 /// lands, so the list cannot rot into a permanent hole.
-const PLANNED_SYMBOLS: [(&str, &str); 10] = [
+const PLANNED_SYMBOLS: [(&str, &str); 8] = [
     (
         "a_drawn_signature_is_an_ink_annotation_with_an_appearance",
         "docs/P3.3a-fill-and-sign-DESIGN.md",
@@ -129,14 +138,6 @@ const PLANNED_SYMBOLS: [(&str, &str); 10] = [
     ),
     (
         "placing_a_signature_writes_nothing_until_the_save",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-    (
-        "the_certification_gate_refuses_a_p1_and_p2_signature_placement",
-        "docs/P3.3a-fill-and-sign-DESIGN.md",
-    ),
-    (
-        "a_signature_snaps_to_a_measured_box_and_skips_a_suspicious_one",
         "docs/P3.3a-fill-and-sign-DESIGN.md",
     ),
     (
