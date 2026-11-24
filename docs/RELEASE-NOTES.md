@@ -7,9 +7,98 @@ the version in `Cargo.toml` has a section here.
 
 ---
 
-## 1.3.1 — development version, **not a release**
+## 1.4.0 — Fill & Sign
 
-**There is no 1.3.1 installer, no 1.3.1 tag, and this section describes no shipped build.** It
+**DocuPro 1.4.0 — put your signature on a page.** Draw it with the pen, or type it; either way it
+becomes a mark on the page that survives a save and that other viewers draw. Windows-only, as
+before, and offline as before: nothing here talks to a certificate authority, a timestamp server,
+or the network at all.
+
+### What this is, and what it is not
+
+**A visual signature is not a digital signature.** It is a mark. It records that *someone* drew on
+this page; it proves nothing about who, and it cannot, because there is no key behind it. The
+saved file says so on the page, in the page content, next to the mark — not in a tooltip and not
+only in this document:
+
+> Visual signature — no cryptographic weight. This is not a digital signature.
+
+That label is part of the page, at 6pt, and does not come off without editing the page content. It
+is there because a mark that looks like a signature will be *read* as one by whoever opens the
+file next, and the person who has to be protected from that misreading is usually not the person
+who drew it. If you need a signature that proves who signed and that the bytes are unchanged, that
+is 1.3.0's certificate signing, and this is not it.
+
+### Drawing and typing
+
+**Drawn.** The pen path is an `/Ink` annotation with an `/AP` appearance stream, so viewers other
+than ours draw it. `/InkList` alone is an Adobe extension; the `/AP` is what makes the mark visible
+everywhere, and both are written. One pen weight — 2pt — for this release.
+
+**Typed.** A `/FreeText` annotation whose `/DA` resolves against its own `/DR`, so the text has a
+font to ask for. Rendered, not merely stored.
+
+### Where it lands
+
+Placement snaps to a line of text you release the pointer near, and the snap is **corrected**, not
+raw: a text run's box bottom sits 1.46–2.59pt *below* the pen baseline at the type sizes measured
+on the LEA fixture (mean 1.57pt, and 0.063pt of spread across 1,658 characters at the dominant
+6.96pt size). Snapping to the raw box edge would drop every signature a descender low — a quarter
+of a line. One measured constant per size corrects it.
+
+A line whose measurement was flagged suspicious is **not** snapped to. The panel says how many
+lines it can snap to, and says so plainly when the answer is none, rather than silently placing the
+mark wherever the pointer happened to be.
+
+### What saving does
+
+A placed mark writes nothing until you save. The save writes exactly **one** sibling copy, through
+the same path as any other edit; the original is untouched. If you save over the original, that is
+a separate, deliberate action.
+
+### What is refused, and why
+
+- **Placing on a certified document at `P=1` or `P=2`** is refused, naming the annotation as the
+  edit it would be. A certification signature at those levels says the document has not been
+  changed; adding a mark to it would make that claim false.
+- **Image signatures are not in this release.** They were scoped out at sign-off rather than
+  half-built: an image needs a writer path that emits an image XObject, with a colour space, an
+  `/SMask` and a decompression-bomb guard. Drawn and typed ship; image is its own later unit.
+
+### An overlay never improves a badge
+
+Placing a mark on an already-signed document cannot make its signature look better than it is. The
+badge stays at `Modified` or `Intact` and never becomes `Valid`. This holds by construction — the
+assessment starts from a `/ByteRange`, and an annotation has none — and it is also a test, because
+"holds by construction" is a reading, not a measurement.
+
+### The engine gap this release records rather than hides
+
+Flattening does not flatten ink or free text: `flatten_annotations` skips both. So a saved mark is
+a movable annotation in another viewer, not baked pixels. You can drag it in Acrobat. That is a
+real limit of this release, and it is stated here rather than discovered by a user.
+
+### Forms, still
+
+Everything 1.3.0 shipped is unchanged: fill a form, and the value survives the save.
+
+### Known issue
+
+The Windows PDFium test suite has shown an intermittent `STATUS_ACCESS_VIOLATION` where re-running
+the same commit passes. It is undiagnosed. It has not been observed in the shipped application, only
+in the test suite, but it is recorded rather than ignored.
+
+The minimum supported version, from `rust-version` in `src-tauri/Cargo.toml`, is **rust 1.90**.
+Verified on **rust 1.91.0**, the version pinned in `rust-toolchain.toml` and the one every gate ran
+on for this tree.
+
+---
+
+## 1.3.1 — development version, **not a release** — **superseded by 1.4.0**
+
+**There is no 1.3.1 installer, no 1.3.1 tag, and this section describes no shipped build.** The
+reservation this section describes was spent when 1.4.0 shipped, which is what it was for; the
+section is kept so that a reader who sees the number somewhere can find out what it was. It
 exists because of a guard, not because of a decision to ship — the same situation 1.2.1 was created
 to solve, and this is the same answer.
 
