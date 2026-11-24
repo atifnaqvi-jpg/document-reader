@@ -166,8 +166,15 @@ impl AnnotationStatus {
 /// Tools a user can place on a page (P2-D4). `atype` in the database is the
 /// serialised form of this enum, so adding a tool never needs a migration --
 /// only the JSON blob's `v` may need to grow (see [`Annotation::data`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+///
+/// `Serialize`/`Deserialize` are written by hand to emit a **string**. A derived
+/// implementation is only a string for the unit variants: `FreeText(FreeTextMode)`
+/// is a newtype and `Line { arrow }` a struct, so serde's default is externally
+/// tagged -- `{"freetext":"textbox"}` and `{"line":{"arrow":false}}`. That object
+/// reached the IPC boundary as `Annotation.kind`, which the UI renders as a JSX
+/// child, and React threw "objects are not valid as a React child" (D10 catch,
+/// 2026-11-24). The wire form is now the same string `as_str` writes to `atype`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnotationKind {
     Highlight,
     Underline,
@@ -228,6 +235,26 @@ impl AnnotationKind {
             "shape" => Some(AnnotationKind::Rect),
             _ => None,
         }
+    }
+}
+
+/// The wire form is a string, so `Annotation.kind` crosses IPC as the same
+/// value the UI's `AnnotationKind` union already names. Serialising by hand
+/// rather than deriving is what keeps `FreeText` and `Line` from becoming objects.
+impl Serialize for AnnotationKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnotationKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        AnnotationKind::parse(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown annotation kind {name:?}; expected one of the names `as_str` writes"
+            ))
+        })
     }
 }
 
@@ -741,5 +768,70 @@ mod tests {
             AnnotationKind::Line { arrow: false }.as_str(),
             AnnotationKind::Line { arrow: true }.as_str()
         );
+    }
+
+    /// Every kind crosses IPC as a JSON **string**, never an object. A derived
+    /// `Serialize` emits `{"freetext":"textbox"}` for the newtype variant and
+    /// `{"line":{"arrow":false}}` for the struct variant; that object reached a JSX
+    /// child in the comment pane and React refused to render it (D10, 2026-11-24).
+    /// Asserting the JSON *type* rather than one sample covers every kind, including
+    /// the ones added later.
+    #[test]
+    fn every_kind_serialises_as_a_json_string() {
+        for kind in all_kinds() {
+            let value = serde_json::to_value(kind).unwrap();
+            assert!(
+                value.is_string(),
+                "{kind:?} serialised as {value}, but the IPC contract says a string. \
+                 An object here is rendered as a JSX child and throws at runtime"
+            );
+            assert_eq!(value.as_str(), Some(kind.as_str()));
+        }
+    }
+
+    /// Round-trip, so `parse` and `as_str` stay inverse and the wire name is the same
+    /// one `atype` stores. `shape` is deliberately absent: it is a read-only alias.
+    #[test]
+    fn every_kind_round_trips_through_its_wire_name() {
+        for kind in all_kinds() {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: AnnotationKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind, "{json} did not round trip");
+        }
+    }
+
+    /// An unknown name is refused rather than defaulted. `row_to_annotation` degrades a
+    /// stray `atype` to `Rect` on purpose, but that is a decision made where the row is
+    /// read; the deserialiser must not invent a kind it was not given.
+    #[test]
+    fn an_unknown_wire_name_is_refused() {
+        let error = serde_json::from_str::<AnnotationKind>("\"scribble\"").unwrap_err();
+        assert!(
+            error.to_string().contains("scribble"),
+            "the error should name the value it refused, said: {error}"
+        );
+        assert!(
+            serde_json::from_str::<AnnotationKind>("{\"freetext\":\"textbox\"}").is_err(),
+            "the old object form must not deserialise; accepting it would let a stale \
+             front-end shape keep working while the contract says string"
+        );
+    }
+
+    fn all_kinds() -> Vec<AnnotationKind> {
+        vec![
+            AnnotationKind::Highlight,
+            AnnotationKind::Underline,
+            AnnotationKind::Strikeout,
+            AnnotationKind::Squiggly,
+            AnnotationKind::Note,
+            AnnotationKind::FreeText(FreeTextMode::Textbox),
+            AnnotationKind::FreeText(FreeTextMode::Callout),
+            AnnotationKind::FreeText(FreeTextMode::Typewriter),
+            AnnotationKind::Ink,
+            AnnotationKind::Line { arrow: false },
+            AnnotationKind::Line { arrow: true },
+            AnnotationKind::Rect,
+            AnnotationKind::Oval,
+        ]
     }
 }

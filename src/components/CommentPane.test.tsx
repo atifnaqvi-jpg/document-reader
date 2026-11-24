@@ -91,6 +91,19 @@ function mountPane(initial: Annotation[], page = 0) {
   return { backend, rows: () => table, jumps };
 }
 
+/**
+ * Finds a row's kind label. Scoped to `.comment-kind` because the same label is also an
+ * option in the kind filter, so an unscoped query matches two nodes and fails on ambiguity
+ * rather than on the thing under test.
+ */
+function rowKind(label: string) {
+  const nodes = Array.from(document.querySelectorAll(".comment-kind")).filter(
+    (node) => node.textContent === label,
+  );
+  expect(nodes).toHaveLength(1);
+  return nodes[0];
+}
+
 /** Waits for the pane's first `list_annotations` round trip to render. */
 async function waitForRows(text: string) {
   await waitFor(() => expect(screen.getByText(text)).toBeTruthy());
@@ -394,5 +407,65 @@ describe("CommentPane: XFDF exchange (D-A9/D-A10)", () => {
     await userEvent.upload(input, new File(["<xfdf/>"], "a.xfdf", { type: "text/xml" }));
 
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Imported 0"));
+  });
+});
+
+describe("CommentPane: a free-text row renders as text, not as an object (D10 catch)", () => {
+  // The regression this guards. `AnnotationKind::FreeText(FreeTextMode)` derived its
+  // `Serialize`, and serde's default for a newtype variant is externally tagged:
+  // `kind` crossed IPC as `{"freetext":"textbox"}`, not `"textbox"`. The pane renders
+  // `kind` as a JSX child, so React threw "objects are not valid as a React child"
+  // (error #31) and the whole window was replaced by the error boundary. The Rust fix
+  // is `every_kind_serialises_as_a_json_string`; these tests hold the UI side of it.
+
+  it("shows the kind label and the typed text for a text box", async () => {
+    mountPane([
+      makeAnnotation({
+        kind: "textbox",
+        data: JSON.stringify({ v: 1, rect: [10, 10, 120, 40], color: "#ff0000" }),
+        text: "signed off by hand",
+      }),
+    ]);
+
+    await waitForRows("signed off by hand");
+    // The human-readable label, not the raw kind name: KIND_LABELS maps textbox to
+    // "Text box", and a row showing "textbox" would mean the lookup missed.
+    expect(rowKind("Text box")).toBeTruthy();
+  });
+
+  it("keeps every free-text kind renderable, including the ones with no label entry", async () => {
+    // callout and typewriter are separate FreeText modes; each is its own row kind, and
+    // each must reach the pane as a string. Testing one would have missed a second
+    // variant of the same enum.
+    mountPane([
+      makeAnnotation({ kind: "callout", text: "callout body" }),
+      makeAnnotation({ kind: "typewriter", text: "typewriter body" }),
+    ]);
+
+    await waitForRows("callout body");
+    expect(rowKind("Callout")).toBeTruthy();
+    expect(rowKind("Typewriter")).toBeTruthy();
+  });
+
+  it("renders a line row, which is the other variant serde would have objectified", async () => {
+    // `Line { arrow }` is a struct variant: derived serde emits `{"line":{"arrow":false}}`.
+    // It was the second leak of the same class and would have crashed the pane on any
+    // document containing a line or arrow, not only on a typed text box.
+    mountPane([makeAnnotation({ kind: "line", text: "under this" })]);
+
+    await waitForRows("under this");
+    expect(rowKind("Line")).toBeTruthy();
+  });
+
+  it("renders the raw kind rather than crashing when a kind has no label entry", async () => {
+    // The `?? row.kind` fallback exists so a kind added to the backend but not yet named
+    // in KIND_LABELS degrades to its wire name. That fallback is only safe while the
+    // wire form is a string; this pins the fallback's shape.
+    mountPane([
+      makeAnnotation({ kind: "squiggly" as Annotation["kind"], text: "wavy" }),
+    ]);
+
+    await waitForRows("wavy");
+    expect(rowKind("Squiggly")).toBeTruthy();
   });
 });

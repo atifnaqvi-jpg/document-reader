@@ -146,19 +146,21 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          # The floor is 1156, measured on this target: run 45267725552 (2026-11-23, SHA
-          # ff28a0a) reported "PDFium tests ran: 1156 passed, 0 ignored", so the floor equals
-          # the measured count and a test that stops being collected fails CI here.
+          # The floor is 1159, measured on this target: run 45267725552 (2026-11-23, SHA
+          # ff28a0a) reported 1156, and 2026-11-24 added three unit guards for the D10 kind-leak
+          # (`model::tests::every_kind_serialises_as_a_json_string` and two siblings), so the
+          # measured count and the floor are both 1159. A test that stops being collected fails
+          # here.
           #
-          # It is three below the Linux --include-ignored count (1159) because three tests are
+          # It is three below the Linux --include-ignored count (1162) because three tests are
           # compiled out off Linux: two `cfg(not(windows))` certificate-store refusals and the
-          # `cfg(unix)` poppler render. 1159 - 3 = 1156. Held identical to
+          # `cfg(unix)` poppler render. 1162 - 3 = 1159. Held identical to
           # `tests/test_count_pins.rs` (CI_WINDOWS_PASSED_FLOOR), which fails on disagreement.
           #
           # This comment previously said "Measured at 1141" while the line below enforced 1154
           # -- a stale note above a raised floor, which reads as a floor nobody can check. A
           # guard in `tests/test_count_pins.rs` now holds this comment to the number.
-          if ($passed -lt 1156) {
+          if ($passed -lt 1159) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }

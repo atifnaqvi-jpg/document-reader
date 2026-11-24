@@ -372,7 +372,7 @@ jobs:
           # below what the tree reports, and a floor that far below cannot notice tests that stop
           # being collected -- which is the only thing it is for. The value is held identical to
           # `tests/test_count_pins.rs`; that file fails if this line and the source disagree.
-          if [ "$passed" -lt 1042 ]; then
+          if [ "$passed" -lt 1045 ]; then
             echo "::error::only $passed tests ran; 1042 is the non-PDFium baseline. A test stopped being collected."
             exit 1
           fi
@@ -554,12 +554,13 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          # Measured at 1156 on this tree (run 45267725552, SHA ff28a0a: "PDFium tests ran:
-          # 1156 passed, 0 ignored"). Three below the Linux include-ignored count (1159)
-          # because three tests are compiled out off Linux: two `cfg(not(windows))`
-          # certificate-store refusals and the `cfg(unix)` poppler render. Held identical to
-          # `tests/test_count_pins.rs`, which fails on disagreement.
-          if ($passed -lt 1156) {
+          # 1156 was measured here on 2026-11-23 (run 45267725552, SHA ff28a0a). On 2026-11-24
+          # three unit guards for the D10 kind-leak landed in `model::tests`, and unit tests run
+          # on every platform, so the count and this floor are both 1159. Three below the Linux
+          # include-ignored count (1162) because three tests are compiled out off Linux: two
+          # `cfg(not(windows))` certificate-store refusals and the `cfg(unix)` poppler render.
+          # Held identical to `tests/test_count_pins.rs`, which fails on disagreement.
+          if ($passed -lt 1159) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }
