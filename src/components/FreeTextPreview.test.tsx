@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
 import { AnnotationOverlay } from "./AnnotationOverlay";
 import type { PageMetrics } from "./AnnotationOverlay";
 import { FREE_TEXT_INSET_POINTS, FREE_TEXT_LEADING, FREE_TEXT_SIZE_POINTS } from "../state/geometry";
-import type { Annotation } from "../api/types";
+import type { Annotation, AnnotationKind } from "../api/types";
 import { EditorProvider } from "../state/EditorProvider";
 import { installFakeBackend, makeAnnotation } from "../test/tauri";
 
@@ -98,5 +98,68 @@ describe("free-text preview: draws at the size the file draws (A-11)", () => {
     expect(mark.style.width).toBe("400px");
     expect(mark.style.height).toBe("120px");
     unmount();
+  });
+});
+
+/**
+ * D12 in the overlay: only a callout carries `kind-callout`, which is the *only* rule in
+ * `App.css` that draws a resting frame on a free-text mark.
+ *
+ * This is the preview half of the same defect. Before D12 the writer framed every mode except the
+ * typewriter and `.kind-free-text` drew `border: 1px solid`, so the preview and the saved file
+ * agreed on a frame the user had not asked for. Removing the writer's frame without removing this
+ * one would have left the preview claiming an outline the file did not contain -- a different bug
+ * with the same symptom, which is why both halves are asserted rather than just the writer's.
+ */
+describe("free-text preview: only a callout is framed (D12)", () => {
+  function classesFor(kind: AnnotationKind): string {
+    const backend = installFakeBackend();
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+
+    const { container, unmount } = render(
+      <EditorProvider documentId="doc-1" page={0}>
+        <AnnotationOverlay
+          metrics={metricsAt(1)}
+          annotations={[
+            makeAnnotation({
+              id: `ft-${kind}`,
+              page: 0,
+              kind,
+              data: JSON.stringify({
+                v: 1,
+                rect: [0, 732, 200, 792],
+                color: "#000000",
+                // A callout without a target is refused by the writer rather than drawn as a
+                // box, so the fixture has to be a real callout for this to mean anything.
+                ...(kind === "callout" ? { callout: [400, 700] } : {}),
+              }),
+              text: "caption",
+            }),
+          ]}
+        />
+      </EditorProvider>,
+    );
+    const mark = container.querySelector(".kind-free-text") as HTMLElement | null;
+    expect(mark, `${kind} must render a free-text mark`).toBeTruthy();
+    const classes = mark!.className;
+    backend.teardown();
+    unmount();
+    return classes;
+  }
+
+  it("gives a text box no frame class, because the file has no frame", () => {
+    const classes = classesFor("textbox");
+    expect(classes).toContain("kind-free-text");
+    expect(classes).not.toContain("kind-callout");
+  });
+
+  it("keeps the frame class on a callout, whose leader line needs a box", () => {
+    expect(classesFor("callout")).toContain("kind-callout");
+  });
+
+  it("gives a typewriter no frame class either", () => {
+    expect(classesFor("typewriter")).not.toContain("kind-callout");
   });
 });

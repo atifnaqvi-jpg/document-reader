@@ -268,3 +268,43 @@ describe("the annotation draft is painted from the chosen colour", () => {
     unmount();
   });
 });
+
+describe("EditorPane: the save banner belongs to one document (D11)", () => {
+  it("does not carry a save from one document over to the next", async () => {
+    // Reported on the 1.4.0 hand-test: the user opened a document with no form, drew a text
+    // box, and the pane said "Saved to ... (edited 1).pdf" without any save having happened.
+    // Nothing was written -- placement is a row -- but the banner is a *claim about a file*,
+    // and it outlived the document it described because `EditorPane` is not keyed on `entry`
+    // and nothing cleared this state. A stale claim about a real file is worse than no claim:
+    // the user goes looking for a copy that this document never produced.
+    const backend = installFakeBackend();
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+    backend.on("next_save_path", () => "/books/a (edited 1).pdf");
+    backend.on("save_edits", () => "/books/a (edited 1).pdf");
+    open = backend;
+
+    const view = render(
+      <EditorProvider documentId="doc-1" page={0}>
+        <EditorPane entry={entry} currentPage={0} />
+      </EditorProvider>,
+    );
+
+    // Produce a genuine save on the first document.
+    await userEvent.click(screen.getByRole("button", { name: /Save edits/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /^Save$/ }));
+    expect(await screen.findByText(/Saved to/)).toBeInTheDocument();
+
+    // Switch to a second document. The banner describes the *first* one and must go.
+    const other: LibraryEntry = { ...entry, id: "doc-2", path: "/books/b.pdf", title: "B" };
+    view.rerender(
+      <EditorProvider documentId="doc-2" page={0}>
+        <EditorPane entry={other} currentPage={0} />
+      </EditorProvider>,
+    );
+
+    expect(screen.queryByText(/Saved to/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/a \(edited 1\)\.pdf/)).not.toBeInTheDocument();
+  });
+});

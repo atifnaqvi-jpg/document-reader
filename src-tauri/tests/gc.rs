@@ -1,8 +1,15 @@
 //! Edit-copy GC against the real filesystem (P2-D12).
 //!
-//! Kept out of the unit tests in `editor::gc` because this is the behaviour that deletes a
-//! file the user can see: the filename predicate can be perfectly correct while the wiring
-//! deletes too eagerly, and only a real directory shows that.
+//! Kept out of the unit tests in `editor::gc` because this is the behaviour that decides whether a
+//! file the user can see survives: the predicate can be perfectly correct while the wiring deletes
+//! too eagerly, and only a real directory shows that.
+//!
+//! **These tests were inverted on 2026-11-25.** They used to assert that the last annotation's
+//! removal *collects* the edit copy. The user overruled that: a saved PDF vanishing because the
+//! last annotation was removed is data loss from the user's point of view, however it is
+//! implemented. So each test now asserts the copy is still there after the delete -- the same
+//! fixtures, the same wiring, the opposite verdict. Keeping the old fixtures is the point: they
+//! are the exact situations in which the deletion used to fire.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,13 +80,19 @@ fn annotate(db: &Db, document_id: &str, page: u32) -> String {
 }
 
 #[test]
-fn collecting_removes_only_the_generated_edit_copy() {
+fn collecting_removes_nothing_at_all() {
     let (dir, original) = fixture();
 
     let removed = document_reader_lib::editor::gc::collect_edit_copies(&original).unwrap();
 
-    assert_eq!(removed.len(), 1, "exactly the generated copy: {removed:?}");
-    assert!(!dir.path().join("report (edited 1).pdf").exists());
+    assert!(
+        removed.is_empty(),
+        "the collector must not name a single file: {removed:?}"
+    );
+    assert!(
+        dir.path().join("report (edited 1).pdf").exists(),
+        "a saved edit copy is a document the user was told had been saved (P2-D12 ruling)"
+    );
     assert!(original.exists(), "the original must survive");
     assert!(
         dir.path().join("report (edited 1) final.pdf").exists(),
@@ -89,7 +102,7 @@ fn collecting_removes_only_the_generated_edit_copy() {
 }
 
 #[test]
-fn deleting_the_last_annotation_collects_the_edit_copy() {
+fn deleting_the_last_annotation_leaves_the_saved_copy_on_disk() {
     let (dir, original) = fixture();
     let db = Db::open_in_memory().unwrap();
     let document_id = register(&db, &original);
@@ -98,22 +111,28 @@ fn deleting_the_last_annotation_collects_the_edit_copy() {
     let second = annotate(&db, &document_id, 1);
     let copy = dir.path().join("report (edited 1).pdf");
 
-    // Deleting the first of two must not collect: the document is still annotated.
     document_reader_lib::commands::remove_annotation_and_gc(&db, &first).unwrap();
     assert!(copy.exists(), "an annotated document keeps its edit copy");
 
-    // The last one is what makes the copy stale.
+    // The case that used to delete. Removing the last mark is an edit to the annotation list; it
+    // is not an instruction to delete a document. The user may have renamed, copied or emailed
+    // this file since the save that created it.
     document_reader_lib::commands::remove_annotation_and_gc(&db, &second).unwrap();
     assert!(
-        !copy.exists(),
-        "the last annotation's removal collects the copy"
+        copy.exists(),
+        "removing the last annotation must not delete a file the user was told had been saved \
+         (P2-D12 ruling, 2026-11-25)"
+    );
+    assert!(
+        std::fs::read(&copy).expect("still readable") == b"%PDF-1.7\n",
+        "the surviving copy must be the bytes that were saved, not a truncated remnant"
     );
     assert!(original.exists(), "the original is never a GC candidate");
 }
 
 #[test]
 fn an_unknown_document_does_not_collect_anything() {
-    // The GC resolves the path through the DB, so a document with no row collects nothing
+    // The collector resolves the path through the DB, so a document with no row collects nothing
     // rather than falling back to a guess about which directory to sweep.
     let (dir, _original) = fixture();
     let db = Db::open_in_memory().unwrap();

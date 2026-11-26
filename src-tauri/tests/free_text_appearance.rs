@@ -221,3 +221,107 @@ fn the_text_stays_inside_its_own_box() {
         total_dark - inside.len()
     );
 }
+
+/// D12: a text box draws its text and **nothing else** — no frame.
+///
+/// Reported on the 1.4.0 hand-test: a text box left a thin outline around the caption in the
+/// saved file. The writer framed every mode except the typewriter, so the box the user asked
+/// for was not the box they got. Both `is_bordered` and this file's own docstring said so: the
+/// pixel tests above all use `FreeTextMode::Typewriter` precisely *because* it was the only
+/// frameless mode, which is how a frame around the shipping mode went unmeasured.
+///
+/// The discrimination is geometric, not "is there ink". A frame is a one-point rectangle on the
+/// box's own edge; text sits inside an inset. So the assertion is on the box's **border row**:
+/// a framed box darkens its first and last scanline, a frameless one leaves them clear.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn a_text_box_draws_no_frame_around_its_text() {
+    let rect = [72.0, 600.0, 272.0, 660.0];
+    let saved = apply_annotations(
+        &blank_page(),
+        &[free_text_mode(rect, "a caption", FreeTextMode::Textbox)],
+    )
+    .unwrap();
+    let (image, ink) = ink_inside(&saved, rect, 4.0, "textbox-frame");
+    assert!(!ink.is_empty(), "control: the caption itself must be drawn");
+
+    let scale = 4.0_f32;
+    let page_height = 792.0_f32;
+    // The rect's own edges, in image rows and columns. The frame is stroked *on* these lines,
+    // so a framed box has dark pixels here before any glyph is considered.
+    let top = ((page_height - rect[3]) * scale).floor() as u32;
+    let bottom = ((page_height - rect[1]) * scale).ceil() as u32;
+    let left = (rect[0] * scale).floor() as u32;
+    let right = (rect[2] * scale).ceil() as u32;
+
+    // Two rows in from each edge: a 1pt stroke at scale 4 is 4px wide, so 2px in is still on it,
+    // while the 2pt text inset (8px) is comfortably further in. Sampling the exact edge pixel
+    // would also catch the anti-aliased half of a stroke that is technically outside the box.
+    let probe_rows = [top + 2, bottom.saturating_sub(3)];
+    let probe_cols = [left + 2, right.saturating_sub(3)];
+
+    for row in probe_rows {
+        let dark: Vec<u32> = (left..right.min(image.width()))
+            .filter(|x| image.get_pixel(*x, row)[0] < 128)
+            .collect();
+        assert!(
+            dark.is_empty(),
+            "a text box must not draw a frame: row {row} of the box has {} dark pixel(s) at \
+             columns {dark:?}. A frame is the D12 defect — the text belongs, the outline does not.",
+            dark.len()
+        );
+    }
+    for col in probe_cols {
+        let dark: Vec<u32> = (top..bottom.min(image.height()))
+            .filter(|y| image.get_pixel(col, *y)[0] < 128)
+            .collect();
+        assert!(
+            dark.is_empty(),
+            "a text box must not draw a frame: column {col} of the box has {} dark pixel(s) at \
+             rows {dark:?} (D12)",
+            dark.len()
+        );
+    }
+}
+
+/// D12's other half: the **callout keeps its frame**, because its leader line points at the box.
+///
+/// Asserted so the fix is a narrowing rather than a deletion. Removing the frame from every mode
+/// would satisfy the test above and quietly break callouts, and no other test would notice.
+#[test]
+#[ignore = "requires a real PDFium library; `cargo test -- --include-ignored` after fetching it"]
+fn a_callout_still_draws_its_frame() {
+    let rect = [72.0, 560.0, 272.0, 620.0];
+    let mut row = free_text_mode(rect, "see above", FreeTextMode::Callout);
+    // A callout without a target is refused rather than written as a box, so it needs one.
+    row.data = format!(
+        r##"{{"v":1,"rect":[{},{},{},{}],"color":"#000000","callout":[400,700]}}"##,
+        rect[0], rect[1], rect[2], rect[3]
+    );
+
+    let saved = apply_annotations(&blank_page(), &[row]).unwrap();
+    let (image, _ink) = ink_inside(&saved, rect, 4.0, "callout-frame");
+
+    let scale = 4.0_f32;
+    let top = ((792.0_f32 - rect[3]) * scale).floor() as u32;
+    let left = (rect[0] * scale).floor() as u32;
+    let right = (rect[2] * scale).ceil() as u32;
+    // Scan a band rather than one row: a 1pt stroke is centred on the rect's edge, so half of
+    // it lies *outside* the box and the exact edge row can be antialiased. The widest row in
+    // the band is the stroke itself, which is what "the frame exists" means.
+    let band = top.saturating_sub(4)..=(top + 4);
+    let widest = band
+        .map(|row| {
+            (left..right.min(image.width()))
+                .filter(|x| image.get_pixel(*x, row)[0] < 128)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        widest > (right - left) as usize / 2,
+        "a callout must still draw its frame (D12 narrowed the rule, it did not delete it): \
+         the widest row across its top edge has only {widest} of {} dark pixels",
+        right - left
+    );
+}

@@ -603,17 +603,21 @@ pub fn remove_annotation_and_gc(db: &Db, annotation_id: &str) -> Result<String, 
 
     db.with_mut(|connection| annotations::remove(connection, annotation_id))?;
 
-    // P2-D12: the edit copy's reason to exist has just gone away.
+    // P2-D12: kept as a seam, not as a cleanup. Deleting a saved copy because the last
+    // annotation went away is data loss from the user's point of view, so the collector is a
+    // no-op by policy (see `editor::gc`). The call stays so the decision is visible here rather
+    // than being a silent absence a later reader would have to reconstruct.
     collect_edit_copies_if_unannotated(db, &document_id);
     Ok(document_id)
 }
 
-/// Resolves a document to its path and runs the P2-D12 edit-copy GC if it now has no
-/// annotations left.
+/// Resolves a document to its path and asks the P2-D12 collector whether anything may be
+/// removed. Today it may not: every `(edited N)` copy is a file the user was told had been
+/// saved, so the collector returns nothing and this is a no-op in practice.
 ///
 /// Consulted after the delete commits, because "the last annotation is gone" describes the
-/// new state, not the old. Best-effort: failing to tidy a stale copy must never turn a
-/// successful delete into an error the user sees.
+/// new state, not the old. Best-effort by construction, so a future scratch-space collector
+/// still cannot turn a successful delete into an error the user sees.
 pub fn collect_edit_copies_if_unannotated(db: &Db, document_id: &str) {
     let Ok(remaining) =
         db.with(|connection| annotations::count_for_document(connection, document_id))

@@ -57,41 +57,50 @@ fn read(relative: &str) -> String {
 
 /// `cargo test`, plain shape, on this machine (Linux, PDFium present, LEA fixture present).
 ///
+/// 2026-10-29: 1045 -> 1047, then 1047 -> 1046 when the edit-copy collector was retired (its
+/// filename-predicate unit test went with it; see `editor::gc`). Net +1. The D12 pixel guards are
+/// `#[ignore]`d, so they move [`PLAIN_IGNORED`] and [`INCLUDED_PASSED`] but not this number. The two are the D11 write-discipline guards in
+/// `tests/fillsign_save.rs` (`placing_a_text_box_leaves_the_original_bytes_and_mtime_alone` and
+/// `the_save_writes_exactly_one_sibling_and_still_leaves_the_original_alone`). Both are plain
+/// tests -- no PDFium -- so they run in every shape and on every platform.
+///
 /// 2026-11-24: 1042 -> 1045. The three are the D10 leak guards in `model::tests`
 /// (`every_kind_serialises_as_a_json_string`, `every_kind_round_trips_through_its_wire_name`,
 /// `an_unknown_wire_name_is_refused`). They are unit tests, so they run in both shapes and on
 /// both platforms, which is why every carrier below moved by the same three rather than by
 /// a platform-specific amount.
-pub const PLAIN_PASSED: usize = 1045;
+pub const PLAIN_PASSED: usize = 1046;
 /// `cargo test`, plain shape: tests that carry `#[ignore]`.
-pub const PLAIN_IGNORED: usize = 117;
+pub const PLAIN_IGNORED: usize = 119;
 /// `cargo test -- --include-ignored`: nothing may remain ignored.
-pub const INCLUDED_PASSED: usize = 1162;
+pub const INCLUDED_PASSED: usize = 1165;
 pub const INCLUDED_IGNORED: usize = 0;
 
 /// The Linux CI job runs without PDFium, so every gated test stays ignored. It asserts the ignored
 /// count exactly, because a test that silently stops being collected is the failure mode there.
-pub const CI_LINUX_IGNORED: usize = 117;
+pub const CI_LINUX_IGNORED: usize = 119;
 
 /// The Linux CI job's `passed` floor. This is a *floor*, not an equality, and it had drifted below
 /// the tree: it said 959 while the tree reports 1021, so 62 tests could stop being collected before
 /// CI noticed. Raised here to the measured value, which is what the file's own comment says the
 /// floor is for -- headroom is a floor that cannot fail.
-pub const CI_LINUX_PASSED_FLOOR: usize = 1045;
+pub const CI_LINUX_PASSED_FLOOR: usize = 1046;
 
 /// The shipping target's floor, measured on Windows (run 45267725552, 2026-11-23, SHA `ff28a0a`:
 /// `PDFium tests ran: 1156 passed, 0 ignored`).
 ///
-/// It is now three below [`INCLUDED_PASSED`] (1162 - 3 = 1159) and the difference is accounted
+/// It is now three below [`INCLUDED_PASSED`] (1165 - 3 = 1162) and the difference is accounted
 /// for, not absorbed: three tests are compiled out off Linux. The D10 leak guards are plain unit
 /// tests, so they exist on Windows too and the 2026-11-24 delta moved this floor from 1156 to
-/// 1159 -- the Windows figure is asserted on the next dispatch, not assumed.
+/// 1159; the 2026-10-29 D11 guards moved it again, to 1163, and retiring the edit-copy collector
+/// (P2-D12 ruling) removed one unit test, landing it at 1162. The Windows figure is asserted on
+/// the next dispatch, not assumed.
 /// `tests/signing_store.rs`'s `listing_refuses_off_windows_rather_than_reporting_an_empty_store` and
 /// `tests/signing_certificates.rs`'s `a_non_windows_build_refuses_the_certificate_store_instead_of_reporting_none`
 /// are `#[cfg(not(windows))]`, and `tests/embed_acceptance.rs`'s
-/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. 1162 - 3 = 1159. A floor
+/// `row1_the_embedded_subset_renders_through_poppler` is `#[cfg(unix)]`. 1165 - 3 = 1162. A floor
 /// that does not name that arithmetic is a floor nobody can check.
-pub const CI_WINDOWS_PASSED_FLOOR: usize = 1159;
+pub const CI_WINDOWS_PASSED_FLOOR: usize = 1162;
 
 // ---------------------------------------------------------------------------------------------
 // Parsing helpers. Each carrier is read as the artifact it is -- shell, YAML, Rust -- rather than

@@ -513,19 +513,27 @@ button:disabled {
   display: block;
 }
 
-/* A free-text box: the frame is the writer's, but the viewer draws it too so the mark is
-   visible and targetable while it is selected. Font size, leading and inset are NOT set
-   here: they are the writer's constants scaled by zoom, and are applied inline by
-   `AnnotationOverlay`. A fixed size in the stylesheet made the preview disagree with the
-   saved file at every zoom but 1. */
+/* A free-text box. Font size, leading and inset are NOT set here: they are the writer's
+   constants scaled by zoom, and are applied inline by `AnnotationOverlay`. A fixed size in the
+   stylesheet made the preview disagree with the saved file at every zoom but 1.
+
+   D12: no frame at rest. A text box is text only, so the resting overlay must not draw an
+   outline the saved file does not have -- the previous `border: 1px solid` promised a frame and
+   the writer drew one, so the preview and the file agreed on the wrong thing. The frame below is
+   a *selection* affordance, matching the writer's callout, and is the only reason to draw one. */
 .kind-free-text {
-  border: 1px solid;
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
   background: none;
   text-align: left;
   overflow: hidden;
+}
+
+/* A callout is framed in the file (its leader line needs a box to point at), so the overlay
+   frames it too rather than showing a different mark from the one that will be written. */
+.kind-free-text.kind-callout {
+  border: 1px solid;
 }
 
 .annotation-free-text {

@@ -50,10 +50,16 @@ pub fn it_value(mode: FreeTextMode) -> Option<&'static str> {
 
 /// Whether the mode draws a frame around its text.
 ///
-/// A typewriter's defining property is that it has no frame; a box without one is just text
-/// that happens to be wrapped.
+/// Only a callout is framed (D12). Its box is the anchor for a leader line, so the box has to be
+/// visible for the leader to point at something; without a frame the mark reads as a stray line
+/// ending in floating text.
+///
+/// A **text box is text only**. This used to be `!matches!(mode, Typewriter)`, which framed the
+/// text box as well, and the user saw a thin outline around their caption in the saved file
+/// (D12, 1.4.0 hand-test). The typewriter was already frameless, so the previous rule only ever
+/// distinguished the two modes that both should have been frameless.
 pub fn is_bordered(mode: FreeTextMode) -> bool {
-    !matches!(mode, FreeTextMode::Typewriter)
+    matches!(mode, FreeTextMode::Callout)
 }
 
 /// Builds the `/AP /N` stream for a free-text annotation.
@@ -543,10 +549,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_typewriter_has_no_frame() {
-        assert!(is_bordered(FreeTextMode::Textbox));
-        assert!(is_bordered(FreeTextMode::Callout));
+    fn only_the_callout_has_a_frame() {
+        // D12: the text box is text only. This assertion used to demand a frame for the
+        // text box, which is why the defect shipped with a green suite -- the test encoded
+        // the wrong requirement rather than merely failing to cover it.
+        assert!(!is_bordered(FreeTextMode::Textbox));
         assert!(!is_bordered(FreeTextMode::Typewriter));
+        assert!(is_bordered(FreeTextMode::Callout));
     }
 
     #[test]

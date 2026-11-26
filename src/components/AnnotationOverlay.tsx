@@ -663,9 +663,12 @@ function AnnotationMark({
     );
   }
 
-  // Free text draws its box and its text. The box is drawn even for a typewriter, whose
-  // writer emits no frame: the viewer still needs to show where the text sits while it is
-  // selected, or the mark cannot be targeted to edit.
+  // Free text draws its box and its text. Only a callout is framed -- in the file and here --
+  // because its leader line has to point at something. A text box is text only (D12), so its
+  // overlay carries no frame at rest either; drawing one taught the user to expect an outline
+  // the saved file would not have had, and before D12 the writer drew it, so preview and file
+  // agreed on the wrong result. The overlay keeps a hit area because a text box still has to be
+  // clickable to edit, which is what `kind-free-text`'s box is for.
   if (annotation.kind === "textbox" || annotation.kind === "callout" || annotation.kind === "typewriter") {
     const rect = (data as FreeTextData).rect;
     if (!rect) return null;
@@ -684,7 +687,9 @@ function AnnotationMark({
     return (
       <button
         type="button"
-        className={`${className} kind-free-text`}
+        className={`${className} kind-free-text${
+          annotation.kind === "callout" ? " kind-callout" : ""
+        }`}
         onClick={onSelect}
         title={annotation.text ?? undefined}
         aria-label={`${annotation.kind} annotation`}

@@ -146,21 +146,25 @@ jobs:
           foreach ($match in [regex]::Matches($output, "(\d+) passed")) {
             $passed += [int]$match.Groups[1].Value
           }
-          # The floor is 1159, measured on this target: run 45267725552 (2026-11-23, SHA
-          # ff28a0a) reported 1156, and 2026-11-24 added three unit guards for the D10 kind-leak
-          # (`model::tests::every_kind_serialises_as_a_json_string` and two siblings), so the
-          # measured count and the floor are both 1159. A test that stops being collected fails
-          # here.
+          # The floor is 1162, and it is the measured count rather than headroom: a test that
+          # stops being collected fails here. The path to it: run 45267725552 (2026-11-23, SHA
+          # ff28a0a) reported 1156; 2026-11-24 added three unit guards for the D10 kind-leak, so
+          # 1159; 2026-10-29 added four guards -- two PDFium-free D11 write-discipline guards in
+          # `tests/fillsign_save.rs` and the two D12 pixel guards in `tests/free_text_appearance.rs`
+          # (ignored everywhere PDFium is absent, but this job has it), so 1163; retiring the
+          # edit-copy collector under the
+          # 2026-11-25 P2-D12 ruling removed one unit test (its filename predicate had no other
+          # caller), so 1162.
           #
-          # It is three below the Linux --include-ignored count (1162) because three tests are
+          # It is three below the Linux --include-ignored count (1165) because three tests are
           # compiled out off Linux: two `cfg(not(windows))` certificate-store refusals and the
-          # `cfg(unix)` poppler render. 1162 - 3 = 1159. Held identical to
+          # `cfg(unix)` poppler render. 1165 - 3 = 1162. Held identical to
           # `tests/test_count_pins.rs` (CI_WINDOWS_PASSED_FLOOR), which fails on disagreement.
           #
           # This comment previously said "Measured at 1141" while the line below enforced 1154
           # -- a stale note above a raised floor, which reads as a floor nobody can check. A
           # guard in `tests/test_count_pins.rs` now holds this comment to the number.
-          if ($passed -lt 1159) {
+          if ($passed -lt 1162) {
             Write-Error "Only $passed tests ran; expected the full suite"
             exit 1
           }

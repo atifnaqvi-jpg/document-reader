@@ -208,3 +208,115 @@ fn a_second_save_writes_a_second_copy_rather_than_overwriting() {
         "both written files must exist"
     );
 }
+
+/// D11 in the user's own terms: after placing a text box, the original file's **bytes** are
+/// unchanged — and so is its **mtime**.
+///
+/// The existing test above asserts the *set of names* in the directory did not change, and that
+/// the bytes it re-read match the bytes it read before. That misses a write that rewrites the
+/// same bytes, which is exactly what an in-place "touch" or a re-save of identical content does:
+/// the name set is identical, the bytes are identical, and the user's file has still been
+/// written. `mtime` is the only cheap witness to that class of write, and it is the one the user
+/// checks when they say "it modified my file".
+///
+/// Reported on the 1.4.0 hand-test: placing a text box appeared to leave the annotation in the
+/// original. The code paths say placement is a database row and the writer is never called, so
+/// this test is here to *keep* it that way rather than to reproduce a bug that could not be
+/// found by reading — the guarantee is what ships, and it now has a guard on both witnesses.
+#[test]
+fn placing_a_text_box_leaves_the_original_bytes_and_mtime_alone() {
+    let (dir, path) = one_page_pdf("untouched.pdf");
+    let bytes_before = std::fs::read(&path).expect("read the original");
+    let mtime_before = std::fs::metadata(&path)
+        .expect("stat the original")
+        .modified()
+        .expect("the filesystem reports an mtime");
+
+    // A text box is a row plus a pure render call. The render is what a preview would do; it
+    // must not be able to reach the disk, which is why `apply_annotations` takes bytes and
+    // returns bytes with no path in its signature at all.
+    let row = freetext_row();
+    let _preview = apply_annotations(&bytes_before, &[row]).expect("the preview renders");
+
+    // Sleep past the filesystem's timestamp granularity before comparing: some filesystems
+    // report whole-second mtimes, and a write in the same second would compare equal and hide
+    // itself. 1.1s is longer than the worst granularity these filesystems use.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let _ = &dir;
+
+    assert_eq!(
+        std::fs::read(&path).expect("the original is still readable"),
+        bytes_before,
+        "placing a text box must not change the original's bytes (D11 / P2-D2)"
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("stat the original")
+            .modified()
+            .expect("the filesystem reports an mtime"),
+        mtime_before,
+        "placing a text box must not even touch the original's mtime: a rewrite of identical \
+         bytes passes a name-count check and a byte comparison, and is still a write the user \
+         never asked for (D11)"
+    );
+    assert_eq!(
+        files_in(dir.path()),
+        vec!["untouched.pdf".to_string()],
+        "placing a text box must not create a file either"
+    );
+}
+
+/// The save, and only the save, writes exactly one sibling — asserted on the same directory the
+/// placement test watches, so the two halves are one story about one folder.
+#[test]
+fn the_save_writes_exactly_one_sibling_and_still_leaves_the_original_alone() {
+    let (dir, path) = one_page_pdf("placed.pdf");
+    let bytes_before = std::fs::read(&path).expect("read the original");
+    let mtime_before = std::fs::metadata(&path)
+        .expect("stat the original")
+        .modified()
+        .expect("an mtime");
+
+    let saved = apply_annotations(&bytes_before, &[freetext_row()]).expect("the save succeeds");
+    let target = next_edited_path(&path, |candidate| candidate.exists()).expect("a name");
+    std::fs::write(&target, &saved).expect("write the sibling");
+
+    assert_eq!(
+        files_in(dir.path()),
+        vec![
+            "placed (edited 1).pdf".to_string(),
+            "placed.pdf".to_string()
+        ],
+        "one save, one sibling, and the original still beside it (P2-D2)"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the original is still readable"),
+        bytes_before,
+        "the save writes the sibling; it must never rewrite the original"
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("stat the original")
+            .modified()
+            .expect("an mtime"),
+        mtime_before,
+        "the save must not touch the original's mtime"
+    );
+    assert!(
+        !saved.is_empty(),
+        "the sibling must actually contain a document, not be a zero-byte placeholder"
+    );
+}
+
+fn freetext_row() -> Annotation {
+    Annotation {
+        id: "ft-1".to_string(),
+        document_id: "doc-1".to_string(),
+        page: 0,
+        kind: AnnotationKind::FreeText(document_reader_lib::model::FreeTextMode::Textbox),
+        data: r##"{"v":1,"rect":[72,600,272,660],"color":"#000000"}"##.to_string(),
+        text: Some("a caption".to_string()),
+        created_at: 0,
+        modified_at: 0,
+    }
+}

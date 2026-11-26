@@ -326,6 +326,9 @@ fi
 # of this phase, plus `an_overlay_never_improves_a_signed_documents_badge`, which replaced the
 # blocked "badge unchanged" row after the ruling and needs no library. Measured, not computed:
 # `cargo test` reported 1040/117 and `-- --include-ignored` 1157/0.
+# 2026-10-29 (D11 write discipline): 1045/117 -> 1046/119 and 1162/0 -> 1165/0. Two plain
+# guards in `fillsign_save.rs` (bytes+mtime on placement, one sibling on save) added two, and
+# retiring the edit-copy collector removed one unit test (P2-D12 ruling): net +1.
 # 2026-11-24 (D10 kind-leak fix): 1042/117 -> 1045/117 and 1159/0 -> 1162/0. Three unit guards
 # arrived in `model::tests` for the serde wire shape, and unit tests run everywhere, so the Windows
 # floor moved 1156 -> 1159 by the same three. To be asserted on the dispatch, not assumed.
@@ -336,9 +339,9 @@ fi
 # floor states the number that floor enforces. Both read files, so neither needs PDFium and the
 # ignored count does not move. Measured, not computed: `cargo test` reported 1042/117 and
 # `-- --include-ignored` 1159/0.
-PIN_PLAIN_PASSED=1045
-PIN_PLAIN_IGNORED=117
-PIN_IGNORED_PASSED=1162
+PIN_PLAIN_PASSED=1046
+PIN_PLAIN_IGNORED=119
+PIN_IGNORED_PASSED=1165
 PIN_IGNORED_IGNORED=0
 
 # Run one cargo test shape, print its counts, and assert them against a pin. Prints the counts

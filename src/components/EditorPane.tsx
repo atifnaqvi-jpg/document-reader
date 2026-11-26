@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   addWatermark,
   deletePages,
@@ -107,6 +107,18 @@ export function EditorPane({
   const [watermark, setWatermark] = useState("");
 
   if (!entry) return null;
+  // D11: the status banner is a claim about *one file*. It stops being true when the user
+  // switches document, and `EditorPane` is not keyed on the entry, so this state used to
+  // survive the switch -- an old path kept hanging over a new document and read as "the box
+  // you just drew was saved" when nothing had been written (1.4.0 hand-test). Clearing on the
+  // document's identity is the narrowest correct bound: an annotation edit on the *same*
+  // document leaves the banner alone, because there it is still true.
+  useEffect(() => {
+    setSavedPath(null);
+    setSaveError(null);
+    setPendingPath(null);
+    setPendingOverwrite(false);
+  }, [entry.id]);
 
   /**
    * Shows the filename before writing it (D2).
