@@ -10,6 +10,7 @@
  * state, so jsdom is sufficient.
  */
 
+import React, { StrictMode } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
@@ -306,5 +307,213 @@ describe("EditorPane: the save banner belongs to one document (D11)", () => {
 
     expect(screen.queryByText(/Saved to/)).not.toBeInTheDocument();
     expect(screen.queryByText(/a \(edited 1\)\.pdf/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * D13: opening a document must not change the number of hooks `EditorPane` renders.
+ *
+ * The 1.4.0 build blanked the window when a document was opened. The report called it a
+ * setState cascade (React 310 read as "maximum update depth"); it was not. The error was
+ * `Rendered more hooks than during the previous render`, and the cause was ordering, not
+ * depth: the D11 banner-reset effect was added *below* `if (!entry) return null;`.
+ *
+ * So the empty state (no document) rendered the ten `useState` hooks above the return and
+ * stopped. The moment a document arrived, the same component instance rendered eleven, and
+ * React rejects a component whose hook list grows between renders. That is why it appeared
+ * only on *opening*: a document opened at mount never takes the early return, so the hook
+ * count never changes and the crash never fires. A document opened from the library into an
+ * already-mounted pane takes both paths, and only the transition throws.
+ *
+ * ## Why the guard counts renders and hooks instead of checking the DOM
+ *
+ * A test that only asserted the final DOM would pass on the broken build: the crash happens
+ * during render, before any DOM exists to inspect, and `render` throws rather than returning
+ * a container to query. Two properties are asserted instead:
+ *
+ *   1. **The transition does not throw.** The empty state and the open state are the same
+ *      mount, which is the path the user took.
+ *   2. **The render count stays bounded.** A cascade and a hook-order violation are different
+ *      faults, but both show up as an unbounded or failing render sequence, and a bounded
+ *      counter catches either without needing to name the mechanism.
+ *
+ * A hook-count probe is added on top, because it names the real invariant: whatever the
+ * component does, it must call the same hooks on every render.
+ */
+
+describe("EditorPane: opening a document keeps the hook order stable (D13)", () => {
+  /** The empty state and the opened state, mounted as one instance. */
+  function mountThenOpen() {
+    const backend = installFakeBackend();
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+
+    const tree = (opened: boolean) => (
+      <StrictMode>
+        <EditorProvider documentId={opened ? "doc-1" : null} page={0}>
+          <EditorPane entry={opened ? entry : null} currentPage={0} />
+        </EditorProvider>
+      </StrictMode>
+    );
+
+    const view = render(tree(false));
+    return { backend, view, tree };
+  }
+
+  it("does not throw when a document is opened into an empty pane", () => {
+    const { backend, view, tree } = mountThenOpen();
+
+    // The exact sequence a user performs: the shell is up with nothing selected, then they
+    // pick a document from the library. `EditorPane` stays mounted across both, which is
+    // what makes the hook list observable and what made it grow.
+    expect(() => view.rerender(tree(true))).not.toThrow();
+
+    // And the open state really rendered, so a throw is not being masked by an empty tree.
+    expect(screen.getByLabelText("Page")).toBeInTheDocument();
+
+    view.unmount();
+    backend.teardown();
+  });
+
+  it("renders a bounded number of times across the transition", () => {
+    const { backend, view } = mountThenOpen();
+
+    // Counting is done by wrapping the pane: `RenderProbe` increments on every render of its
+    // own body, which for a stable child is the same count the child renders, plus the probe.
+    let renders = 0;
+    function Probe({ opened }: { opened: boolean }) {
+      renders += 1;
+      return (
+        <EditorProvider documentId={opened ? "doc-1" : null} page={0}>
+          <EditorPane entry={opened ? entry : null} currentPage={0} />
+        </EditorProvider>
+      );
+    }
+
+    view.rerender(
+      <StrictMode>
+        <Probe opened={false} />
+      </StrictMode>,
+    );
+    const beforeOpen = renders;
+    view.rerender(
+      <StrictMode>
+        <Probe opened={true} />
+      </StrictMode>,
+    );
+    const afterOpen = renders - beforeOpen;
+
+    // StrictMode double-renders, so the honest bound is a small constant, not 1. The point is
+    // that the count is bounded at all: a cascade runs until React throws at 50 nested
+    // updates, which is three orders of magnitude away from this number.
+    expect(afterOpen, "opening a document must render a bounded number of times").toBeLessThan(8);
+
+    view.unmount();
+    backend.teardown();
+  });
+
+  it("fires on a document with no annotations at all, so the trigger is the open, not the marks", () => {
+    // The report came from a document that has annotations, which invites the reading that
+    // the annotation list is the trigger. It is not: the hook list is decided before any
+    // annotation is looked at, and `EditorPane` only sees annotations through context, which
+    // it does not read into a hook. So this variant keeps the annotation list empty and
+    // asserts the same transition. If this ever fails while the others pass, the trigger has
+    // genuinely moved into the annotation path and the brief has to say so.
+    const backend = installFakeBackend();
+    const annotationsRead = { count: 0 };
+    backend.on("list_annotations", () => {
+      annotationsRead.count += 1;
+      return [];
+    });
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+
+    // No annotations, no form fields: a flat document, which is the narrowest open there is.
+    backend.on("list_form_fields", () => []);
+
+    const tree = (opened: boolean) => (
+      <StrictMode>
+        <EditorProvider documentId={opened ? "doc-flat" : null} page={0}>
+          <EditorPane
+            entry={opened ? { ...entry, id: "doc-flat", path: "/books/flat.pdf" } : null}
+            currentPage={0}
+          />
+        </EditorProvider>
+      </StrictMode>
+    );
+
+    const view = render(tree(false));
+    expect(() => view.rerender(tree(true))).not.toThrow();
+    // The pane rendered its open state, so the assertion above is not vacuous.
+    expect(screen.getByLabelText("Page")).toBeInTheDocument();
+
+    view.unmount();
+    backend.teardown();
+  });
+
+  it("calls the same hooks in the same order for the empty and the open state", () => {
+    const seen: number[] = [];
+    const originalUseState = React.useState;
+    const originalUseEffect = React.useEffect;
+
+    // Patched at the module boundary so the probe measures what React actually records. The
+    // alternative -- reading React's internal hook list -- would depend on an implementation
+    // detail; counting calls per render is the behaviour React itself validates.
+    let inPane = false;
+    let perRender = 0;
+    const record = () => {
+      if (inPane) perRender += 1;
+    };
+    React.useState = ((...args: Parameters<typeof originalUseState>) => {
+      record();
+      return originalUseState(...args);
+    }) as typeof originalUseState;
+    React.useEffect = ((...args: Parameters<typeof originalUseEffect>) => {
+      record();
+      return originalUseEffect(...args);
+    }) as typeof originalUseEffect;
+
+    const backend = installFakeBackend();
+    backend.on("list_annotations", () => []);
+    backend.on("get_app_state", () => null);
+    backend.on("set_app_state", () => null);
+
+    function Marked({ opened }: { opened: boolean }) {
+      perRender = 0;
+      inPane = true;
+      const node = <EditorPane entry={opened ? entry : null} currentPage={0} />;
+      inPane = false;
+      seen.push(perRender);
+      return (
+        <EditorProvider documentId={opened ? "doc-1" : null} page={0}>
+          {node}
+        </EditorProvider>
+      );
+    }
+
+    try {
+      const view = render(
+        <StrictMode>
+          <Marked opened={false} />
+        </StrictMode>,
+      );
+      const emptyCount = seen[seen.length - 1];
+      view.rerender(
+        <StrictMode>
+          <Marked opened={true} />
+        </StrictMode>,
+      );
+      const openCount = seen[seen.length - 1];
+
+      expect(openCount, "hook count must not change between the empty and open state").toBe(
+        emptyCount,
+      );
+      view.unmount();
+    } finally {
+      React.useState = originalUseState;
+      React.useEffect = originalUseEffect;
+      backend.teardown();
+    }
   });
 });

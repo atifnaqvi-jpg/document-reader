@@ -25,11 +25,12 @@
  * substitute for the boundary printing a real stack in the field.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import App from "./App";
 import { Root } from "./root";
 import { installFakeBackend, type FakeBackend } from "./test/tauri";
+import type { LibraryEntry } from "./api/types";
 
 let backend: FakeBackend | null = null;
 
@@ -87,5 +88,88 @@ describe("App", () => {
     // The boundary's panel must be absent: it only appears on a throw. Identified by its own
     // id, not by `role="alert"` -- the app's error banner carries that role too.
     expect(screen.queryByTestId("render-error-panel")).toBeNull();
+  });
+});
+
+/**
+ * D13: opening a document from the library must not blank the window. This is the whole of
+ * the 1.4.0 blocker, exercised through the tree the user's window actually mounts.
+ *
+ * ## What this reproduces that the pane-level guard cannot
+ *
+ * The pane-level tests in `EditorPane.test.tsx` drive the null-to-document transition directly.
+ * This one goes through `Root` (StrictMode, boundary, providers, library, viewer) and *clicks a
+ * library row*, which is the user's own gesture. It matters because the click is what makes
+ * `App` hand a real entry down while the pane is already mounted in its empty state -- and
+ * because a throw here would be caught by the boundary, turning a crash into a rendered error
+ * panel rather than a test failure. Asserting the panel is absent is therefore the assertion
+ * that the open path did not throw.
+ *
+ * ## Two documents, neither with annotations
+ *
+ * The report first came from one document, then from a second with different content, which
+ * ruled out "the annotation list is the trigger". Both cases are mounted here with an empty
+ * annotation list, so the test states the narrowed claim directly: the fault is in the
+ * document-open path every PDF shares, not in data that only some documents have.
+ */
+
+describe("App: opening any document does not blank the window (D13)", () => {
+  const pdf = (id: string, title: string): LibraryEntry => ({
+    id,
+    title,
+    author: null,
+    pages: 3,
+    format: "pdf",
+    path: `/books/${id}.pdf`,
+    missing: false,
+    addedAt: 1,
+    lastOpenedAt: 2,
+    encrypted: false,
+  });
+
+  /** A mounted shell whose library holds two flat PDFs, and no annotations anywhere. */
+  function shellWithTwoDocuments(): FakeBackend {
+    const fake = installFakeBackend();
+    fake.on("list_library", () => [pdf("lea", "LEA"), pdf("maastricht", "Maastricht")]);
+    fake.on("get_app_state", () => null);
+    fake.on("set_app_state", () => null);
+    fake.on("plugin:window|is_fullscreen", () => false);
+    // Every document-open read the viewer and provider perform on mount.
+    fake.on("list_annotations", () => []);
+    fake.on("list_form_fields", () => []);
+    fake.on("get_document_page_count", () => 3);
+    fake.on("get_document_page_render", () => ({
+      page: 0,
+      width: 612,
+      height: 792,
+      pngBase64: "",
+    }));
+    return fake;
+  }
+
+  it.each([
+    ["the first document", "LEA"],
+    ["a second document with different content", "Maastricht"],
+  ])("opens %s without a render error", async (_label, title) => {
+    backend = shellWithTwoDocuments();
+
+    render(<Root />);
+
+    // The row exists, so the click below is a real library interaction and not a no-op.
+    const row = await screen.findByText(title);
+
+    // `fireEvent` rather than `userEvent`: the throw happens synchronously during the state
+    // update the click schedules, and a synchronous dispatch keeps the failure attributed to
+    // this call rather than to whichever await settles next.
+    fireEvent.click(row);
+
+    // The boundary only renders its panel on a throw. Its absence is the assertion that the
+    // open path did not blow up -- and it is checked by test id, because the app's own error
+    // banner also carries `role="alert"`.
+    await waitFor(() => expect(screen.queryByTestId("render-error-panel")).toBeNull());
+
+    // ...and the reason: the document really opened. Without this the assertion above would
+    // pass on a shell that never changed state at all.
+    await waitFor(() => expect(screen.getByLabelText("Page")).toBeInTheDocument());
   });
 });

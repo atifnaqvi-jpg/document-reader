@@ -106,19 +106,28 @@ export function EditorPane({
   const pageOneBased = pageOverride ?? currentPage + 1;
   const [watermark, setWatermark] = useState("");
 
-  if (!entry) return null;
   // D11: the status banner is a claim about *one file*. It stops being true when the user
   // switches document, and `EditorPane` is not keyed on the entry, so this state used to
   // survive the switch -- an old path kept hanging over a new document and read as "the box
   // you just drew was saved" when nothing had been written (1.4.0 hand-test). Clearing on the
   // document's identity is the narrowest correct bound: an annotation edit on the *same*
   // document leaves the banner alone, because there it is still true.
+  //
+  // This effect sits ABOVE the `!entry` return, and must stay there (D13). Below it, the
+  // empty state rendered ten hooks and stopped, the open state rendered eleven, and React
+  // refused the component with `Rendered more hooks than during the previous render` -- a
+  // blank window on the one action the user took. Every hook in a component has to run on
+  // every render regardless of which branch the render will take; that is what makes the
+  // hook list a stable list rather than a function of state.
+  const entryId = entry?.id ?? null;
   useEffect(() => {
     setSavedPath(null);
     setSaveError(null);
     setPendingPath(null);
     setPendingOverwrite(false);
-  }, [entry.id]);
+  }, [entryId]);
+
+  if (!entry) return null;
 
   /**
    * Shows the filename before writing it (D2).
