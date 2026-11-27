@@ -1348,3 +1348,58 @@ button:disabled {
   margin: 8px 0 0;
   color: #b3261e;
 }
+
+/* D14: the row is a flex container so the remove control sits beside the title button rather
+   than inside it. `min-width: 0` on the select button is what stops a long title from pushing
+   the remove control out of the row. */
+.library-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.library-row .library-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Deliberately quiet until the row is hovered or the control is focused: removing a document
+   is not an action to invite, and a permanently visible destructive control next to every row
+   would be easy to hit while selecting. It stays hit-reachable at all times, so it is never
+   the case that a keyboard or touch user cannot get to it -- only that it does not shout. */
+.library-remove {
+  flex: 0 0 auto;
+  width: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted, #8a8a8a);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.library-row:hover .library-remove,
+.library-remove:focus-visible {
+  opacity: 1;
+}
+
+.library-remove:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: inherit;
+}
+
+/* Touch and keyboard-only environments never hover, so the control cannot depend on it. */
+@media (hover: none) {
+  .library-remove {
+    opacity: 1;
+  }
+}
+
+.forget-path {
+  font-size: 12px;
+  word-break: break-all;
+}

@@ -62,6 +62,15 @@ export const openDocument = (path: string, password?: string) =>
 
 export const listLibrary = () => invoke<LibraryEntry[]>("list_library");
 
+/**
+ * Removes a document from the library. **The file on disk is never touched** (D14).
+ *
+ * Resolves with the forgotten document's id and path, or `null` when there was nothing to
+ * forget -- a repeated click is not an error, so the UI does not have to special-case it.
+ */
+export const forgetDocument = (documentId: string) =>
+  invoke<{ id: string; path: string } | null>("forget_document", { documentId });
+
 export const search = (query: string, limit: number) =>
   invoke<SearchHit[]>("search", { query, limit });
 

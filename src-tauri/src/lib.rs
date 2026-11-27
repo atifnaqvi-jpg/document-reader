@@ -59,6 +59,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::open_document,
             commands::list_library,
+            commands::forget_document,
             commands::search,
             commands::add_bookmark,
             commands::list_bookmarks,

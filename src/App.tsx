@@ -3,7 +3,7 @@ import "./App.css";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { listLibrary, openDocument, toAppError } from "./api/invoke";
+import { forgetDocument, listLibrary, openDocument, toAppError } from "./api/invoke";
 import type { AppError, LibraryEntry } from "./api/types";
 import { CommentPane } from "./components/CommentPane";
 import { RedactPanel } from "./components/RedactPanel";
@@ -129,6 +129,40 @@ function Workspace() {
     setSelected(entry);
   }, []);
 
+  /**
+   * Removes a document from the library (D14). **The file is never touched.**
+   *
+   * Ordered deliberately:
+   *
+   * 1. Clear the selection *first, and only if it is the document being removed*. The viewer
+   *    and every pane below it read `selected`, so this is what returns the app to the empty
+   *    state. Doing it before the await means the heavy panes are already unmounted when the
+   *    backend work lands, rather than re-rendering against a row that is about to vanish.
+   *    Removing a *different* document must not disturb what the user is reading, so the id is
+   *    compared rather than clearing unconditionally.
+   * 2. `setJump(null)` in the same step, because a pending page jump targets a page of a
+   *    document the viewer no longer has; leaving it would fire against the empty state.
+   * 3. Only then call the backend, and refresh the list from its answer.
+   *
+   * If the backend fails, the selection is *not* restored: the row is still there and the
+   * refresh puts it back in the list, so the user can retry. Re-selecting it for them would
+   * reopen a document they asked to close.
+   */
+  const handleForget = useCallback(
+    async (entry: LibraryEntry) => {
+      setJump(null);
+      setSelected((current) => (current?.id === entry.id ? null : current));
+      try {
+        await forgetDocument(entry.id);
+      } finally {
+        // Always re-read the library: on success the row is gone, and on failure the list must
+        // not be left claiming a removal that did not happen.
+        await refreshLibrary();
+      }
+    },
+    [refreshLibrary],
+  );
+
   // A search hit selects a document and asks the viewer for a page. The nonce must change
   // even when the page does not, so clicking the same hit twice re-navigates.
   const handleOpenHit = useCallback(
@@ -210,6 +244,7 @@ function Workspace() {
             entries={entries}
             selectedId={selected?.id ?? null}
             onSelect={handleSelect}
+            onForget={handleForget}
           />
         </aside>
         <aside className="search-sidebar">

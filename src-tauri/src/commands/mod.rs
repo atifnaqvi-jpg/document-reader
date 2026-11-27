@@ -141,6 +141,66 @@ pub fn list_library(db: State<'_, Db>) -> Result<Vec<LibraryEntry>, AppError> {
     db.with(library::list_library)
 }
 
+/// What a successful removal reports back.
+///
+/// `path` is returned so the caller can name the file it just stopped tracking without
+/// having to hold a row that no longer exists. It is *informational*: nothing here reads,
+/// writes or deletes that path.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ForgotDocument {
+    pub id: String,
+    pub path: String,
+}
+
+/// Removes a document from the library. **The file is never touched** (D14).
+///
+/// The user's ruling: "remove from library" means *forget*, not *delete*. This command and
+/// [`library::forget`] therefore issue no filesystem mutation of any kind -- not a delete, a
+/// move, a rewrite, or an mtime change. The document is detached (row, index rows, per-document
+/// index state, cached password) and the file stays exactly as it was, so opening it again
+/// re-imports it as a fresh entry.
+///
+/// Trust anchors are *not* removed. They are keyed by certificate DER rather than by document,
+/// and they record a decision the user made about a certificate, not about this file --
+/// un-trusting every document signed by a CA because one PDF was forgotten would be a much
+/// larger action than the user asked for.
+///
+/// Deliberately tolerant of a missing file: `library::forget` never stats the path, so a row
+/// whose file has been moved or deleted -- the main reason a user wants this at all -- is
+/// removable like any other.
+#[tauri::command]
+pub fn forget_document(
+    db: State<'_, Db>,
+    passwords: State<'_, Arc<PasswordStore>>,
+    service: State<'_, Arc<RenderService>>,
+    index_service: State<'_, Arc<IndexService>>,
+    document_id: String,
+) -> Result<Option<ForgotDocument>, AppError> {
+    let forgotten = db.with(|connection| library::forget(connection, &document_id))?;
+
+    let Some(forgotten) = forgotten else {
+        // Already gone. A second click is not a fault, and reporting an error would make the
+        // UI show a failure for an action that achieved exactly what was asked.
+        return Ok(None);
+    };
+
+    // Everything below is in-memory state keyed to a document that no longer exists. All of it
+    // must go, or the app keeps a handle open on a file it claims to have forgotten.
+    //
+    // `forget_document` drops the raster cache and the open handle by path; the in-flight
+    // index claim is invalidated so a run that is still extracting abandons the rest instead
+    // of writing rows for a document the library no longer has. The password is keyed by
+    // path, which is why `library::forget` captured the path before deleting the row.
+    service.forget_document(&forgotten.id, Path::new(&forgotten.path));
+    index_service.invalidate(&forgotten.id);
+    passwords.forget(&forgotten.path);
+
+    Ok(Some(ForgotDocument {
+        id: forgotten.id,
+        path: forgotten.path,
+    }))
+}
+
 #[tauri::command]
 pub fn search(db: State<'_, Db>, query: String, limit: u32) -> Result<Vec<SearchHit>, AppError> {
     db.with(|connection| search::query(connection, &query, limit))
