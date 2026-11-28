@@ -240,7 +240,8 @@ export const styleKey = (tool: AnnotationKind) => `annotation.style.${tool}`;
  * Defaults for every tool the enum names (D-A4). Total by type, so adding a kind without a
  * default is a compile error rather than an `undefined` reaching the style picker.
  */
-const DEFAULT_STYLES: Record<AnnotationKind, ToolStyle> = {
+/** Exported so a guard can prove the palette offers every colour a tool actually draws in (D15). */
+export const DEFAULT_STYLES: Record<AnnotationKind, ToolStyle> = {
   highlight: { color: "#fff3b0", opacity: 0.4 },
   underline: { color: "#1f6feb", opacity: 1 },
   strikeout: { color: "#d1242f", opacity: 1 },

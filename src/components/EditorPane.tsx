@@ -45,8 +45,21 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
  * Named, because the label is what the user reads. A raw `#fff3b0` in a native Windows `<select>` is
  * a hex string, not a colour: the closed control shows only that text, so the palette read as six
  * codes nobody could choose between. `value` stays the hex, which is what the annotation dict stores.
+ *
+ * Black comes first and matters most (D15): filling in a form is the job for which the text tools
+ * exist, and form text is black. Its value is the same near-black `DEFAULT_STYLES` gives
+ * `textbox`, `callout` and `typewriter`, and a guard asserts the two stay equal -- before this,
+ * the picker held no option matching the default, so the control displayed a value it could not
+ * offer and the user could not get back to the colour the tool actually drew in.
+ *
+ * The pastels stay. Highlighting and form-filling are different jobs and both are wanted; adding
+ * black must not cost the palette its highlighter.
  */
-const COLOURS: { value: string; label: string }[] = [
+const DEFAULT_TEXT_COLOUR = "#111418";
+
+/** The palette itself, exported so a guard can compare it with `DEFAULT_STYLES` (D15). */
+export const COLOURS: { value: string; label: string }[] = [
+  { value: DEFAULT_TEXT_COLOUR, label: "Black" },
   { value: "#fff3b0", label: "Yellow" },
   { value: "#a8e6a1", label: "Green" },
   { value: "#9fd8ff", label: "Blue" },
@@ -54,6 +67,25 @@ const COLOURS: { value: string; label: string }[] = [
   { value: "#f5a623", label: "Orange" },
   { value: "#d1242f", label: "Red" },
 ];
+
+/**
+ * The colours to render for `current`, which is not necessarily in `COLOURS`.
+ *
+ * A colour can come from somewhere other than this list: a style persisted by an older build, or
+ * a value written by hand into the app state. A `<select>` whose `value` matches no `<option>`
+ * does not render an empty box -- it shows a *different* option than the one in force, or none,
+ * so the user reads a colour the tool will not draw in. Rather than fall back (which would change
+ * what is drawn to match a lie), the unknown colour is appended and labelled by its own hex, so
+ * the control always displays exactly the value that will be used.
+ */
+export function colourOptions(current: string): { value: string; label: string }[] {
+  const known =
+    current !== "" &&
+    COLOURS.some((colour) => colour.value.toLowerCase() === current.toLowerCase());
+  if (known) return COLOURS;
+  return [...COLOURS, { value: current, label: current }];
+}
+
 
 export function EditorPane({
   entry,
@@ -241,7 +273,7 @@ export function EditorPane({
               value={style.color}
               onChange={(event) => setStyle({ ...style, color: event.target.value })}
             >
-              {COLOURS.map((colour) => (
+              {colourOptions(style.color).map((colour) => (
                 <option key={colour.value} value={colour.value}>
                   {colour.label}
                 </option>
