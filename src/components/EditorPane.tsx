@@ -40,6 +40,30 @@ const TOOLS: { kind: AnnotationKind; label: string; hint: string }[] = [
 ];
 
 /**
+ * The tools whose stored blob actually carries `opacity` (D16).
+ *
+ * These four are the *sweep* tools and they share one blob shape, `HighlightData`, which has the
+ * field and whose commit writes `style.opacity` into it. `annotate.rs` groups the same four
+ * together and passes the value to `annotation_dictionary`, which sets `/CA` on the annotation
+ * dictionary -- so the number reaches the file, not just the database.
+ *
+ * Every other kind is different: `commitFreeText` and the rect/oval branch build
+ * `{ v, rect, color }` with no opacity at all, and the backend hardcodes `1.0` for rect and note.
+ * For those the slider moved and changed nothing -- the same class of lie as a stale save banner.
+ *
+ * Listed explicitly rather than derived as "everything except the others": adding a kind must not
+ * silently inherit a live slider. Text transparency is its own unit, not a side effect of this
+ * one: it needs the field, a commit that carries it, and an `/ca` in the appearance stream that
+ * the preview matches.
+ */
+const STORES_OPACITY: AnnotationKind[] = ["highlight", "underline", "strikeout", "squiggly"];
+
+/** Whether the opacity control applies to `kind`. Exported so a guard names the kinds (D16). */
+export function storesOpacity(kind: AnnotationKind | null): boolean {
+  return kind !== null && STORES_OPACITY.includes(kind);
+}
+
+/**
  * Colours offered per tool; a full picker would be its own change, not a P2 need.
  *
  * Named, because the label is what the user reads. A raw `#fff3b0` in a native Windows `<select>` is
@@ -280,17 +304,21 @@ export function EditorPane({
               ))}
             </select>
           </label>
-          <label>
-            Opacity
-            <input
-              type="range"
-              min={0.1}
-              max={1}
-              step={0.1}
-              value={style.opacity}
-              onChange={(event) => setStyle({ ...style, opacity: Number(event.target.value) })}
-            />
-          </label>
+          {/* D16: only rendered where the stored blob has the field. A slider that moves and
+              changes nothing is worse than no slider -- see STORES_OPACITY. */}
+          {storesOpacity(activeTool) ? (
+            <label>
+              Opacity
+              <input
+                type="range"
+                min={0.1}
+                max={1}
+                step={0.1}
+                value={style.opacity}
+                onChange={(event) => setStyle({ ...style, opacity: Number(event.target.value) })}
+              />
+            </label>
+          ) : null}
         </div>
       ) : null}
 
